@@ -7,4 +7,4 @@ publish = false
 
 [dependencies]
 libc = "0.2"
-solana_rbpf = { path = "../" }
+solana-sbpf = { path = "../" }

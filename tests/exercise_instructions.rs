@@ -8,12 +8,12 @@
 
 extern crate byteorder;
 extern crate libc;
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test_utils;
 extern crate thiserror;
 
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
-use solana_rbpf::{
+use solana_sbpf::{
     assembler::assemble,
     ebpf,
     memory_region::MemoryRegion,

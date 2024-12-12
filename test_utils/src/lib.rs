@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use solana_rbpf::{
+use solana_sbpf::{
     aligned_memory::AlignedMemory,
     ebpf::{self, HOST_ALIGN},
     elf::Executable,
@@ -194,10 +194,10 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
 #[macro_export]
 macro_rules! create_vm {
     ($vm_name:ident, $verified_executable:expr, $context_object:expr, $stack:ident, $heap:ident, $additional_regions:expr, $cow_cb:expr) => {
-        let mut $stack = solana_rbpf::aligned_memory::AlignedMemory::zero_filled(
+        let mut $stack = solana_sbpf::aligned_memory::AlignedMemory::zero_filled(
             $verified_executable.get_config().stack_size(),
         );
-        let mut $heap = solana_rbpf::aligned_memory::AlignedMemory::with_capacity(0);
+        let mut $heap = solana_sbpf::aligned_memory::AlignedMemory::with_capacity(0);
         let stack_len = $stack.len();
         let memory_mapping = test_utils::create_memory_mapping(
             $verified_executable,
@@ -207,7 +207,7 @@ macro_rules! create_vm {
             $cow_cb,
         )
         .unwrap();
-        let mut $vm_name = solana_rbpf::vm::EbpfVm::new(
+        let mut $vm_name = solana_sbpf::vm::EbpfVm::new(
             $verified_executable.get_loader().clone(),
             $verified_executable.get_sbpf_version(),
             $context_object,

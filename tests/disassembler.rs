@@ -6,9 +6,9 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-extern crate solana_rbpf;
-use solana_rbpf::program::SBPFVersion;
-use solana_rbpf::{
+extern crate solana_sbpf;
+use solana_sbpf::program::SBPFVersion;
+use solana_sbpf::{
     assembler::assemble,
     program::{BuiltinProgram, FunctionRegistry},
     static_analysis::Analysis,

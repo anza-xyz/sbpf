@@ -6,17 +6,17 @@
 
 #![feature(test)]
 
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test;
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-use solana_rbpf::{
+use solana_sbpf::{
     ebpf,
     memory_region::MemoryRegion,
     program::{FunctionRegistry, SBPFVersion},
     vm::Config,
 };
-use solana_rbpf::{
+use solana_sbpf::{
     elf::Executable, program::BuiltinProgram, verifier::RequisiteVerifier, vm::TestContextObject,
 };
 use std::{fs::File, io::Read, sync::Arc};
@@ -83,7 +83,7 @@ fn bench_jit_vs_interpreter(
     instruction_meter: u64,
     mem: &mut [u8],
 ) {
-    let mut executable = solana_rbpf::assembler::assemble::<TestContextObject>(
+    let mut executable = solana_sbpf::assembler::assemble::<TestContextObject>(
         assembly,
         Arc::new(BuiltinProgram::new_loader(
             config,

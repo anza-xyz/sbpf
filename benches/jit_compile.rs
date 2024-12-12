@@ -6,10 +6,10 @@
 
 #![feature(test)]
 
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test;
 
-use solana_rbpf::{
+use solana_sbpf::{
     elf::Executable, program::BuiltinProgram, verifier::RequisiteVerifier, vm::TestContextObject,
 };
 use std::{fs::File, io::Read, sync::Arc};

@@ -1,5 +1,5 @@
 [package]
-name = "solana_rbpf-fuzz"
+name = "solana-sbpf-fuzz"
 version = "0.9.0"
 authors = ["Automatically generated"]
 publish = false
@@ -15,7 +15,7 @@ num-traits = "0.2"
 rayon = "1.5"
 test_utils = { path = "../test_utils/" }
 
-[dependencies.solana_rbpf]
+[dependencies.solana-sbpf]
 path = ".."
 features = ["fuzzer-not-safe-for-production"]
 

@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use solana_rbpf::insn_builder::{Arch, BpfCode, Cond, Endian, Instruction, MemSize, Source};
+use solana_sbpf::insn_builder::{Arch, BpfCode, Cond, Endian, Instruction, MemSize, Source};
 
 #[derive(arbitrary::Arbitrary, Debug, Eq, PartialEq)]
 pub enum FuzzedOp {

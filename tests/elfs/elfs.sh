@@ -1,7 +1,7 @@
 #!/bin/bash -ex
 
 # Requires Latest release of Solana's custom LLVM
-# https://github.com/solana-labs/platform-tools/releases
+# https://github.com/anza-xyz/platform-tools/releases
 
 TOOLCHAIN=../../../agave/sdk/sbf/dependencies/platform-tools
 RC_COMMON="$TOOLCHAIN/rust/bin/rustc --target sbf-solana-solana --crate-type lib -C panic=abort -C opt-level=2"

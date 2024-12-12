@@ -6,11 +6,11 @@
 
 #![feature(test)]
 
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test;
 extern crate test_utils;
 
-use solana_rbpf::{
+use solana_sbpf::{
     elf::Executable,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
     syscalls,

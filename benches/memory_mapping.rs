@@ -7,11 +7,11 @@
 #![feature(test)]
 
 extern crate rand;
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test;
 
 use rand::{rngs::SmallRng, Rng, SeedableRng};
-use solana_rbpf::{
+use solana_sbpf::{
     memory_region::{
         AccessType, AlignedMemoryMapping, MemoryRegion, MemoryState, UnalignedMemoryMapping,
     },

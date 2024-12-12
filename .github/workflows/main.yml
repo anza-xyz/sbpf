@@ -1,4 +1,4 @@
-name: rbpf
+name: sbpf
 
 on:
   push:

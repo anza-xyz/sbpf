@@ -232,7 +232,7 @@ pub struct CallFrame {
 /// # Examples
 ///
 /// ```
-/// use solana_rbpf::{
+/// use solana_sbpf::{
 ///     aligned_memory::AlignedMemory,
 ///     ebpf,
 ///     elf::Executable,

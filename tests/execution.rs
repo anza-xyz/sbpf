@@ -8,14 +8,14 @@
 
 extern crate byteorder;
 extern crate libc;
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test_utils;
 extern crate thiserror;
 
 use byteorder::{ByteOrder, LittleEndian};
 #[cfg(all(not(windows), target_arch = "x86_64"))]
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
-use solana_rbpf::{
+use solana_sbpf::{
     assembler::assemble,
     declare_builtin_function, ebpf,
     elf::Executable,
@@ -3435,7 +3435,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         || !TestContextObject::compare_trace_log(&tracer_interpreter, tracer_jit)
     {
         let analysis =
-            solana_rbpf::static_analysis::Analysis::from_executable(&executable).unwrap();
+            solana_sbpf::static_analysis::Analysis::from_executable(&executable).unwrap();
         println!("result_interpreter={result_interpreter:?}");
         println!("result_jit={result_jit:?}");
         let stdout = std::io::stdout();

@@ -4,7 +4,7 @@ use std::hint::black_box;
 
 use libfuzzer_sys::fuzz_target;
 
-use solana_rbpf::{
+use solana_sbpf::{
     ebpf,
     elf::Executable,
     memory_region::MemoryRegion,

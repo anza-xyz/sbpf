@@ -1,5 +1,5 @@
 use clap::{crate_version, App, Arg};
-use solana_rbpf::{
+use solana_sbpf::{
     aligned_memory::AlignedMemory,
     assembler::assemble,
     ebpf,

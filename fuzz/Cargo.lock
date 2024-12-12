@@ -315,7 +315,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04c565b551bafbef4157586fa379538366e4385d42082f255bfd96e4fe8519da"
 
 [[package]]
-name = "solana_rbpf"
+name = "solana-sbpf"
 version = "0.9.0"
 dependencies = [
  "arbitrary",
@@ -332,14 +332,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "solana_rbpf-fuzz"
+name = "solana-sbpf-fuzz"
 version = "0.9.0"
 dependencies = [
  "arbitrary",
  "libfuzzer-sys",
  "num-traits",
  "rayon",
- "solana_rbpf",
+ "solana-sbpf",
  "test_utils",
 ]
 
@@ -359,7 +359,7 @@ name = "test_utils"
 version = "0.9.0"
 dependencies = [
  "libc",
- "solana_rbpf",
+ "solana-sbpf",
 ]
 
 [[package]]

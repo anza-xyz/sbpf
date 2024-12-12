@@ -346,7 +346,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c5e1a9a646d36c3599cd173a41282daf47c44583ad367b8e6837255952e5c67"
 
 [[package]]
-name = "solana_rbpf"
+name = "solana-sbpf"
 version = "0.9.0"
 dependencies = [
  "arbitrary",
@@ -388,7 +388,7 @@ name = "test_utils"
 version = "0.9.0"
 dependencies = [
  "libc",
- "solana_rbpf",
+ "solana-sbpf",
 ]
 
 [[package]]
