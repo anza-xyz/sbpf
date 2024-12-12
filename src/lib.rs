@@ -9,12 +9,8 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-//! Virtual machine and JIT compiler for eBPF programs.
+//! Virtual machine for SBPF programs.
 #![warn(missing_docs)]
-#![doc(
-    html_logo_url = "https://raw.githubusercontent.com/qmonnet/rbpf/master/misc/rbpf.png",
-    html_favicon_url = "https://raw.githubusercontent.com/qmonnet/rbpf/master/misc/rbpf.ico"
-)]
 #![deny(clippy::arithmetic_side_effects)]
 #![deny(clippy::ptr_as_ptr)]
 
