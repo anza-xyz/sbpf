@@ -1174,13 +1174,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 }
                 self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, reg, REGISTER_SCRATCH, 0, None));
             },
-            Value::Constant64(constant, user_provided) => {
-                if user_provided && self.should_sanitize_constant(constant) {
-                    self.emit_sanitized_load_immediate(REGISTER_SCRATCH, constant);
-                } else {
-                    self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, constant));
-                }
-            },
             _ => {
                 #[cfg(debug_assertions)]
                 unreachable!();
@@ -1648,8 +1641,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_SCRATCH, RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Swap return address and self.pc
             self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 6)));
 
-            // unwrap() the result into REGISTER_SCRATCH
-            self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_SCRATCH, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
+            if *access_type == AccessType::Load {
+                // unwrap() the result into REGISTER_SCRATCH
+                self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_SCRATCH, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
+            }
 
             self.emit_ins(X86Instruction::return_near());
         }
