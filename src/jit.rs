@@ -38,7 +38,7 @@ use crate::{
 
 const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
 const MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION: usize = 110;
-const MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT: usize = 23;
+const MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT: usize = 24;
 const MAX_START_PADDING_LENGTH: usize = 256;
 
 pub struct JitProgram {
@@ -328,6 +328,7 @@ pub struct JitCompiler<'a, C: ContextObject> {
     next_noop_insertion: u32,
     noop_range: Uniform<u32>,
     runtime_environment_key: i32,
+    immediate_value_key: i64,
     diversification_rng: SmallRng,
     stopwatch_is_active: bool,
 }
@@ -365,6 +366,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
         let runtime_environment_key = get_runtime_environment_key();
         let mut diversification_rng = SmallRng::from_rng(thread_rng()).map_err(|_| EbpfError::JitNotCompiled)?;
+        let immediate_value_key = diversification_rng.gen::<i64>();
 
         Ok(Self {
             result: JitProgram::new(pc, code_length_estimate)?,
@@ -380,6 +382,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             next_noop_insertion: if config.noop_instruction_rate == 0 { u32::MAX } else { diversification_rng.gen_range(0..config.noop_instruction_rate * 2) },
             noop_range: Uniform::new_inclusive(0, config.noop_instruction_rate * 2),
             runtime_environment_key,
+            immediate_value_key,
             diversification_rng,
             stopwatch_is_active: false,
         })
@@ -873,29 +876,24 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     #[inline]
     fn emit_sanitized_load_immediate(&mut self, destination: u8, value: i64) {
+        let lower_key = self.immediate_value_key as i32 as i64;
         if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
-            let key = self.diversification_rng.gen::<i32>() as i64;
-            self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(key)));
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, key, None));
+            self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(lower_key)));
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
         } else if value as u64 & u32::MAX as u64 == 0 {
-            let key = self.diversification_rng.gen::<i32>() as i64;
-            self.emit_ins(X86Instruction::load_immediate(destination, value.rotate_right(32).wrapping_sub(key)));
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, key, None)); // wrapping_add(key)
+            self.emit_ins(X86Instruction::load_immediate(destination, value.rotate_right(32).wrapping_sub(lower_key)));
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
             self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xc1, 4, destination, 32, None)); // shift_left(32)
+        } else if destination != REGISTER_SCRATCH {
+            self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(self.immediate_value_key)));
+            self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.immediate_value_key));
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, destination, 0, None)); // wrapping_add(immediate_value_key)
         } else {
-            let key = self.diversification_rng.gen::<i64>();
-            if destination != REGISTER_SCRATCH {
-                self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(key)));
-                self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, key));
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, destination, 0, None));
-            } else {
-                let lower_key = key as i32 as i64;
-                let upper_key = (key >> 32) as i32 as i64;
-                self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(lower_key).rotate_right(32).wrapping_sub(upper_key)));
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, upper_key, None)); // wrapping_add(upper_key)
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xc1, 1, destination, 32, None)); // rotate_right(32)
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
-            }
+            let upper_key = (self.immediate_value_key >> 32) as i32 as i64;
+            self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(lower_key).rotate_right(32).wrapping_sub(upper_key)));
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, upper_key, None)); // wrapping_add(upper_key)
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xc1, 1, destination, 32, None)); // rotate_right(32)
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
         }
     }
 
