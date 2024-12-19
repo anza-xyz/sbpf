@@ -230,24 +230,13 @@ impl<'a> Analysis<'a> {
             self.cfg_nodes.entry(*pc).or_default();
         }
         let mut cfg_edges = BTreeMap::new();
-        for insn in self.instructions.iter() {
+        for (pc, insn) in self.instructions.iter().enumerate() {
             let target_pc = (insn.ptr as isize + insn.off as isize + 1) as usize;
             match insn.opc {
                 ebpf::CALL_IMM => {
-                    if let Some((function_name, _function)) = self
-                        .executable
-                        .get_loader()
-                        .get_function_registry(sbpf_version)
-                        .lookup_by_key(insn.imm as u32)
-                    {
-                        if function_name == b"abort" {
-                            self.cfg_nodes.entry(insn.ptr + 1).or_default();
-                            cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
-                        }
-                    } else if let Some((_function_name, target_pc)) = self
-                        .executable
-                        .get_function_registry()
-                        .lookup_by_key(insn.imm as u32)
+                    let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
+                    if let Some((_function_name, target_pc)) =
+                        self.executable.get_function_registry().lookup_by_key(key)
                     {
                         self.cfg_nodes.entry(insn.ptr + 1).or_default();
                         self.cfg_nodes.entry(target_pc).or_default();
@@ -269,7 +258,11 @@ impl<'a> Analysis<'a> {
                     };
                     cfg_edges.insert(insn.ptr, (insn.opc, destinations));
                 }
-                ebpf::EXIT => {
+                ebpf::EXIT if !sbpf_version.static_syscalls() => {
+                    self.cfg_nodes.entry(insn.ptr + 1).or_default();
+                    cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
+                }
+                ebpf::RETURN if sbpf_version.static_syscalls() => {
                     self.cfg_nodes.entry(insn.ptr + 1).or_default();
                     cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
                 }
