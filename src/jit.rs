@@ -1719,12 +1719,14 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 mod tests {
     use super::*;
     use crate::{
+        disassembler::disassemble_instruction,
         program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        static_analysis::CfgNode,
         syscalls,
         vm::TestContextObject,
     };
     use byteorder::{ByteOrder, LittleEndian};
-    use std::sync::Arc;
+    use std::{collections::BTreeMap, sync::Arc};
 
     #[test]
     fn test_runtime_environment_slots() {
@@ -1838,35 +1840,45 @@ mod tests {
                 <= MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT
         );
 
+        let mut cfg_nodes = BTreeMap::new();
+        cfg_nodes.insert(
+            8,
+            CfgNode {
+                label: std::string::String::from("label"),
+                ..CfgNode::default()
+            },
+        );
+
         for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+            println!("opcode;machine_code_length_per_instruction;assembly");
             let empty_program_machine_code_length =
                 empty_program_machine_code_length_per_version[sbpf_version as usize];
 
             for mut opcode in 0x00..=0xFF {
                 let (registers, immediate) = match opcode {
-                    0x85 | 0x8D => (0x88, 8),
-                    0x86 => {
+                    0x85 if !sbpf_version.static_syscalls() => (0x00, Some(8)),
+                    0x85 if sbpf_version.static_syscalls() => (0x00, None),
+                    0x8D => (0x88, Some(0)),
+                    0x95 if sbpf_version.static_syscalls() => (0x00, Some(1)),
+                    0xE5 if !sbpf_version.static_syscalls() => {
                         // Put external function calls on a separate loop iteration
                         opcode = 0x85;
-                        (0x00, 0x91020CDD)
+                        (0x00, Some(0x91020CDD))
                     }
-                    0x87 => {
+                    0xF5 => {
                         // Put invalid function calls on a separate loop iteration
                         opcode = 0x85;
-                        (0x88, 0x91020CDD)
+                        (0x00, Some(0x91020CD0))
                     }
-                    0x95 => {
-                        // Put a valid syscall
-                        (0, 1)
-                    }
-                    0xD4 | 0xDC => (0x88, 16),
-                    _ => (0x88, 0xFFFFFFFF),
+                    0xD4 | 0xDC => (0x88, Some(16)),
+                    _ => (0x88, Some(0x11223344)),
                 };
                 for pc in 0..INSTRUCTION_COUNT {
                     prog[pc * ebpf::INSN_SIZE] = opcode;
                     prog[pc * ebpf::INSN_SIZE + 1] = registers;
-                    prog[pc * ebpf::INSN_SIZE + 2] = 0xFF;
-                    prog[pc * ebpf::INSN_SIZE + 3] = 0xFF;
+                    let offset = 7_u16.wrapping_sub(pc as u16);
+                    LittleEndian::write_u16(&mut prog[pc * ebpf::INSN_SIZE + 2..], offset);
+                    let immediate = immediate.unwrap_or_else(|| 7_u32.wrapping_sub(pc as u32));
                     LittleEndian::write_u32(&mut prog[pc * ebpf::INSN_SIZE + 4..], immediate);
                 }
                 let config = Config {
@@ -1897,15 +1909,22 @@ mod tests {
                 let machine_code_length_per_instruction =
                     machine_code_length as f64 / instruction_count as f64;
                 assert!(
-                    (machine_code_length_per_instruction + 0.5) as usize
+                    f64::ceil(machine_code_length_per_instruction) as usize
                         <= MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION
                 );
-                /*println!("opcode={:02X} machine_code_length_per_instruction={}", opcode, machine_code_length_per_instruction);
-                let analysis = crate::static_analysis::Analysis::from_executable(&executable).unwrap();
-                {
-                    let stdout = std::io::stdout();
-                    analysis.disassemble(&mut stdout.lock()).unwrap();
-                }*/
+                let insn = ebpf::get_insn_unchecked(&prog, 0);
+                let assembly = disassemble_instruction(
+                    &insn,
+                    0,
+                    &cfg_nodes,
+                    executable.get_function_registry(),
+                    executable.get_loader(),
+                    executable.get_sbpf_version(),
+                );
+                println!(
+                    "{:02X};{:>7.3};{}",
+                    opcode, machine_code_length_per_instruction, assembly
+                );
             }
         }
     }
