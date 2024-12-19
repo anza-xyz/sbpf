@@ -1167,12 +1167,16 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
         match vm_addr {
             Value::RegisterPlusConstant64(reg, constant, user_provided) => {
-                if user_provided && self.should_sanitize_constant(constant) {
-                    self.emit_sanitized_load_immediate(REGISTER_SCRATCH, constant);
-                } else {
-                    self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, constant));
-                }
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, reg, REGISTER_SCRATCH, 0, None));
+                debug_assert!(user_provided);
+                // First half of emit_sanitized_load_immediate(REGISTER_SCRATCH, vm_addr)
+                let lower_key = self.immediate_value_key as i32 as i64;
+                self.emit_ins(X86Instruction::lea(OperandSize::S64, reg, REGISTER_SCRATCH, Some(
+                    if reg == R12 {
+                        X86IndirectAccess::OffsetIndexShift(constant.wrapping_sub(lower_key) as i32, RSP, 0)
+                    } else {
+                        X86IndirectAccess::Offset(constant.wrapping_sub(lower_key) as i32)
+                    }
+                )));
             },
             _ => {
                 #[cfg(debug_assertions)]
@@ -1591,6 +1595,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION, 5)));
 
         // Translates a vm memory address to a host memory address
+        let lower_key = self.immediate_value_key as i32 as i64;
         for (access_type, len) in &[
             (AccessType::Load, 1i32),
             (AccessType::Load, 2i32),
@@ -1603,6 +1608,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         ] {
             let target_offset = len.trailing_zeros() as usize + 4 * (*access_type as usize);
             self.set_anchor(ANCHOR_TRANSLATE_MEMORY_ADDRESS + target_offset);
+            // Second half of emit_sanitized_load_immediate(REGISTER_SCRATCH, vm_addr)
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_SCRATCH, lower_key, None));
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
             if *access_type == AccessType::Load {
                 let load = match len {
