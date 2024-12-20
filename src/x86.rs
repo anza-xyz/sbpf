@@ -189,7 +189,6 @@ impl X86Instruction {
         opcode: u8,
         source: u8,
         destination: u8,
-        immediate: i64,
         indirect: Option<X86IndirectAccess>,
     ) -> Self {
         exclude_operand_sizes!(size, OperandSize::S0 | OperandSize::S8 | OperandSize::S16);
@@ -198,10 +197,31 @@ impl X86Instruction {
             opcode,
             first_operand: source,
             second_operand: destination,
+            indirect,
+            ..X86Instruction::DEFAULT
+        }
+    }
+
+    /// Arithmetic or logic
+    #[inline]
+    pub const fn alu_immediate(
+        size: OperandSize,
+        opcode: u8,
+        opcode_extension: u8,
+        destination: u8,
+        immediate: i64,
+        indirect: Option<X86IndirectAccess>,
+    ) -> Self {
+        exclude_operand_sizes!(size, OperandSize::S0 | OperandSize::S8 | OperandSize::S16);
+        Self {
+            size,
+            opcode,
+            first_operand: opcode_extension,
+            second_operand: destination,
             immediate_size: match opcode {
                 0xc1 => OperandSize::S8,
                 0x81 => OperandSize::S32,
-                0xf7 if source == 0 => OperandSize::S32,
+                0xf7 if opcode_extension == 0 => OperandSize::S32,
                 _ => OperandSize::S0,
             },
             immediate,
