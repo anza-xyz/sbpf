@@ -33,7 +33,11 @@ use crate::{
     memory_region::MemoryMapping,
     program::BuiltinFunction,
     vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm},
-    x86::*,
+    x86::{
+        FenceType, X86IndirectAccess, X86Instruction,
+        X86Register::{self, *},
+        ARGUMENT_REGISTERS, CALLEE_SAVED_REGISTERS, CALLER_SAVED_REGISTERS,
+    },
 };
 
 const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
@@ -202,7 +206,7 @@ const ANCHOR_CALL_REG_UNSUPPORTED_INSTRUCTION: usize = 14;
 const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 21;
 const ANCHOR_COUNT: usize = 34; // Update me when adding or removing anchors
 
-const REGISTER_MAP: [u8; 11] = [
+const REGISTER_MAP: [X86Register; 11] = [
     CALLER_SAVED_REGISTERS[0], // RAX
     ARGUMENT_REGISTERS[1],     // RSI
     ARGUMENT_REGISTERS[2],     // RDX
@@ -217,11 +221,11 @@ const REGISTER_MAP: [u8; 11] = [
 ];
 
 /// RDI: Used together with slot_in_vm()
-const REGISTER_PTR_TO_VM: u8 = ARGUMENT_REGISTERS[0];
+const REGISTER_PTR_TO_VM: X86Register = ARGUMENT_REGISTERS[0];
 /// R10: Program counter limit
-const REGISTER_INSTRUCTION_METER: u8 = CALLER_SAVED_REGISTERS[7];
+const REGISTER_INSTRUCTION_METER: X86Register = CALLER_SAVED_REGISTERS[7];
 /// R11: Scratch register
-const REGISTER_SCRATCH: u8 = CALLER_SAVED_REGISTERS[8];
+const REGISTER_SCRATCH: X86Register = CALLER_SAVED_REGISTERS[8];
 
 #[derive(Copy, Clone, Debug)]
 pub enum OperandSize {
@@ -233,10 +237,10 @@ pub enum OperandSize {
 }
 
 enum Value {
-    Register(u8),
-    RegisterIndirect(u8, i32, bool),
-    RegisterPlusConstant32(u8, i32, bool),
-    RegisterPlusConstant64(u8, i64, bool),
+    Register(X86Register),
+    RegisterIndirect(X86Register, i32, bool),
+    RegisterPlusConstant32(X86Register, i32, bool),
+    RegisterPlusConstant64(X86Register, i64, bool),
     Constant64(i64, bool),
 }
 
@@ -420,7 +424,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, 0));
             }
 
-            let dst = if insn.dst == FRAME_PTR_REG as u8 { u8::MAX } else { REGISTER_MAP[insn.dst as usize] };
+            let dst = REGISTER_MAP[insn.dst as usize];
             let src = REGISTER_MAP[insn.src as usize];
             let target_pc = (self.pc as isize + insn.off as isize + 1) as usize;
 
@@ -483,18 +487,18 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::ADD32_IMM  => {
                     self.emit_sanitized_alu(OperandSize::S32, 0x01, 0, dst, insn.imm);
                     if !self.executable.get_sbpf_version().explicit_sign_extension_of_results() {
-                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, 0, None)); // sign extend i32 to i64
+                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, None)); // sign extend i32 to i64
                     }
                 },
                 ebpf::ADD32_REG  => {
-                    self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x01, src, dst, 0, None));
+                    self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x01, src, dst, None));
                     if !self.executable.get_sbpf_version().explicit_sign_extension_of_results() {
-                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, 0, None)); // sign extend i32 to i64
+                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, None)); // sign extend i32 to i64
                     }
                 },
                 ebpf::SUB32_IMM  => {
                     if self.executable.get_sbpf_version().swap_sub_reg_imm_operands() {
-                        self.emit_ins(X86Instruction::alu(OperandSize::S32, 0xf7, 3, dst, 0, None));
+                        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0xf7, 3, dst, 0, None));
                         if insn.imm != 0 {
                             self.emit_sanitized_alu(OperandSize::S32, 0x01, 0, dst, insn.imm);
                         }
@@ -502,13 +506,13 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                         self.emit_sanitized_alu(OperandSize::S32, 0x29, 5, dst, insn.imm);
                     }
                     if !self.executable.get_sbpf_version().explicit_sign_extension_of_results() {
-                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, 0, None)); // sign extend i32 to i64
+                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, None)); // sign extend i32 to i64
                     }
                 },
                 ebpf::SUB32_REG  => {
-                    self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x29, src, dst, 0, None));
+                    self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x29, src, dst, None));
                     if !self.executable.get_sbpf_version().explicit_sign_extension_of_results() {
-                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, 0, None)); // sign extend i32 to i64
+                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, None)); // sign extend i32 to i64
                     }
                 },
                 ebpf::MUL32_IMM | ebpf::DIV32_IMM | ebpf::MOD32_IMM if !self.executable.get_sbpf_version().enable_pqr() =>
@@ -534,14 +538,14 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_address_translation(Some(dst), Value::RegisterPlusConstant64(src, insn.off as i64, true), 2, None);
                 },
                 ebpf::OR32_IMM   => self.emit_sanitized_alu(OperandSize::S32, 0x09, 1, dst, insn.imm),
-                ebpf::OR32_REG   => self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x09, src, dst, 0, None)),
+                ebpf::OR32_REG   => self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x09, src, dst, None)),
                 ebpf::AND32_IMM  => self.emit_sanitized_alu(OperandSize::S32, 0x21, 4, dst, insn.imm),
-                ebpf::AND32_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x21, src, dst, 0, None)),
+                ebpf::AND32_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x21, src, dst, None)),
                 ebpf::LSH32_IMM  => self.emit_shift(OperandSize::S32, 4, REGISTER_SCRATCH, dst, Some(insn.imm)),
                 ebpf::LSH32_REG  => self.emit_shift(OperandSize::S32, 4, src, dst, None),
                 ebpf::RSH32_IMM  => self.emit_shift(OperandSize::S32, 5, REGISTER_SCRATCH, dst, Some(insn.imm)),
                 ebpf::RSH32_REG  => self.emit_shift(OperandSize::S32, 5, src, dst, None),
-                ebpf::NEG32      if !self.executable.get_sbpf_version().disable_neg() => self.emit_ins(X86Instruction::alu(OperandSize::S32, 0xf7, 3, dst, 0, None)),
+                ebpf::NEG32      if !self.executable.get_sbpf_version().disable_neg() => self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0xf7, 3, dst, 0, None)),
                 ebpf::LD_4B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                     self.emit_address_translation(Some(dst), Value::RegisterPlusConstant64(src, insn.off as i64, true), 4, None);
                 },
@@ -549,7 +553,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_address_translation(Some(dst), Value::RegisterPlusConstant64(src, insn.off as i64, true), 8, None);
                 },
                 ebpf::XOR32_IMM  => self.emit_sanitized_alu(OperandSize::S32, 0x31, 6, dst, insn.imm),
-                ebpf::XOR32_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x31, src, dst, 0, None)),
+                ebpf::XOR32_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x31, src, dst, None)),
                 ebpf::MOV32_IMM  => {
                     if self.should_sanitize_constant(insn.imm) {
                         self.emit_sanitized_load_immediate(dst, insn.imm as u32 as u64 as i64);
@@ -569,10 +573,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::LE if !self.executable.get_sbpf_version().disable_le() => {
                     match insn.imm {
                         16 => {
-                            self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x81, 4, dst, 0xffff, None)); // Mask to 16 bit
+                            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0x81, 4, dst, 0xffff, None)); // Mask to 16 bit
                         }
                         32 => {
-                            self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x81, 4, dst, -1, None)); // Mask to 32 bit
+                            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0x81, 4, dst, -1, None)); // Mask to 32 bit
                         }
                         64 => {}
                         _ => {
@@ -584,7 +588,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     match insn.imm {
                         16 => {
                             self.emit_ins(X86Instruction::bswap(OperandSize::S16, dst));
-                            self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x81, 4, dst, 0xffff, None)); // Mask to 16 bit
+                            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0x81, 4, dst, 0xffff, None)); // Mask to 16 bit
                         }
                         32 => self.emit_ins(X86Instruction::bswap(OperandSize::S32, dst)),
                         64 => self.emit_ins(X86Instruction::bswap(OperandSize::S64, dst)),
@@ -596,10 +600,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
                 // BPF_ALU64_STORE class
                 ebpf::ADD64_IMM  => self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, dst, insn.imm),
-                ebpf::ADD64_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, src, dst, 0, None)),
+                ebpf::ADD64_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, src, dst, None)),
                 ebpf::SUB64_IMM  => {
                     if self.executable.get_sbpf_version().swap_sub_reg_imm_operands() {
-                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xf7, 3, dst, 0, None));
+                        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xf7, 3, dst, 0, None));
                         if insn.imm != 0 {
                             self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, dst, insn.imm);
                         }
@@ -607,7 +611,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                         self.emit_sanitized_alu(OperandSize::S64, 0x29, 5, dst, insn.imm);
                     }
                 }
-                ebpf::SUB64_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, src, dst, 0, None)),
+                ebpf::SUB64_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, src, dst, None)),
                 ebpf::MUL64_IMM | ebpf::DIV64_IMM | ebpf::MOD64_IMM if !self.executable.get_sbpf_version().enable_pqr() =>
                     self.emit_product_quotient_remainder(
                         OperandSize::S64,
@@ -637,9 +641,9 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_address_translation(None, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 2, Some(Value::Register(src)));
                 },
                 ebpf::OR64_IMM   => self.emit_sanitized_alu(OperandSize::S64, 0x09, 1, dst, insn.imm),
-                ebpf::OR64_REG   => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x09, src, dst, 0, None)),
+                ebpf::OR64_REG   => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x09, src, dst, None)),
                 ebpf::AND64_IMM  => self.emit_sanitized_alu(OperandSize::S64, 0x21, 4, dst, insn.imm),
-                ebpf::AND64_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x21, src, dst, 0, None)),
+                ebpf::AND64_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x21, src, dst, None)),
                 ebpf::LSH64_IMM  => self.emit_shift(OperandSize::S64, 4, REGISTER_SCRATCH, dst, Some(insn.imm)),
                 ebpf::LSH64_REG  => self.emit_shift(OperandSize::S64, 4, src, dst, None),
                 ebpf::RSH64_IMM  => self.emit_shift(OperandSize::S64, 5, REGISTER_SCRATCH, dst, Some(insn.imm)),
@@ -647,7 +651,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::ST_4B_IMM  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                     self.emit_address_translation(None, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 4, Some(Value::Constant64(insn.imm, true)));
                 },
-                ebpf::NEG64      if !self.executable.get_sbpf_version().disable_neg() => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xf7, 3, dst, 0, None)),
+                ebpf::NEG64      if !self.executable.get_sbpf_version().disable_neg() => self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xf7, 3, dst, 0, None)),
                 ebpf::ST_4B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                     self.emit_address_translation(None, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 4, Some(Value::Register(src)));
                 },
@@ -658,7 +662,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_address_translation(None, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 8, Some(Value::Register(src)));
                 },
                 ebpf::XOR64_IMM  => self.emit_sanitized_alu(OperandSize::S64, 0x31, 6, dst, insn.imm),
-                ebpf::XOR64_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x31, src, dst, 0, None)),
+                ebpf::XOR64_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x31, src, dst, None)),
                 ebpf::MOV64_IMM  => {
                     if self.should_sanitize_constant(insn.imm) {
                         self.emit_sanitized_load_immediate(dst, insn.imm);
@@ -788,7 +792,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_EXIT, 6)));
 
                     // else decrement and update env.call_depth
-                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 5, REGISTER_PTR_TO_VM, 1, Some(call_depth_access))); // env.call_depth -= 1;
+                    self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_PTR_TO_VM, 1, Some(call_depth_access))); // env.call_depth -= 1;
 
                     // and return
                     self.emit_profile_instruction_count(Some(0));
@@ -875,38 +879,38 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_sanitized_load_immediate(&mut self, destination: u8, value: i64) {
+    fn emit_sanitized_load_immediate(&mut self, destination: X86Register, value: i64) {
         let lower_key = self.immediate_value_key as i32 as i64;
         if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
             self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(lower_key)));
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
         } else if value as u64 & u32::MAX as u64 == 0 {
             self.emit_ins(X86Instruction::load_immediate(destination, value.rotate_right(32).wrapping_sub(lower_key)));
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xc1, 4, destination, 32, None)); // shift_left(32)
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 4, destination, 32, None)); // shift_left(32)
         } else if destination != REGISTER_SCRATCH {
             self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(self.immediate_value_key)));
             self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.immediate_value_key));
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, destination, 0, None)); // wrapping_add(immediate_value_key)
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, destination, None)); // wrapping_add(immediate_value_key)
         } else {
             let upper_key = (self.immediate_value_key >> 32) as i32 as i64;
             self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(lower_key).rotate_right(32).wrapping_sub(upper_key)));
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, upper_key, None)); // wrapping_add(upper_key)
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xc1, 1, destination, 32, None)); // rotate_right(32)
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, destination, upper_key, None)); // wrapping_add(upper_key)
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 1, destination, 32, None)); // rotate_right(32)
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, destination, lower_key, None)); // wrapping_add(lower_key)
         }
     }
 
     #[inline]
-    fn emit_sanitized_alu(&mut self, size: OperandSize, opcode: u8, opcode_extension: u8, destination: u8, immediate: i64) {
+    fn emit_sanitized_alu(&mut self, size: OperandSize, opcode: u8, opcode_extension: u8, destination: X86Register, immediate: i64) {
         if self.should_sanitize_constant(immediate) {
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
-            self.emit_ins(X86Instruction::alu(size, opcode, REGISTER_SCRATCH, destination, 0, None));
+            self.emit_ins(X86Instruction::alu(size, opcode, REGISTER_SCRATCH, destination, None));
         } else if immediate >= i32::MIN as i64 && immediate <= i32::MAX as i64 {
-            self.emit_ins(X86Instruction::alu(size, 0x81, opcode_extension, destination, immediate, None));
+            self.emit_ins(X86Instruction::alu_immediate(size, 0x81, opcode_extension, destination, immediate, None));
         } else {
             self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, immediate));
-            self.emit_ins(X86Instruction::alu(size, opcode, REGISTER_SCRATCH, destination, 0, None));
+            self.emit_ins(X86Instruction::alu(size, opcode, REGISTER_SCRATCH, destination, None));
         }
     }
 
@@ -919,13 +923,13 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::fence(FenceType::Load)); // lfence
         self.emit_ins(X86Instruction::cycle_count()); // rdtsc
         self.emit_ins(X86Instruction::fence(FenceType::Load)); // lfence
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xc1, 4, RDX, 32, None)); // RDX <<= 32;
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x09, RDX, RAX, 0, None)); // RAX |= RDX;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 4, RDX, 32, None)); // RDX <<= 32;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x09, RDX, RAX, None)); // RAX |= RDX;
         if begin {
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, RAX, REGISTER_PTR_TO_VM, 0, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::StopwatchNumerator))))); // *numerator -= RAX;
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, RAX, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::StopwatchNumerator))))); // *numerator -= RAX;
         } else {
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, RAX, REGISTER_PTR_TO_VM, 0, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::StopwatchNumerator))))); // *numerator += RAX;
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_PTR_TO_VM, 1, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::StopwatchDenominator))))); // *denominator += 1;
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, RAX, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::StopwatchNumerator))))); // *numerator += RAX;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_PTR_TO_VM, 1, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::StopwatchDenominator))))); // *denominator += 1;
         }
         self.emit_ins(X86Instruction::pop(RAX));
         self.emit_ins(X86Instruction::pop(RDX));
@@ -956,7 +960,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, target_pc as i64 - self.pc as i64 - 1); // instruction_meter += target_pc - (self.pc + 1);
             },
             None => {
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, 0, None)); // instruction_meter += target_pc;
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += target_pc;
                 self.emit_sanitized_alu(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, self.pc as i64 + 1); // instruction_meter -= self.pc + 1;
             },
         }
@@ -970,9 +974,9 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, self.pc as i64 + 1 - target_pc); // instruction_meter += (self.pc + 1) - target_pc;
                 }
                 Value::Register(target_pc) => {
-                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, target_pc, REGISTER_INSTRUCTION_METER, 0, None)); // instruction_meter -= guest_target_pc
-                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter += 1
-                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, 0, None)); // instruction_meter += self.pc
+                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, target_pc, REGISTER_INSTRUCTION_METER, None)); // instruction_meter -= guest_target_pc
+                    self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter += 1
+                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += self.pc
                 }
                 _ => debug_assert!(false),
             }
@@ -985,7 +989,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_profile_instruction_count(target_pc);
     }
 
-    fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<u8>) {
+    fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<X86Register>) {
         let mut saved_registers = CALLER_SAVED_REGISTERS.to_vec();
         if let Some(reg) = result_reg {
             if let Some(dst) = saved_registers.iter().position(|x| *x == reg) {
@@ -1001,20 +1005,20 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Align RSP to 16 bytes
         self.emit_ins(X86Instruction::push(RSP, None));
         self.emit_ins(X86Instruction::push(RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0))));
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 4, RSP, -16, None));
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 4, RSP, -16, None));
 
         let stack_arguments = arguments.len().saturating_sub(ARGUMENT_REGISTERS.len()) as i64;
         if stack_arguments % 2 != 0 {
             // If we're going to pass an odd number of stack args we need to pad
             // to preserve alignment
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 5, RSP, 8, None));
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 8, None));
         }
 
         // Pass arguments
         for argument in arguments {
             let is_stack_argument = argument.index >= ARGUMENT_REGISTERS.len();
             let dst = if is_stack_argument {
-                u8::MAX // Never used
+                RSP // Never used
             } else {
                 ARGUMENT_REGISTERS[argument.index]
             };
@@ -1029,7 +1033,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 Value::RegisterIndirect(reg, offset, user_provided) => {
                     debug_assert!(!user_provided);
                     if is_stack_argument {
-                        debug_assert_ne!(reg, RSP);
+                        debug_assert!(reg != RSP);
                         self.emit_ins(X86Instruction::push(reg, Some(X86IndirectAccess::Offset(offset))));
                     } else if reg == RSP {
                         self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, dst, X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)));
@@ -1041,7 +1045,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     debug_assert!(!user_provided);
                     if is_stack_argument {
                         self.emit_ins(X86Instruction::push(reg, None));
-                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, RSP, offset as i64, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0))));
+                        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, offset as i64, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0))));
                     } else if reg == RSP {
                         self.emit_ins(X86Instruction::lea(OperandSize::S64, RSP, dst, Some(X86IndirectAccess::OffsetIndexShift(offset, RSP, 0))));
                     } else {
@@ -1052,10 +1056,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     debug_assert!(!user_provided);
                     if is_stack_argument {
                         self.emit_ins(X86Instruction::push(reg, None));
-                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, RSP, offset, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0))));
+                        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, offset, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0))));
                     } else {
                         self.emit_ins(X86Instruction::load_immediate(dst, offset));
-                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, reg, dst, 0, None));
+                        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, reg, dst, None));
                     }
                 },
                 Value::Constant64(value, user_provided) => {
@@ -1086,7 +1090,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     
         // Restore registers from stack
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, RSP,
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP,
             if stack_arguments % 2 != 0 { stack_arguments + 1 } else { stack_arguments } * 8, None));
         self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, RSP, X86IndirectAccess::OffsetIndexShift(8, RSP, 0)));
 
@@ -1146,7 +1150,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_address_translation(&mut self, dst: Option<u8>, vm_addr: Value, len: u64, value: Option<Value>) {
+    fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
 
         let stack_slot_of_value_to_store = X86IndirectAccess::OffsetIndexShift(-112, RSP, 0);
@@ -1217,7 +1221,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_conditional_branch_reg(&mut self, op: u8, bitwise: bool, first_operand: u8, second_operand: u8, target_pc: usize) {
+    fn emit_conditional_branch_reg(&mut self, op: u8, bitwise: bool, first_operand: X86Register, second_operand: X86Register, target_pc: usize) {
         self.emit_validate_and_profile_instruction_count(Some(target_pc));
         if bitwise { // Logical
             self.emit_ins(X86Instruction::test(OperandSize::S64, first_operand, second_operand, None));
@@ -1231,7 +1235,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_conditional_branch_imm(&mut self, op: u8, bitwise: bool, immediate: i64, second_operand: u8, target_pc: usize) {
+    fn emit_conditional_branch_imm(&mut self, op: u8, bitwise: bool, immediate: i64, second_operand: X86Register, target_pc: usize) {
         self.emit_validate_and_profile_instruction_count(Some(target_pc));
         if self.should_sanitize_constant(immediate) {
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
@@ -1251,24 +1255,24 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_undo_profile_instruction_count(Value::Constant64(target_pc as i64, true));
     }
 
-    fn emit_shift(&mut self, size: OperandSize, opcode_extension: u8, source: u8, destination: u8, immediate: Option<i64>) {
+    fn emit_shift(&mut self, size: OperandSize, opcode_extension: u8, source: X86Register, destination: X86Register, immediate: Option<i64>) {
         if let Some(immediate) = immediate {
             if self.should_sanitize_constant(immediate) {
                 self.emit_sanitized_load_immediate(source, immediate);
             } else {
-                self.emit_ins(X86Instruction::alu(size, 0xc1, opcode_extension, destination, immediate, None));
+                self.emit_ins(X86Instruction::alu_immediate(size, 0xc1, opcode_extension, destination, immediate, None));
                 return;
             }
         }
         if let OperandSize::S32 = size {
-            self.emit_ins(X86Instruction::alu(OperandSize::S32, 0x81, 4, destination, -1, None)); // Mask to 32 bit
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0x81, 4, destination, -1, None)); // Mask to 32 bit
         }
         if source == RCX {
             if destination == RCX {
-                self.emit_ins(X86Instruction::alu(size, 0xd3, opcode_extension, destination, 0, None));
+                self.emit_ins(X86Instruction::alu_immediate(size, 0xd3, opcode_extension, destination, 0, None));
             } else {
                 self.emit_ins(X86Instruction::push(RCX, None));
-                self.emit_ins(X86Instruction::alu(size, 0xd3, opcode_extension, destination, 0, None));
+                self.emit_ins(X86Instruction::alu_immediate(size, 0xd3, opcode_extension, destination, 0, None));
                 self.emit_ins(X86Instruction::pop(RCX));
             }
         } else if destination == RCX {
@@ -1276,7 +1280,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_ins(X86Instruction::push(source, None));
             }
             self.emit_ins(X86Instruction::xchg(OperandSize::S64, source, RCX, None));
-            self.emit_ins(X86Instruction::alu(size, 0xd3, opcode_extension, source, 0, None));
+            self.emit_ins(X86Instruction::alu_immediate(size, 0xd3, opcode_extension, source, 0, None));
             self.emit_ins(X86Instruction::mov(OperandSize::S64, source, RCX));
             if source != REGISTER_SCRATCH {
                 self.emit_ins(X86Instruction::pop(source));
@@ -1284,7 +1288,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         } else {
             self.emit_ins(X86Instruction::push(RCX, None));
             self.emit_ins(X86Instruction::mov(OperandSize::S64, source, RCX));
-            self.emit_ins(X86Instruction::alu(size, 0xd3, opcode_extension, destination, 0, None));
+            self.emit_ins(X86Instruction::alu_immediate(size, 0xd3, opcode_extension, destination, 0, None));
             self.emit_ins(X86Instruction::pop(RCX));
         }
     }
@@ -1296,8 +1300,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         alt_dst: bool,
         division: bool,
         signed: bool,
-        src: u8,
-        dst: u8,
+        src: X86Register,
+        dst: X86Register,
         imm: Option<i64>,
     ) {
         //         LMUL UHMUL SHMUL UDIV SDIV UREM SREM
@@ -1357,11 +1361,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             if signed {
                 self.emit_ins(X86Instruction::sign_extend_rax_rdx(size));
             } else {
-                self.emit_ins(X86Instruction::alu(size, 0x31, RDX, RDX, 0, None)); // RDX = 0
+                self.emit_ins(X86Instruction::alu(size, 0x31, RDX, RDX, None)); // RDX = 0
             }
         }
 
-        self.emit_ins(X86Instruction::alu(size, 0xf7, 0x4 | (division as u8) << 1 | signed as u8, REGISTER_SCRATCH, 0, None));
+        self.emit_ins(X86Instruction::alu_immediate(size, 0xf7, 0x4 | (division as u8) << 1 | signed as u8, REGISTER_SCRATCH, 0, None));
 
         if dst != RDX {
             if alt_dst {
@@ -1377,7 +1381,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
         if let OperandSize::S32 = size {
             if signed && !self.executable.get_sbpf_version().explicit_sign_extension_of_results() {
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, 0, None)); // sign extend i32 to i64
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x63, dst, dst, None)); // sign extend i32 to i64
             }
         }
     }
@@ -1390,7 +1394,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, REGISTER_MAP[0], X86IndirectAccess::Offset(std::mem::size_of::<u64>() as i32), err_kind as i64)); // err.kind = err_kind;
     }
 
-    fn emit_result_is_err(&mut self, destination: u8) {
+    fn emit_result_is_err(&mut self, destination: X86Register) {
         let ok = ProgramResult::Ok(0);
         let ok_discriminant = ok.discriminant();
         self.emit_ins(X86Instruction::lea(OperandSize::S64, REGISTER_PTR_TO_VM, destination, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult)))));
@@ -1407,15 +1411,15 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_ins(X86Instruction::push(*reg, None));
             }
             self.emit_ins(X86Instruction::mov(OperandSize::S64, RSP, REGISTER_MAP[0]));
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, RSP, - 8 * 3, None)); // RSP -= 8 * 3;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, - 8 * 3, None)); // RSP -= 8 * 3;
             self.emit_rust_call(Value::Constant64(C::trace as *const u8 as i64, false), &[
                 Argument { index: 1, value: Value::Register(REGISTER_MAP[0]) }, // registers
                 Argument { index: 0, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ContextObjectPointer), false) },
             ], None);
             // Pop stack and return
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, RSP, 8 * 3, None)); // RSP += 8 * 3;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8 * 3, None)); // RSP += 8 * 3;
             self.emit_ins(X86Instruction::pop(REGISTER_MAP[0]));
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, RSP, 8 * (REGISTER_MAP.len() - 1) as i64, None)); // RSP += 8 * (REGISTER_MAP.len() - 1);
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8 * (REGISTER_MAP.len() - 1) as i64, None)); // RSP += 8 * (REGISTER_MAP.len() - 1);
             self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH));
             self.emit_ins(X86Instruction::return_near());
         }
@@ -1423,11 +1427,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Epilogue
         self.set_anchor(ANCHOR_EPILOGUE);
         if self.config.enable_instruction_meter {
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER -= 1;
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, 0, None)); // REGISTER_INSTRUCTION_METER -= pc;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER -= 1;
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // REGISTER_INSTRUCTION_METER -= pc;
             // *DueInsnCount = *PreviousInstructionMeter - REGISTER_INSTRUCTION_METER;
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2B, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, 0, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter))))); // REGISTER_INSTRUCTION_METER -= *PreviousInstructionMeter;
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xf7, 3, REGISTER_INSTRUCTION_METER, 0, None)); // REGISTER_INSTRUCTION_METER = -REGISTER_INSTRUCTION_METER;
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2B, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter))))); // REGISTER_INSTRUCTION_METER -= *PreviousInstructionMeter;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xf7, 3, REGISTER_INSTRUCTION_METER, 0, None)); // REGISTER_INSTRUCTION_METER = -REGISTER_INSTRUCTION_METER;
             self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DueInsnCount)))); // *DueInsnCount = REGISTER_INSTRUCTION_METER;
         }
         // Print stop watch value
@@ -1458,11 +1462,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Quit gracefully
         self.set_anchor(ANCHOR_EXIT);
         if self.config.enable_instruction_meter {
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, 0, None)); // REGISTER_INSTRUCTION_METER -= pc;
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // REGISTER_INSTRUCTION_METER -= pc;
         }
         self.emit_ins(X86Instruction::lea(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_SCRATCH, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult)))));
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(std::mem::size_of::<u64>() as i32))); // result.return_value = R0;
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x31, REGISTER_SCRATCH, REGISTER_SCRATCH, 0, None)); // REGISTER_SCRATCH ^= REGISTER_SCRATCH; // REGISTER_SCRATCH = 0;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x31, REGISTER_SCRATCH, REGISTER_SCRATCH, None)); // REGISTER_SCRATCH ^= REGISTER_SCRATCH; // REGISTER_SCRATCH = 0;
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_EPILOGUE, 5)));
 
         // Handler for exceptions which report their pc
@@ -1530,7 +1534,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Routine for prologue of emit_internal_call()
         self.set_anchor(ANCHOR_INTERNAL_FUNCTION_CALL_PROLOGUE);
         self.emit_validate_instruction_count(None);
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 5, RSP, 8 * (SCRATCH_REGS + 1) as i64, None)); // alloca
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 8 * (SCRATCH_REGS + 1) as i64, None)); // alloca
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, RSP, X86IndirectAccess::OffsetIndexShift(0, RSP, 0))); // Save original REGISTER_SCRATCH
         self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, REGISTER_SCRATCH, X86IndirectAccess::OffsetIndexShift(8 * (SCRATCH_REGS + 1) as i32, RSP, 0))); // Load return address
         for (i, reg) in REGISTER_MAP.iter().skip(FIRST_SCRATCH_REG).take(SCRATCH_REGS).enumerate() {
@@ -1541,7 +1545,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_SCRATCH, RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Push return address and restore original REGISTER_SCRATCH
         // Increase env.call_depth
         let call_depth_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::CallDepth));
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_PTR_TO_VM, 1, Some(call_depth_access))); // env.call_depth += 1;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_PTR_TO_VM, 1, Some(call_depth_access))); // env.call_depth += 1;
         // If env.call_depth == self.config.max_call_depth, throw CallDepthExceeded
         self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S32, REGISTER_PTR_TO_VM, self.config.max_call_depth as i64, Some(call_depth_access)));
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x83, self.relative_to_anchor(ANCHOR_CALL_DEPTH_EXCEEDED, 6)));
@@ -1549,7 +1553,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         if !self.executable.get_sbpf_version().dynamic_stack_frames() {
             // With fixed frames we start the new frame at the next fixed offset
             let stack_frame_size = self.config.stack_frame_size as i64 * if self.config.enable_stack_frame_gaps { 2 } else { 1 };
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_MAP[FRAME_PTR_REG], stack_frame_size, None)); // REGISTER_MAP[FRAME_PTR_REG] += stack_frame_size;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_MAP[FRAME_PTR_REG], stack_frame_size, None)); // REGISTER_MAP[FRAME_PTR_REG] += stack_frame_size;
         }
         self.emit_ins(X86Instruction::return_near());
 
@@ -1560,29 +1564,29 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::push(REGISTER_MAP[0], None));
         // Calculate offset relative to program_vm_addr
         self.emit_ins(X86Instruction::load_immediate(REGISTER_MAP[0], self.program_vm_addr as i64));
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_MAP[0], REGISTER_SCRATCH, 0, None)); // guest_target_address -= self.program_vm_addr;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_MAP[0], REGISTER_SCRATCH, None)); // guest_target_address -= self.program_vm_addr;
         // Force alignment of guest_target_address
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 4, REGISTER_SCRATCH, !(INSN_SIZE as i64 - 1), None)); // guest_target_address &= !(INSN_SIZE - 1);
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 4, REGISTER_SCRATCH, !(INSN_SIZE as i64 - 1), None)); // guest_target_address &= !(INSN_SIZE - 1);
         // Bound check
         // if(guest_target_address >= number_of_instructions * INSN_SIZE) throw CALL_OUTSIDE_TEXT_SEGMENT;
         let number_of_instructions = self.result.pc_section.len();
         self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S64, REGISTER_SCRATCH, (number_of_instructions * INSN_SIZE) as i64, None)); // guest_target_address.cmp(number_of_instructions * INSN_SIZE)
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x83, self.relative_to_anchor(ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT, 6)));
         // First half of self.emit_profile_instruction_count(None);
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, RSP, 0, Some(X86IndirectAccess::OffsetIndexShift(-8, RSP, 0)))); // instruction_meter -= guest_current_pc;
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter -= 1;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, RSP, Some(X86IndirectAccess::OffsetIndexShift(-8, RSP, 0)))); // instruction_meter -= guest_current_pc;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter -= 1;
         // Load host target_address from self.result.pc_section
         debug_assert_eq!(INSN_SIZE, 8); // Because the instruction size is also the slot size we do not need to shift the offset
         self.emit_ins(X86Instruction::load_immediate(REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64)); // host_target_address = self.result.pc_section;
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_MAP[0], 0, None)); // host_target_address += guest_target_address;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_MAP[0], None)); // host_target_address += guest_target_address;
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_MAP[0], REGISTER_MAP[0], X86IndirectAccess::Offset(0))); // host_target_address = self.result.pc_section[host_target_address / 8];
         // Calculate the guest_target_pc (dst / INSN_SIZE) to update REGISTER_INSTRUCTION_METER
         // and as target_pc for potential ANCHOR_CALL_UNSUPPORTED_INSTRUCTION
         let shift_amount = INSN_SIZE.trailing_zeros();
         debug_assert_eq!(INSN_SIZE, 1 << shift_amount);
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xc1, 5, REGISTER_SCRATCH, shift_amount as i64, None)); // guest_target_pc /= INSN_SIZE;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 5, REGISTER_SCRATCH, shift_amount as i64, None)); // guest_target_pc /= INSN_SIZE;
         // Second half of self.emit_profile_instruction_count(None);
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, 0, None)); // instruction_meter += guest_target_pc;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += guest_target_pc;
         // Restore the clobbered REGISTER_MAP[0]
         self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_MAP[0], RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Swap REGISTER_MAP[0] and host_target_address
         self.emit_ins(X86Instruction::return_near()); // Tail call to host_target_address
@@ -1607,7 +1611,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             let target_offset = *anchor_base + len.trailing_zeros() as usize;
             self.set_anchor(ANCHOR_TRANSLATE_MEMORY_ADDRESS + target_offset);
             // Second half of emit_sanitized_load_immediate(REGISTER_SCRATCH, vm_addr)
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, REGISTER_SCRATCH, lower_key, None));
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_SCRATCH, lower_key, None));
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
             if *anchor_base == 0 { // AccessType::Load
                 let load = match len {
@@ -1626,7 +1630,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             } else { // AccessType::Store
                 if *anchor_base == 8 {
                     // Second half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
-                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(-96, RSP, 0))));
+                    self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(-96, RSP, 0))));
                 }
                 let store = match len {
                     1 => MemoryMapping::store::<u8> as *const u8 as i64,
