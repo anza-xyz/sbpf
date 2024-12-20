@@ -138,8 +138,13 @@ impl X86Instruction {
                 }
                 Some(X86IndirectAccess::OffsetIndexShift(offset, index, shift)) => {
                     displacement = offset;
-                    displacement_size = OperandSize::S32;
-                    modrm.mode = 2;
+                    if (-128..=127).contains(&displacement) {
+                        displacement_size = OperandSize::S8;
+                        modrm.mode = 1;
+                    } else {
+                        displacement_size = OperandSize::S32;
+                        modrm.mode = 2;
+                    }
                     modrm.m = RSP;
                     rex.x = index & 0b1000 != 0;
                     sib.scale = shift & 0b11;
