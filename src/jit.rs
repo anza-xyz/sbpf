@@ -420,7 +420,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, 0));
             }
 
-            let dst = if insn.dst == FRAME_PTR_REG as u8 { u8::MAX } else { REGISTER_MAP[insn.dst as usize] };
+            let dst = REGISTER_MAP[insn.dst as usize];
             let src = REGISTER_MAP[insn.src as usize];
             let target_pc = (self.pc as isize + insn.off as isize + 1) as usize;
 
