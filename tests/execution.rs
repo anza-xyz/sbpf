@@ -977,9 +977,7 @@ fn test_memory_instructions() {
             ldxw r0, [r1+2]
             exit",
             config.clone(),
-            [
-                0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0xcc, 0xdd, //
-            ],
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0xcc, 0xdd],
             TestContextObject::new(2),
             ProgramResult::Ok(0x44332211),
         );
@@ -988,10 +986,7 @@ fn test_memory_instructions() {
             ldxdw r0, [r1+2]
             exit",
             config.clone(),
-            [
-                0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, //
-                0x77, 0x88, 0xcc, 0xdd, //
-            ],
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
             TestContextObject::new(2),
             ProgramResult::Ok(0x8877665544332211),
         );
@@ -999,36 +994,62 @@ fn test_memory_instructions() {
         test_interpreter_and_jit_asm!(
             "
             stb [r1+2], 0x11
-            ldxb r0, [r1+2]
+            ldxdw r0, [r1+2]
             exit",
             config.clone(),
-            [0xaa, 0xbb, 0xff, 0xcc, 0xdd],
+            [0xaa, 0xbb, 0xff, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
             TestContextObject::new(3),
-            ProgramResult::Ok(0x11),
+            ProgramResult::Ok(0x8877665544332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            stb [r1+2], -1
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x88776655443322FF),
         );
         test_interpreter_and_jit_asm!(
             "
             sth [r1+2], 0x2211
-            ldxh r0, [r1+2]
+            ldxdw r0, [r1+2]
             exit",
             config.clone(),
-            [
-                0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd, //
-            ],
+            [0xaa, 0xbb, 0xff, 0xff, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
             TestContextObject::new(3),
-            ProgramResult::Ok(0x2211),
+            ProgramResult::Ok(0x8877665544332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            sth [r1+2], -1
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x887766554433FFFF),
         );
         test_interpreter_and_jit_asm!(
             "
             stw [r1+2], 0x44332211
-            ldxw r0, [r1+2]
+            ldxdw r0, [r1+2]
             exit",
             config.clone(),
-            [
-                0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd, //
-            ],
+            [0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
             TestContextObject::new(3),
-            ProgramResult::Ok(0x44332211),
+            ProgramResult::Ok(0x8877665544332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            stw [r1+2], -1
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x88776655FFFFFFFF),
         );
         test_interpreter_and_jit_asm!(
             "
@@ -1036,12 +1057,19 @@ fn test_memory_instructions() {
             ldxdw r0, [r1+2]
             exit",
             config.clone(),
-            [
-                0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, //
-                0xff, 0xff, 0xcc, 0xdd, //
-            ],
+            [0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd],
             TestContextObject::new(3),
             ProgramResult::Ok(0x44332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            stdw [r1+2], -1
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0xFFFFFFFFFFFFFFFF),
         );
 
         test_interpreter_and_jit_asm!(
@@ -1051,9 +1079,7 @@ fn test_memory_instructions() {
             ldxb r0, [r1+2]
             exit",
             config.clone(),
-            [
-                0xaa, 0xbb, 0xff, 0xcc, 0xdd, //
-            ],
+            [0xaa, 0xbb, 0xff, 0xcc, 0xdd],
             TestContextObject::new(4),
             ProgramResult::Ok(0x11),
         );
@@ -1064,9 +1090,7 @@ fn test_memory_instructions() {
             ldxh r0, [r1+2]
             exit",
             config.clone(),
-            [
-                0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd, //
-            ],
+            [0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd],
             TestContextObject::new(4),
             ProgramResult::Ok(0x2211),
         );
@@ -1077,9 +1101,7 @@ fn test_memory_instructions() {
             ldxw r0, [r1+2]
             exit",
             config.clone(),
-            [
-                0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd, //
-            ],
+            [0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd],
             TestContextObject::new(4),
             ProgramResult::Ok(0x44332211),
         );
@@ -1092,10 +1114,7 @@ fn test_memory_instructions() {
             ldxdw r0, [r1+2]
             exit",
             config.clone(),
-            [
-                0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, //
-                0xff, 0xff, 0xcc, 0xdd, //
-            ],
+            [0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd],
             TestContextObject::new(6),
             ProgramResult::Ok(0x8877665544332211),
         );
