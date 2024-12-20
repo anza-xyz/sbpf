@@ -33,7 +33,11 @@ use crate::{
     memory_region::MemoryMapping,
     program::BuiltinFunction,
     vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm},
-    x86::*,
+    x86::{
+        FenceType, X86IndirectAccess, X86Instruction,
+        X86Register::{self, *},
+        ARGUMENT_REGISTERS, CALLEE_SAVED_REGISTERS, CALLER_SAVED_REGISTERS,
+    },
 };
 
 const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
@@ -202,7 +206,7 @@ const ANCHOR_CALL_REG_UNSUPPORTED_INSTRUCTION: usize = 14;
 const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 21;
 const ANCHOR_COUNT: usize = 34; // Update me when adding or removing anchors
 
-const REGISTER_MAP: [u8; 11] = [
+const REGISTER_MAP: [X86Register; 11] = [
     CALLER_SAVED_REGISTERS[0], // RAX
     ARGUMENT_REGISTERS[1],     // RSI
     ARGUMENT_REGISTERS[2],     // RDX
@@ -217,11 +221,11 @@ const REGISTER_MAP: [u8; 11] = [
 ];
 
 /// RDI: Used together with slot_in_vm()
-const REGISTER_PTR_TO_VM: u8 = ARGUMENT_REGISTERS[0];
+const REGISTER_PTR_TO_VM: X86Register = ARGUMENT_REGISTERS[0];
 /// R10: Program counter limit
-const REGISTER_INSTRUCTION_METER: u8 = CALLER_SAVED_REGISTERS[7];
+const REGISTER_INSTRUCTION_METER: X86Register = CALLER_SAVED_REGISTERS[7];
 /// R11: Scratch register
-const REGISTER_SCRATCH: u8 = CALLER_SAVED_REGISTERS[8];
+const REGISTER_SCRATCH: X86Register = CALLER_SAVED_REGISTERS[8];
 
 #[derive(Copy, Clone, Debug)]
 pub enum OperandSize {
@@ -233,10 +237,10 @@ pub enum OperandSize {
 }
 
 enum Value {
-    Register(u8),
-    RegisterIndirect(u8, i32, bool),
-    RegisterPlusConstant32(u8, i32, bool),
-    RegisterPlusConstant64(u8, i64, bool),
+    Register(X86Register),
+    RegisterIndirect(X86Register, i32, bool),
+    RegisterPlusConstant32(X86Register, i32, bool),
+    RegisterPlusConstant64(X86Register, i64, bool),
     Constant64(i64, bool),
 }
 
@@ -875,7 +879,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_sanitized_load_immediate(&mut self, destination: u8, value: i64) {
+    fn emit_sanitized_load_immediate(&mut self, destination: X86Register, value: i64) {
         let lower_key = self.immediate_value_key as i32 as i64;
         if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
             self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(lower_key)));
@@ -898,7 +902,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_sanitized_alu(&mut self, size: OperandSize, opcode: u8, opcode_extension: u8, destination: u8, immediate: i64) {
+    fn emit_sanitized_alu(&mut self, size: OperandSize, opcode: u8, opcode_extension: u8, destination: X86Register, immediate: i64) {
         if self.should_sanitize_constant(immediate) {
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
             self.emit_ins(X86Instruction::alu(size, opcode, REGISTER_SCRATCH, destination, None));
@@ -985,7 +989,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_profile_instruction_count(target_pc);
     }
 
-    fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<u8>) {
+    fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<X86Register>) {
         let mut saved_registers = CALLER_SAVED_REGISTERS.to_vec();
         if let Some(reg) = result_reg {
             if let Some(dst) = saved_registers.iter().position(|x| *x == reg) {
@@ -1014,7 +1018,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         for argument in arguments {
             let is_stack_argument = argument.index >= ARGUMENT_REGISTERS.len();
             let dst = if is_stack_argument {
-                u8::MAX // Never used
+                RSP // Never used
             } else {
                 ARGUMENT_REGISTERS[argument.index]
             };
@@ -1029,7 +1033,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 Value::RegisterIndirect(reg, offset, user_provided) => {
                     debug_assert!(!user_provided);
                     if is_stack_argument {
-                        debug_assert_ne!(reg, RSP);
+                        debug_assert!(reg != RSP);
                         self.emit_ins(X86Instruction::push(reg, Some(X86IndirectAccess::Offset(offset))));
                     } else if reg == RSP {
                         self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, dst, X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)));
@@ -1146,7 +1150,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_address_translation(&mut self, dst: Option<u8>, vm_addr: Value, len: u64, value: Option<Value>) {
+    fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
 
         let stack_slot_of_value_to_store = X86IndirectAccess::OffsetIndexShift(-112, RSP, 0);
@@ -1217,7 +1221,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_conditional_branch_reg(&mut self, op: u8, bitwise: bool, first_operand: u8, second_operand: u8, target_pc: usize) {
+    fn emit_conditional_branch_reg(&mut self, op: u8, bitwise: bool, first_operand: X86Register, second_operand: X86Register, target_pc: usize) {
         self.emit_validate_and_profile_instruction_count(Some(target_pc));
         if bitwise { // Logical
             self.emit_ins(X86Instruction::test(OperandSize::S64, first_operand, second_operand, None));
@@ -1231,7 +1235,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_conditional_branch_imm(&mut self, op: u8, bitwise: bool, immediate: i64, second_operand: u8, target_pc: usize) {
+    fn emit_conditional_branch_imm(&mut self, op: u8, bitwise: bool, immediate: i64, second_operand: X86Register, target_pc: usize) {
         self.emit_validate_and_profile_instruction_count(Some(target_pc));
         if self.should_sanitize_constant(immediate) {
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
@@ -1251,7 +1255,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_undo_profile_instruction_count(Value::Constant64(target_pc as i64, true));
     }
 
-    fn emit_shift(&mut self, size: OperandSize, opcode_extension: u8, source: u8, destination: u8, immediate: Option<i64>) {
+    fn emit_shift(&mut self, size: OperandSize, opcode_extension: u8, source: X86Register, destination: X86Register, immediate: Option<i64>) {
         if let Some(immediate) = immediate {
             if self.should_sanitize_constant(immediate) {
                 self.emit_sanitized_load_immediate(source, immediate);
@@ -1296,8 +1300,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         alt_dst: bool,
         division: bool,
         signed: bool,
-        src: u8,
-        dst: u8,
+        src: X86Register,
+        dst: X86Register,
         imm: Option<i64>,
     ) {
         //         LMUL UHMUL SHMUL UDIV SDIV UREM SREM
@@ -1390,7 +1394,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, REGISTER_MAP[0], X86IndirectAccess::Offset(std::mem::size_of::<u64>() as i32), err_kind as i64)); // err.kind = err_kind;
     }
 
-    fn emit_result_is_err(&mut self, destination: u8) {
+    fn emit_result_is_err(&mut self, destination: X86Register) {
         let ok = ProgramResult::Ok(0);
         let ok_discriminant = ok.discriminant();
         self.emit_ins(X86Instruction::lea(OperandSize::S64, REGISTER_PTR_TO_VM, destination, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult)))));
