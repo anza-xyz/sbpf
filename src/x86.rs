@@ -13,7 +13,7 @@ macro_rules! exclude_operand_sizes {
     }
 }
 
-#[allow(clippy::upper_case_acronyms)]
+#[allow(dead_code, clippy::upper_case_acronyms)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
 pub enum X86Register {
@@ -33,6 +33,14 @@ pub enum X86Register {
     R13 = 13,
     R14 = 14,
     R15 = 15,
+    MM0 = 16,
+    MM1 = 17,
+    MM2 = 18,
+    MM3 = 19,
+    MM4 = 20,
+    MM5 = 21,
+    MM6 = 22,
+    MM7 = 23,
 }
 use X86Register::*;
 
@@ -263,6 +271,36 @@ impl X86Instruction {
             first_operand: destination as u8,
             second_operand: source as u8,
             ..Self::DEFAULT
+        }
+    }
+
+    /// Move to / from / between MMX (float mantissa)
+    #[allow(dead_code)]
+    #[inline]
+    pub const fn mov_mmx(size: OperandSize, source: X86Register, destination: X86Register) -> Self {
+        exclude_operand_sizes!(
+            size,
+            OperandSize::S0 | OperandSize::S8 | OperandSize::S16 | OperandSize::S32
+        );
+        if (destination as u8) & 16 != 0 {
+            // If the destination is a MMX register
+            Self {
+                size,
+                opcode_escape_sequence: 1,
+                opcode: if (source as u8) & 16 != 0 { 0x6F } else { 0x6E },
+                first_operand: (destination as u8) & 0xF,
+                second_operand: (source as u8) & 0xF,
+                ..Self::DEFAULT
+            }
+        } else {
+            Self {
+                size,
+                opcode_escape_sequence: 1,
+                opcode: 0x7E,
+                first_operand: (source as u8) & 0xF,
+                second_operand: (destination as u8) & 0xF,
+                ..Self::DEFAULT
+            }
         }
     }
 
