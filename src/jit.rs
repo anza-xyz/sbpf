@@ -1257,34 +1257,20 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     fn emit_shift(&mut self, size: OperandSize, opcode_extension: u8, source: X86Register, destination: X86Register, immediate: Option<i64>) {
         if let Some(immediate) = immediate {
-            if self.should_sanitize_constant(immediate) {
-                self.emit_sanitized_load_immediate(source, immediate);
-            } else {
-                self.emit_ins(X86Instruction::alu_immediate(size, 0xc1, opcode_extension, destination, immediate, None));
-                return;
-            }
+            self.emit_ins(X86Instruction::alu_immediate(size, 0xc1, opcode_extension, destination, immediate, None));
+            return;
         }
         if let OperandSize::S32 = size {
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0x81, 4, destination, -1, None)); // Mask to 32 bit
+            self.emit_ins(X86Instruction::mov(OperandSize::S32, destination, destination)); // Truncate to 32 bit
         }
         if source == RCX {
-            if destination == RCX {
-                self.emit_ins(X86Instruction::alu_immediate(size, 0xd3, opcode_extension, destination, 0, None));
-            } else {
-                self.emit_ins(X86Instruction::push(RCX, None));
-                self.emit_ins(X86Instruction::alu_immediate(size, 0xd3, opcode_extension, destination, 0, None));
-                self.emit_ins(X86Instruction::pop(RCX));
-            }
+            self.emit_ins(X86Instruction::alu_immediate(size, 0xd3, opcode_extension, destination, 0, None));
         } else if destination == RCX {
-            if source != REGISTER_SCRATCH {
-                self.emit_ins(X86Instruction::push(source, None));
-            }
+            self.emit_ins(X86Instruction::push(source, None));
             self.emit_ins(X86Instruction::xchg(OperandSize::S64, source, RCX, None));
             self.emit_ins(X86Instruction::alu_immediate(size, 0xd3, opcode_extension, source, 0, None));
             self.emit_ins(X86Instruction::mov(OperandSize::S64, source, RCX));
-            if source != REGISTER_SCRATCH {
-                self.emit_ins(X86Instruction::pop(source));
-            }
+            self.emit_ins(X86Instruction::pop(source));
         } else {
             self.emit_ins(X86Instruction::push(RCX, None));
             self.emit_ins(X86Instruction::mov(OperandSize::S64, source, RCX));
