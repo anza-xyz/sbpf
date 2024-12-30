@@ -114,7 +114,7 @@ The following Rust equivalents assume that:
 | `9C` / `01111001`  | from v2     | `ldxdw dst, [src + off]`
 | `A4` / `10100100`  | all         | `xor32 dst, imm`       | `dst = (dst as u32).xor(imm) as u64`
 | `AC` / `10101100`  | all         | `xor32 dst, src`       | `dst = (dst as u32).xor(src as u32) as u64`
-| `B4` / `10110100`  | all         | `mov32 dst, imm`       | `dst = imm as i32 as i64 as u64`
+| `B4` / `10110100`  | all         | `mov32 dst, imm`       | `dst = imm as u64`
 | `BC` / `10111100`  | until v2    | `mov32 dst, src`       | `dst = src as u32 as u64`
 | `BC` / `10111100`  | from v2     | `mov32 dst, src`       | `dst = src as i32 as i64 as u64`
 | `C4` / `11000100`  | all         | `ash32 dst, imm`       | `dst = (dst as i32).wrapping_shr(imm) as u32 as u64`
@@ -158,7 +158,7 @@ The following Rust equivalents assume that:
 | `9F` / `01111011`  | from v2     | `stxdw [dst + off], src`
 | `A7` / `10100111`  | all         | `xor64 dst, imm`   | `dst = dst.xor(imm)`
 | `AF` / `10101111`  | all         | `xor64 dst, src`   | `dst = dst.xor(src)`
-| `B7` / `10110111`  | all         | `mov64 dst, imm`   | `dst = imm as u64`
+| `B7` / `10110111`  | all         | `mov64 dst, imm`   | `dst = imm as i32 as i64 as u64`
 | `BF` / `10111111`  | all         | `mov64 dst, src`   | `dst = src`
 | `C7` / `11000111`  | all         | `ash64 dst, imm`   | `dst = (dst as i64).wrapping_shr(imm)`
 | `CF` / `11001111`  | all         | `ash64 dst, src`   | `dst = (dst as i64).wrapping_shr(src as u32)`
