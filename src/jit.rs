@@ -1365,7 +1365,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             }
         }
 
-        self.emit_ins(X86Instruction::alu_immediate(size, 0xf7, 0x4 | (division as u8) << 1 | signed as u8, REGISTER_SCRATCH, 0, None));
+        self.emit_ins(X86Instruction::alu_immediate(size, 0xf7, 0x4 | ((division as u8) << 1) | signed as u8, REGISTER_SCRATCH, 0, None));
 
         if dst != RDX {
             if alt_dst {

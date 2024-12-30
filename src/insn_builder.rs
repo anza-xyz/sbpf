@@ -89,7 +89,7 @@ impl<I: Instruction> IntoBytes for &I {
     fn into_bytes(self) -> Self::Bytes {
         vec![
             self.opt_code_byte(),
-            self.get_src() << 4 | self.get_dst(),
+            (self.get_src() << 4) | self.get_dst(),
             self.get_off() as u8,
             (self.get_off() >> 8) as u8,
             self.get_imm() as u8,
