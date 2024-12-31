@@ -1572,11 +1572,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::load_immediate(REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64)); // host_target_address = self.result.pc_section;
         self.emit_ins(X86Instruction::load(OperandSize::S32, REGISTER_MAP[0], REGISTER_MAP[0], X86IndirectAccess::OffsetIndexShift(0, REGISTER_SCRATCH, 2))); // host_target_address = self.result.pc_section[guest_target_pc];
         // Offset host_target_address by self.result.text_section
-        let undo_sign_extension = ((self.result.text_section.as_ptr() as u64 >> 31) & 1) as u32;
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_MAP[0], (self.result.text_section.as_ptr() as u32).wrapping_sub(undo_sign_extension) as i64, None));
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 1, REGISTER_MAP[0], 32, None)); // rotate_right(32)
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_MAP[0], ((self.result.text_section.as_ptr() as u64 >> 32) as u32).wrapping_add(undo_sign_extension) as i64, None));
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 1, REGISTER_MAP[0], 32, None)); // rotate_right(32)
+        self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, REGISTER_SCRATCH, MM0));
+        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.result.text_section.as_ptr() as i64)); // REGISTER_SCRATCH = self.result.text_section;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_MAP[0], None)); // host_target_address += self.result.text_section;
+        self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, MM0, REGISTER_SCRATCH));
         // Restore the clobbered REGISTER_MAP[0]
         self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_MAP[0], RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Swap REGISTER_MAP[0] and host_target_address
         self.emit_ins(X86Instruction::return_near()); // Tail call to host_target_address
