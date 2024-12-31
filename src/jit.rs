@@ -139,7 +139,7 @@ impl JitProgram {
                 host_stack_pointer = in(reg) &mut vm.host_stack_pointer,
                 inlateout("rdi") std::ptr::addr_of_mut!(*vm).cast::<u64>().offset(get_runtime_environment_key() as isize) => _,
                 inlateout("r10") (vm.previous_instruction_meter as i64).wrapping_add(registers[11] as i64) => _,
-                inlateout("rax") self.pc_section[registers[11] as usize] => _,
+                inlateout("rax") &self.text_section[self.pc_section[registers[11] as usize]] as *const u8 => _,
                 inlateout("r11") &registers => _,
                 lateout("rsi") _, lateout("rdx") _, lateout("rcx") _, lateout("r8") _,
                 lateout("r9") _, lateout("r12") _, lateout("r13") _, lateout("r14") _, lateout("r15") _,
@@ -394,8 +394,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     /// Compiles the given executable, consuming the compiler
     pub fn compile(mut self) -> Result<JitProgram, EbpfError> {
-        let text_section_base = self.result.text_section.as_ptr();
-
         // Randomized padding at the start before random intervals begin
         if self.config.noop_instruction_rate != 0 {
             for _ in 0..self.diversification_rng.gen_range(0..MAX_START_PADDING_LENGTH) {
@@ -411,7 +409,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 return Err(EbpfError::ExhaustedTextSegment(self.pc));
             }
             let mut insn = ebpf::get_insn_unchecked(self.program, self.pc);
-            self.result.pc_section[self.pc] = unsafe { text_section_base.add(self.offset_in_text_section) } as usize;
+            self.result.pc_section[self.pc] = self.offset_in_text_section;
 
             // Regular instruction meter checkpoints to prevent long linear runs from exceeding their budget
             if self.last_instruction_meter_validation_pc + self.config.instruction_meter_checkpoint_distance <= self.pc {
@@ -432,7 +430,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::LD_DW_IMM if !self.executable.get_sbpf_version().disable_lddw() => {
                     self.emit_validate_and_profile_instruction_count(Some(self.pc + 2));
                     self.pc += 1;
-                    self.result.pc_section[self.pc] = self.anchors[ANCHOR_CALL_UNSUPPORTED_INSTRUCTION] as usize;
+                    self.result.pc_section[self.pc] = unsafe { self.anchors[ANCHOR_CALL_UNSUPPORTED_INSTRUCTION].offset_from(self.result.text_section.as_ptr()) as _ };
                     ebpf::augment_lddw_unchecked(self.program, &mut insn);
                     if self.should_sanitize_constant(insn.imm) {
                         self.emit_sanitized_load_immediate(dst, insn.imm);
@@ -1567,9 +1565,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, RSP, Some(X86IndirectAccess::OffsetIndexShift(-8, RSP, 0)))); // instruction_meter -= guest_current_pc;
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter -= 1;
         self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += guest_target_pc;
-        // Load host target_address from self.result.pc_section
+        // Load host_target_address: self.result.text_section.add(self.result.pc_section[guest_target_pc])
         self.emit_ins(X86Instruction::load_immediate(REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64)); // host_target_address = self.result.pc_section;
-        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_MAP[0], REGISTER_MAP[0], X86IndirectAccess::OffsetIndexShift(0, REGISTER_SCRATCH, shift_amount as u8))); // host_target_address = self.result.pc_section[guest_target_pc];
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x03, REGISTER_MAP[0], REGISTER_MAP[0], Some(X86IndirectAccess::OffsetIndexShift(0, REGISTER_SCRATCH, shift_amount as u8)))); // host_target_address = self.result.pc_section + self.result.pc_section[guest_target_pc];
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_MAP[0], unsafe { self.result.text_section.as_ptr().offset_from(self.result.pc_section.as_ptr().cast::<u8>()) } as i64, None)); // host_target_address += self.result.text_section - self.result.pc_section;
         // Restore the clobbered REGISTER_MAP[0]
         self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_MAP[0], RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Swap REGISTER_MAP[0] and host_target_address
         self.emit_ins(X86Instruction::return_near()); // Tail call to host_target_address
@@ -1665,7 +1664,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         let instruction_end = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section).add(instruction_length) };
         let destination = if self.result.pc_section[target_pc] != 0 {
             // Backward jump
-            self.result.pc_section[target_pc] as *const u8
+            &self.result.text_section[self.result.pc_section[target_pc]] as *const u8
         } else {
             // Forward jump, needs relocation
             self.text_section_jumps.push(Jump { location: unsafe { instruction_end.sub(4) }, target_pc });
@@ -1678,14 +1677,14 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     fn resolve_jumps(&mut self) {
         // Relocate forward jumps
         for jump in &self.text_section_jumps {
-            let destination = self.result.pc_section[jump.target_pc] as *const u8;
+            let destination = &self.result.text_section[self.result.pc_section[jump.target_pc]] as *const u8;
             let offset_value = 
                 unsafe { destination.offset_from(jump.location) } as i32 // Relative jump
                 - mem::size_of::<i32>() as i32; // Jump from end of instruction
             unsafe { ptr::write_unaligned(jump.location as *mut i32, offset_value); }
         }
         // Patch addresses to which `callx` may raise an unsupported instruction error
-        let call_unsupported_instruction = self.anchors[ANCHOR_CALL_REG_UNSUPPORTED_INSTRUCTION] as usize;
+        let call_unsupported_instruction = unsafe { self.anchors[ANCHOR_CALL_REG_UNSUPPORTED_INSTRUCTION].offset_from(self.result.text_section.as_ptr()) as _ };
         if self.executable.get_sbpf_version().static_syscalls() {
             let mut prev_pc = 0;
             for current_pc in self.executable.get_function_registry().keys() {
