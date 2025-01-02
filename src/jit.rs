@@ -1702,23 +1702,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 - mem::size_of::<i32>() as i32; // Jump from end of instruction
             unsafe { ptr::write_unaligned(jump.location as *mut i32, offset_value); }
         }
-        // Patch addresses to which `callx` may raise an unsupported instruction error
-        let call_unsupported_instruction = unsafe { self.anchors[ANCHOR_CALL_REG_UNSUPPORTED_INSTRUCTION].offset_from(self.result.text_section.as_ptr()) as u32 };
-        if self.executable.get_sbpf_version().static_syscalls() {
-            let mut prev_pc = 0;
-            for current_pc in self.executable.get_function_registry().keys() {
-                if current_pc as usize >= self.result.pc_section.len() {
-                    break;
-                }
-                for pc in prev_pc..current_pc as usize {
-                    self.result.pc_section[pc] = call_unsupported_instruction;
-                }
-                prev_pc = current_pc as usize + 1;
-            }
-            for pc in prev_pc..self.result.pc_section.len() {
-                self.result.pc_section[pc] = call_unsupported_instruction;
-            }
-        }
     }
 }
 
