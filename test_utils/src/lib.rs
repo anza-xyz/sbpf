@@ -276,6 +276,28 @@ macro_rules! test_interpreter_and_jit {
                 Ok(()) => {
                     let (instruction_count_jit, result_jit) = vm.execute_program(&$executable, false);
                     let tracer_jit = &vm.context_object_pointer;
+                    let mut diverged = false;
+                    if format!("{:?}", result_interpreter) != format!("{:?}", result_jit) {
+                        println!(
+                            "Result of interpreter ({:?}) and JIT ({:?}) diverged",
+                            result_interpreter, result_jit,
+                        );
+                        diverged = true;
+                    }
+                    if instruction_count_interpreter != instruction_count_jit {
+                        println!(
+                            "Instruction meter of interpreter ({:?}) and JIT ({:?}) diverged",
+                            instruction_count_interpreter, instruction_count_jit,
+                        );
+                        diverged = true;
+                    }
+                    if interpreter_final_pc != vm.registers[11] {
+                        println!(
+                            "Final PC of interpreter ({:?}) and JIT ({:?}) result diverged",
+                            interpreter_final_pc, vm.registers[11],
+                        );
+                        diverged = true;
+                    }
                     if !TestContextObject::compare_trace_log(&_tracer_interpreter, tracer_jit) {
                         let analysis = Analysis::from_executable(&$executable).unwrap();
                         let stdout = std::io::stdout();
@@ -288,20 +310,9 @@ macro_rules! test_interpreter_and_jit {
                         analysis
                             .disassemble_trace_log(&mut stdout.lock(), &tracer_jit.trace_log)
                             .unwrap();
-                        panic!();
+                        diverged = true;
                     }
-                    assert_eq!(
-                        format!("{:?}", result_interpreter), format!("{:?}", result_jit),
-                        "Interpreter and JIT instruction result diverged",
-                    );
-                    assert_eq!(
-                        instruction_count_interpreter, instruction_count_jit,
-                        "Interpreter and JIT instruction meter diverged",
-                    );
-                    assert_eq!(
-                        interpreter_final_pc, vm.registers[11],
-                        "Interpreter and JIT instruction final PC diverged",
-                    );
+                    assert!(!diverged);
                 }
             }
         }
