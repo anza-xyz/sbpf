@@ -279,11 +279,7 @@ macro_rules! test_interpreter_and_jit {
                 None
             );
             match compilation_result {
-                Err(_) => assert_eq!(
-                    format!("{:?}", compilation_result),
-                    expected_result,
-                    "Unexpected result for JIT compilation"
-                ),
+                Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
                     let (instruction_count_jit, result) = vm.execute_program(&$executable, false);
                     let tracer_jit = &vm.context_object_pointer;
