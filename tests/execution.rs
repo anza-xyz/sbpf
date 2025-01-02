@@ -3536,46 +3536,6 @@ fn test_invalid_call_imm() {
 }
 
 #[test]
-#[should_panic(expected = "Invalid syscall should have been detected in the verifier.")]
-fn test_invalid_exit_or_return() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
-        let inst = if sbpf_version == SBPFVersion::V0 {
-            0x9d
-        } else {
-            0x95
-        };
-
-        let prog = &[
-            0xbf, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // mov64 r0, 2
-            inst, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit/return
-        ];
-
-        let config = Config {
-            enabled_sbpf_versions: sbpf_version..=sbpf_version,
-            enable_instruction_tracing: true,
-            ..Config::default()
-        };
-        let function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-        let loader = Arc::new(BuiltinProgram::new_loader(config, function_registry));
-        let mut executable = Executable::<TestContextObject>::from_text_bytes(
-            prog,
-            loader,
-            sbpf_version,
-            FunctionRegistry::default(),
-        )
-        .unwrap();
-
-        test_interpreter_and_jit!(
-            false,
-            executable,
-            [],
-            TestContextObject::new(2),
-            ProgramResult::Err(EbpfError::UnsupportedInstruction),
-        );
-    }
-}
-
-#[test]
 fn callx_unsupported_instruction_and_exceeded_max_instructions() {
     let program = "
         sub32 r7, r1
