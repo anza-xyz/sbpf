@@ -3319,34 +3319,18 @@ fn test_call_imm_does_not_dispatch_syscalls() {
 }
 
 #[test]
-fn callx_unsupported_instruction_and_exceeded_max_instructions() {
-    let program = "
+fn test_callx_unsupported_instruction_and_exceeded_max_instructions() {
+    test_interpreter_and_jit_asm!(
+        "
         sub32 r7, r1
         sub64 r5, 8
         sub64 r7, 0
         callx r5
         callx r5
-        return
-        ";
-    test_interpreter_and_jit_asm!(
-        program,
+        return",
         [],
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
-    );
-
-    let loader = Arc::new(BuiltinProgram::new_loader(
-        Config::default(),
-        FunctionRegistry::default(),
-    ));
-
-    let mut executable = assemble(program, loader).unwrap();
-    test_interpreter_and_jit!(
-        true,
-        executable,
-        [],
-        TestContextObject::new(4),
-        ProgramResult::Err(EbpfError::UnsupportedInstruction)
     );
 }
 

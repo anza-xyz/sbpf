@@ -226,12 +226,12 @@ macro_rules! assert_error {
 
 #[macro_export]
 macro_rules! test_interpreter_and_jit {
-    ($override_budget:literal, $executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
+    (override_budget => $override_budget:expr, $executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
         let expected_instruction_count = $context_object.get_remaining();
         #[allow(unused_mut)]
         let mut context_object = $context_object;
         let expected_result = format!("{:?}", $expected_result);
-        if !$override_budget && !expected_result.contains("ExceededMaxInstructions") {
+        if $override_budget {
             const INSTRUCTION_METER_BUDGET: u64 = 1024;
             context_object.remaining = INSTRUCTION_METER_BUDGET;
         }
@@ -319,13 +319,23 @@ macro_rules! test_interpreter_and_jit {
         );
     };
     ($executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
+        let expected_result = $expected_result;
         test_interpreter_and_jit!(
-            false,
+            override_budget => false,
             $executable,
             $mem,
             $context_object,
-            $expected_result
-        )
+            expected_result,
+        );
+        if !matches!(expected_result, ProgramResult::Err(solana_sbpf::error::EbpfError::ExceededMaxInstructions)) {
+            test_interpreter_and_jit!(
+                override_budget => true,
+                $executable,
+                $mem,
+                $context_object,
+                expected_result,
+            );
+        }
     };
 }
 
