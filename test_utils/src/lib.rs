@@ -226,7 +226,7 @@ macro_rules! assert_error {
 
 #[macro_export]
 macro_rules! test_interpreter_and_jit {
-    ($override_budget:literal, $verify:literal, $executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
+    ($override_budget:literal, $executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
         let expected_instruction_count = $context_object.get_remaining();
         #[allow(unused_mut)]
         let mut context_object = $context_object;
@@ -235,9 +235,7 @@ macro_rules! test_interpreter_and_jit {
             const INSTRUCTION_METER_BUDGET: u64 = 1024;
             context_object.remaining = INSTRUCTION_METER_BUDGET;
         }
-        if $verify {
-            $executable.verify::<RequisiteVerifier>().unwrap();
-        }
+        $executable.verify::<RequisiteVerifier>().unwrap();
         let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _tracer_interpreter) = {
             let mut mem = $mem;
             let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
@@ -320,20 +318,9 @@ macro_rules! test_interpreter_and_jit {
             "Unexpected result"
         );
     };
-    ($verify:literal, $executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
-        test_interpreter_and_jit!(
-            false,
-            $verify,
-            $executable,
-            $mem,
-            $context_object,
-            $expected_result
-        )
-    };
     ($executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
         test_interpreter_and_jit!(
             false,
-            true,
             $executable,
             $mem,
             $context_object,
@@ -377,7 +364,7 @@ macro_rules! test_interpreter_and_jit_elf {
             .register_function_hashed($location.as_bytes(), $syscall_function)
             .unwrap();
     };
-    ($verify:literal, $source:tt, $config:tt, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+    ($source:tt, $config:tt, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut file = File::open($source).unwrap();
         let mut elf = Vec::new();
         file.read_to_end(&mut elf).unwrap();
@@ -387,11 +374,8 @@ macro_rules! test_interpreter_and_jit_elf {
             $(test_interpreter_and_jit_elf!(register, function_registry, $location => $syscall_function);)*
             let loader = Arc::new(BuiltinProgram::new_loader($config, function_registry));
             let mut executable = Executable::<TestContextObject>::from_elf(&elf, loader).unwrap();
-            test_interpreter_and_jit!($verify, executable, $mem, $context_object, $expected_result);
+            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
         }
-    };
-    ($source:tt, $config:tt, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-         test_interpreter_and_jit_elf!(true, $source, $config, $mem, ($($location => $syscall_function),*), $context_object, $expected_result);
     };
     ($source:tt, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let config = Config {

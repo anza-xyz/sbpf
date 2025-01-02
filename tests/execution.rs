@@ -3343,7 +3343,6 @@ fn callx_unsupported_instruction_and_exceeded_max_instructions() {
     let mut executable = assemble(program, loader).unwrap();
     test_interpreter_and_jit!(
         true,
-        false,
         executable,
         [],
         TestContextObject::new(4),
