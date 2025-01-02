@@ -389,10 +389,10 @@ fn test_verifier_err_invalid_exit() {
 }
 
 #[test]
-#[should_panic(expected = "InvalidFunction(1811268607)")]
-fn test_verifier_unknown_sycall() {
+#[should_panic(expected = "InvalidSyscall(2)")]
+fn test_verifier_unknown_syscall() {
     let prog = &[
-        0x85, 0x00, 0x00, 0x00, 0xfe, 0xc3, 0xf5, 0x6b, // call 0x6bf5c3fe
+        0x95, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // syscall 2
         0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // return
     ];
     let executable = Executable::<TestContextObject>::from_text_bytes(
