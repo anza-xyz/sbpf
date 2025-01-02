@@ -238,7 +238,7 @@ macro_rules! test_interpreter_and_jit {
         if $verify {
             $executable.verify::<RequisiteVerifier>().unwrap();
         }
-        let (instruction_count_interpreter, interpreter_final_pc, _tracer_interpreter) = {
+        let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _tracer_interpreter) = {
             let mut mem = $mem;
             let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
             let mut context_object = context_object.clone();
@@ -251,14 +251,10 @@ macro_rules! test_interpreter_and_jit {
                 vec![mem_region],
                 None
             );
-            let (instruction_count_interpreter, result) = vm.execute_program(&$executable, true);
-            assert_eq!(
-                format!("{:?}", result),
-                expected_result,
-                "Unexpected result for Interpreter"
-            );
+            let (instruction_count_interpreter, result_interpreter) = vm.execute_program(&$executable, true);
             (
                 instruction_count_interpreter,
+                result_interpreter,
                 vm.registers[11],
                 vm.context_object_pointer.clone(),
             )
@@ -281,7 +277,7 @@ macro_rules! test_interpreter_and_jit {
             match compilation_result {
                 Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
-                    let (instruction_count_jit, result) = vm.execute_program(&$executable, false);
+                    let (instruction_count_jit, result_jit) = vm.execute_program(&$executable, false);
                     let tracer_jit = &vm.context_object_pointer;
                     if !TestContextObject::compare_trace_log(&_tracer_interpreter, tracer_jit) {
                         let analysis = Analysis::from_executable(&$executable).unwrap();
@@ -298,9 +294,8 @@ macro_rules! test_interpreter_and_jit {
                         panic!();
                     }
                     assert_eq!(
-                        format!("{:?}", result),
-                        expected_result,
-                        "Unexpected result for JIT"
+                        format!("{:?}", result_interpreter), format!("{:?}", result_jit),
+                        "Interpreter and JIT instruction result diverged",
                     );
                     assert_eq!(
                         instruction_count_interpreter, instruction_count_jit,
@@ -319,6 +314,11 @@ macro_rules! test_interpreter_and_jit {
                 "Instruction meter did not consume expected amount"
             );
         }
+        assert_eq!(
+            format!("{:?}", result_interpreter),
+            expected_result,
+            "Unexpected result"
+        );
     };
     ($verify:literal, $executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
         test_interpreter_and_jit!(
