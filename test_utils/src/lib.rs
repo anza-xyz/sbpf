@@ -226,11 +226,10 @@ macro_rules! assert_error {
 
 #[macro_export]
 macro_rules! test_interpreter_and_jit {
-    (override_budget => $override_budget:expr, $executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
+    (override_budget => $override_budget:expr, $executable:expr, $mem:tt, $context_object:expr $(,)?) => {{
         let expected_instruction_count = $context_object.get_remaining();
         #[allow(unused_mut)]
         let mut context_object = $context_object;
-        let expected_result = format!("{:?}", $expected_result);
         if $override_budget {
             const INSTRUCTION_METER_BUDGET: u64 = 1024;
             context_object.remaining = INSTRUCTION_METER_BUDGET;
@@ -312,20 +311,19 @@ macro_rules! test_interpreter_and_jit {
                 "Instruction meter did not consume expected amount"
             );
         }
-        assert_eq!(
-            format!("{:?}", result_interpreter),
-            expected_result,
-            "Unexpected result"
-        );
-    };
+        result_interpreter
+    }};
     ($executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
         let expected_result = $expected_result;
-        test_interpreter_and_jit!(
+        let result = test_interpreter_and_jit!(
             override_budget => false,
             $executable,
             $mem,
             $context_object,
-            expected_result,
+        );
+        assert_eq!(
+            format!("{:?}", result), format!("{:?}", expected_result),
+            "Unexpected result",
         );
         if !matches!(expected_result, ProgramResult::Err(solana_sbpf::error::EbpfError::ExceededMaxInstructions)) {
             test_interpreter_and_jit!(
@@ -333,7 +331,6 @@ macro_rules! test_interpreter_and_jit {
                 $executable,
                 $mem,
                 $context_object,
-                expected_result,
             );
         }
     };
