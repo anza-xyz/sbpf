@@ -431,7 +431,7 @@ pub fn assemble<C: ContextObject>(
                                         target_pc as usize,
                                     )
                                     .map_err(|_| format!("Label hash collision {name}"))?;
-                                insn(opc, 0, 1, 0, instr_imm)
+                                insn(opc, 0, 0, 0, instr_imm)
                             }
                             (CallReg, [Register(dst)]) => {
                                 if sbpf_version.callx_uses_src_reg() {
