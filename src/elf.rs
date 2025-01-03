@@ -742,7 +742,7 @@ impl<C: ContextObject> Executable<C> {
         if header.e_ident.ei_osabi != ELFOSABI_NONE {
             return Err(ElfError::WrongAbi);
         }
-        if header.e_machine != EM_BPF && header.e_machine != EM_SBPF {
+        if header.e_machine != EM_BPF {
             return Err(ElfError::WrongMachine);
         }
         if header.e_type != ET_DYN {
