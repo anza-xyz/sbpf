@@ -3502,6 +3502,26 @@ fn test_total_chaos() {
 }
 
 #[test]
+fn test_call_imm_does_not_dispatch_syscalls() {
+    test_syscall_asm!(
+        "
+        call function_foo
+        return
+        syscall {}
+        return
+        function_foo:
+        mov r0, 42
+        return",
+        [],
+        (
+            3 => "bpf_syscall_string" => syscalls::SyscallString::vm,
+        ),
+        TestContextObject::new(4),
+        ProgramResult::Ok(42),
+    );
+}
+
+#[test]
 fn callx_unsupported_instruction_and_exceeded_max_instructions() {
     let program = "
         sub32 r7, r1
