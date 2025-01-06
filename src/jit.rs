@@ -206,8 +206,9 @@ const ANCHOR_CALL_UNSUPPORTED_INSTRUCTION: usize = 11;
 const ANCHOR_EXTERNAL_FUNCTION_CALL: usize = 12;
 const ANCHOR_INTERNAL_FUNCTION_CALL_PROLOGUE: usize = 13;
 const ANCHOR_INTERNAL_FUNCTION_CALL_REG: usize = 14;
-const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 21;
-const ANCHOR_COUNT: usize = 34; // Update me when adding or removing anchors
+const ANCHOR_VALIDATE_AND_PROFILE_INSTRUCTION_COUNT: usize = 15;
+const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 16;
+const ANCHOR_COUNT: usize = 28; // Update me when adding or removing anchors
 
 const REGISTER_MAP: [X86Register; 11] = [
     CALLER_SAVED_REGISTERS[0], // RAX
@@ -980,8 +981,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     #[inline]
     fn emit_validate_and_profile_instruction_count(&mut self, target_pc: Option<usize>) {
-        self.emit_validate_instruction_count(Some(self.pc));
-        self.emit_profile_instruction_count(target_pc);
+        let target_pc = target_pc.unwrap();
+        self.last_instruction_meter_validation_pc = self.pc;
+        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, ((target_pc << 32 | self.pc) as i64) ^ self.immediate_value_key));
+        self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_VALIDATE_AND_PROFILE_INSTRUCTION_COUNT, 5)));
     }
 
     fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<X86Register>) {
@@ -1580,8 +1583,25 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_MAP[0], RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Swap REGISTER_MAP[0] and host_target_address
         self.emit_ins(X86Instruction::return_near()); // Tail call to host_target_address
 
-        // Translates a vm memory address to a host memory address
+        // Routine for emit_validate_and_profile_instruction_count()
+        self.set_anchor(ANCHOR_VALIDATE_AND_PROFILE_INSTRUCTION_COUNT);
+        self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, REGISTER_SCRATCH, MM0));
         let lower_key = self.immediate_value_key as i32 as i64;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0x81, 6, REGISTER_SCRATCH, lower_key, None)); // REGISTER_SCRATCH ^= lower_key;
+        // If instruction_meter >= pc, throw ExceededMaxInstructions
+        self.emit_ins(X86Instruction::cmp(OperandSize::S64, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None));
+        self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
+        // A version of `self.emit_profile_instruction_count(None);` which reads self.pc from REGISTER_SCRATCH
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter -= self.pc;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter -= 1;
+        self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, MM0, REGISTER_SCRATCH));
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 5, REGISTER_SCRATCH, 32, None)); // wrapping_shr(32)
+        let upper_key = (self.immediate_value_key >> 32) as i32 as i64;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0x81, 6, REGISTER_SCRATCH, upper_key, None)); // REGISTER_SCRATCH ^= upper_key;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += target_pc;
+        self.emit_ins(X86Instruction::return_near());
+
+        // Translates a vm memory address to a host memory address
         for (anchor_base, len) in &[
             (0, 1i32), (0, 2i32), (0, 4i32), (0, 8i32),
             (4, 1i32), (4, 2i32), (4, 4i32), (4, 8i32),
