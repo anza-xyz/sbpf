@@ -789,14 +789,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                         || (insn.opc == ebpf::RETURN && !self.executable.get_sbpf_version().static_syscalls()) {
                         return Err(EbpfError::UnsupportedInstruction);
                     }
-                    self.emit_validate_instruction_count(Some(self.pc));
+                    self.emit_validate_and_profile_instruction_count(Some(0));
 
                     let call_depth_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::CallDepth));
                     // If env.call_depth == 0, we've reached the exit instruction of the entry point
                     self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S32, REGISTER_PTR_TO_VM, 0, Some(call_depth_access)));
-                    if self.config.enable_instruction_meter {
-                        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
-                    }
                     // we're done
                     self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_EXIT, 6)));
 
@@ -804,7 +801,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_PTR_TO_VM, 1, Some(call_depth_access))); // env.call_depth -= 1;
 
                     // and return
-                    self.emit_profile_instruction_count(Some(0));
                     self.emit_ins(X86Instruction::return_near());
                 },
 
@@ -1443,7 +1439,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Quit gracefully
         self.set_anchor(ANCHOR_EXIT);
         if self.config.enable_instruction_meter {
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // REGISTER_INSTRUCTION_METER -= pc;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER += 1;
         }
         self.emit_ins(X86Instruction::lea(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_SCRATCH, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult)))));
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(std::mem::size_of::<u64>() as i32))); // result.return_value = R0;
