@@ -1,4 +1,5 @@
-#![allow(clippy::arithmetic_side_effects)]
+//! Just-in-time compiler (Linux x86, macOS x86)
+
 // Derived from uBPF <https://github.com/iovisor/ubpf>
 // Copyright 2015 Big Switch Networks, Inc
 //      (uBPF: JIT algorithm, originally in C)
@@ -9,6 +10,8 @@
 // Licensed under the Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0> or
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
+
+#![allow(clippy::arithmetic_side_effects)]
 
 #[cfg(not(feature = "shuttle-test"))]
 use rand::{thread_rng, Rng};
@@ -32,7 +35,7 @@ use crate::{
     },
     memory_region::MemoryMapping,
     program::BuiltinFunction,
-    vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm},
+    vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm, RuntimeEnvironmentSlot},
     x86::{
         FenceType, X86IndirectAccess, X86Instruction,
         X86Register::{self, *},
@@ -40,11 +43,16 @@ use crate::{
     },
 };
 
-const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
-const MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION: usize = 110;
-const MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT: usize = 24;
-const MAX_START_PADDING_LENGTH: usize = 256;
+/// The maximum machine code length in bytes of a program with no guest instructions
+pub const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
+/// The maximum machine code length in bytes of a single guest instruction
+pub const MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION: usize = 110;
+/// The maximum machine code length in bytes of an instruction meter checkpoint
+pub const MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT: usize = 24;
+/// The maximum machine code length of the randomized padding
+pub const MAX_START_PADDING_LENGTH: usize = 256;
 
+/// The program compiled to native host machinecode
 pub struct JitProgram {
     /// OS page size in bytes and the alignment of the sections
     page_size: usize,
@@ -106,7 +114,7 @@ impl JitProgram {
         Ok(())
     }
 
-    pub fn invoke<C: ContextObject>(
+    pub(crate) fn invoke<C: ContextObject>(
         &self,
         _config: &Config,
         vm: &mut EbpfVm<C>,
@@ -149,10 +157,12 @@ impl JitProgram {
         }
     }
 
+    /// The length of the host machinecode in bytes
     pub fn machine_code_length(&self) -> usize {
         self.text_section.len()
     }
 
+    /// The total memory used in bytes rounded up to page boundaries
     pub fn mem_size(&self) -> usize {
         let pc_loc_table_size =
             round_to_page_size(std::mem::size_of_val(self.pc_section), self.page_size);
@@ -230,12 +240,18 @@ const REGISTER_INSTRUCTION_METER: X86Register = CALLER_SAVED_REGISTERS[7];
 /// R11: Scratch register
 const REGISTER_SCRATCH: X86Register = CALLER_SAVED_REGISTERS[8];
 
+/// Bit width of an instruction operand
 #[derive(Copy, Clone, Debug)]
 pub enum OperandSize {
+    /// Empty
     S0 = 0,
+    /// 8 bit
     S8 = 8,
+    /// 16 bit
     S16 = 16,
+    /// 32 bit
     S32 = 32,
+    /// 64 bit
     S64 = 64,
 }
 
@@ -256,20 +272,6 @@ struct Argument {
 struct Jump {
     location: *const u8,
     target_pc: usize,
-}
-
-/// Indices of slots inside RuntimeEnvironment
-enum RuntimeEnvironmentSlot {
-    HostStackPointer = 0,
-    CallDepth = 1,
-    ContextObjectPointer = 2,
-    PreviousInstructionMeter = 3,
-    DueInsnCount = 4,
-    StopwatchNumerator = 5,
-    StopwatchDenominator = 6,
-    Registers = 7,
-    ProgramResult = 19,
-    MemoryMapping = 27,
 }
 
 /* Explanation of the Instruction Meter
@@ -321,6 +323,7 @@ enum RuntimeEnvironmentSlot {
     and undo again can be anything, so we just set it to zero.
 */
 
+/// Temporary object which stores the compilation context
 pub struct JitCompiler<'a, C: ContextObject> {
     result: JitProgram,
     text_section_jumps: Vec<Jump>,
@@ -872,7 +875,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     // This function helps the optimizer to inline the machinecode emission while avoiding stack allocations
     #[inline(always)]
-    pub fn emit_ins(&mut self, instruction: X86Instruction) {
+    fn emit_ins(&mut self, instruction: X86Instruction) {
         instruction.emit(self);
         if self.next_noop_insertion == 0 {
             self.next_noop_insertion = self.noop_range.sample(&mut self.diversification_rng);
@@ -1677,221 +1680,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 unsafe { destination.offset_from(jump.location) } as i32 // Relative jump
                 - mem::size_of::<i32>() as i32; // Jump from end of instruction
             unsafe { ptr::write_unaligned(jump.location as *mut i32, offset_value); }
-        }
-    }
-}
-
-#[cfg(all(test, target_arch = "x86_64", not(target_os = "windows")))]
-mod tests {
-    use super::*;
-    use crate::{
-        disassembler::disassemble_instruction,
-        program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
-        static_analysis::CfgNode,
-        syscalls,
-        vm::TestContextObject,
-    };
-    use byteorder::{ByteOrder, LittleEndian};
-    use std::{collections::BTreeMap, sync::Arc};
-
-    #[test]
-    fn test_runtime_environment_slots() {
-        let executable = create_mockup_executable(Config::default(), &[]);
-        let mut context_object = TestContextObject::new(0);
-        let env = EbpfVm::new(
-            executable.get_loader().clone(),
-            executable.get_sbpf_version(),
-            &mut context_object,
-            MemoryMapping::new_identity(),
-            0,
-        );
-
-        macro_rules! check_slot {
-            ($env:expr, $entry:ident, $slot:ident) => {
-                assert_eq!(
-                    unsafe {
-                        std::ptr::addr_of!($env.$entry)
-                            .cast::<u64>()
-                            .offset_from(std::ptr::addr_of!($env).cast::<u64>()) as usize
-                    },
-                    RuntimeEnvironmentSlot::$slot as usize,
-                );
-            };
-        }
-
-        check_slot!(env, host_stack_pointer, HostStackPointer);
-        check_slot!(env, call_depth, CallDepth);
-        check_slot!(env, context_object_pointer, ContextObjectPointer);
-        check_slot!(env, previous_instruction_meter, PreviousInstructionMeter);
-        check_slot!(env, due_insn_count, DueInsnCount);
-        check_slot!(env, stopwatch_numerator, StopwatchNumerator);
-        check_slot!(env, stopwatch_denominator, StopwatchDenominator);
-        check_slot!(env, registers, Registers);
-        check_slot!(env, program_result, ProgramResult);
-        check_slot!(env, memory_mapping, MemoryMapping);
-    }
-
-    fn create_mockup_executable(config: Config, program: &[u8]) -> Executable<TestContextObject> {
-        let sbpf_version = *config.enabled_sbpf_versions.end();
-        let mut loader = BuiltinProgram::new_loader_with_dense_registration(config);
-        loader
-            .register_function("gather_bytes", 1, syscalls::SyscallGatherBytes::vm)
-            .unwrap();
-        let mut function_registry = FunctionRegistry::default();
-        function_registry
-            .register_function(8, *b"function_foo", 8)
-            .unwrap();
-        Executable::<TestContextObject>::from_text_bytes(
-            program,
-            Arc::new(loader),
-            sbpf_version,
-            function_registry,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn test_code_length_estimate() {
-        const INSTRUCTION_COUNT: usize = 256;
-        let mut prog = vec![0; ebpf::INSN_SIZE * INSTRUCTION_COUNT];
-        for pc in 0..INSTRUCTION_COUNT {
-            prog[pc * ebpf::INSN_SIZE] = ebpf::ADD64_IMM;
-        }
-
-        let mut empty_program_machine_code_length_per_version = [0; 4];
-        for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
-            let empty_program_machine_code_length = {
-                let config = Config {
-                    noop_instruction_rate: 0,
-                    enabled_sbpf_versions: sbpf_version..=sbpf_version,
-                    ..Config::default()
-                };
-                let mut executable = create_mockup_executable(config, &prog[0..0]);
-                Executable::<TestContextObject>::jit_compile(&mut executable).unwrap();
-                executable
-                    .get_compiled_program()
-                    .unwrap()
-                    .machine_code_length()
-            };
-            assert!(empty_program_machine_code_length <= MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH);
-            empty_program_machine_code_length_per_version[sbpf_version as usize] =
-                empty_program_machine_code_length;
-        }
-
-        let mut instruction_meter_checkpoint_machine_code_length = [0; 2];
-        for (index, machine_code_length) in instruction_meter_checkpoint_machine_code_length
-            .iter_mut()
-            .enumerate()
-        {
-            let config = Config {
-                instruction_meter_checkpoint_distance: index * INSTRUCTION_COUNT * 2,
-                noop_instruction_rate: 0,
-                enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
-                ..Config::default()
-            };
-            let mut executable = create_mockup_executable(config, &prog);
-            Executable::<TestContextObject>::jit_compile(&mut executable).unwrap();
-            *machine_code_length = (executable
-                .get_compiled_program()
-                .unwrap()
-                .machine_code_length()
-                - empty_program_machine_code_length_per_version[0])
-                / INSTRUCTION_COUNT;
-        }
-        let instruction_meter_checkpoint_machine_code_length =
-            instruction_meter_checkpoint_machine_code_length[0]
-                - instruction_meter_checkpoint_machine_code_length[1];
-        assert!(
-            instruction_meter_checkpoint_machine_code_length
-                <= MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT
-        );
-
-        let mut cfg_nodes = BTreeMap::new();
-        cfg_nodes.insert(
-            8,
-            CfgNode {
-                label: std::string::String::from("label"),
-                ..CfgNode::default()
-            },
-        );
-
-        for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
-            println!("opcode;machine_code_length_per_instruction;assembly");
-            let empty_program_machine_code_length =
-                empty_program_machine_code_length_per_version[sbpf_version as usize];
-
-            for mut opcode in 0x00..=0xFF {
-                let (registers, immediate) = match opcode {
-                    0x85 if !sbpf_version.static_syscalls() => (0x00, Some(8)),
-                    0x85 if sbpf_version.static_syscalls() => (0x00, None),
-                    0x8D => (0x88, Some(0)),
-                    0x95 if sbpf_version.static_syscalls() => (0x00, Some(1)),
-                    0xE5 if !sbpf_version.static_syscalls() => {
-                        // Put external function calls on a separate loop iteration
-                        opcode = 0x85;
-                        (0x00, Some(0x91020CDD))
-                    }
-                    0xF5 => {
-                        // Put invalid function calls on a separate loop iteration
-                        opcode = 0x85;
-                        (0x00, Some(0x91020CD0))
-                    }
-                    0xD4 | 0xDC => (0x88, Some(16)),
-                    _ => (0x88, Some(0x11223344)),
-                };
-                for pc in 0..INSTRUCTION_COUNT {
-                    prog[pc * ebpf::INSN_SIZE] = opcode;
-                    prog[pc * ebpf::INSN_SIZE + 1] = registers;
-                    let offset = 7_u16.wrapping_sub(pc as u16);
-                    LittleEndian::write_u16(&mut prog[pc * ebpf::INSN_SIZE + 2..], offset);
-                    let immediate = immediate.unwrap_or_else(|| 7_u32.wrapping_sub(pc as u32));
-                    LittleEndian::write_u32(&mut prog[pc * ebpf::INSN_SIZE + 4..], immediate);
-                }
-                let config = Config {
-                    noop_instruction_rate: 0,
-                    enabled_sbpf_versions: sbpf_version..=sbpf_version,
-                    ..Config::default()
-                };
-                let mut executable = create_mockup_executable(config, &prog);
-                let result = Executable::<TestContextObject>::jit_compile(&mut executable);
-                if result.is_err() {
-                    assert!(matches!(
-                        result.unwrap_err(),
-                        EbpfError::UnsupportedInstruction
-                    ));
-                    continue;
-                }
-                let machine_code_length = executable
-                    .get_compiled_program()
-                    .unwrap()
-                    .machine_code_length()
-                    - empty_program_machine_code_length;
-                let instruction_count = if opcode == 0x18 {
-                    // LDDW takes two slots
-                    INSTRUCTION_COUNT / 2
-                } else {
-                    INSTRUCTION_COUNT
-                };
-                let machine_code_length_per_instruction =
-                    machine_code_length as f64 / instruction_count as f64;
-                assert!(
-                    f64::ceil(machine_code_length_per_instruction) as usize
-                        <= MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION
-                );
-                let insn = ebpf::get_insn_unchecked(&prog, 0);
-                let assembly = disassemble_instruction(
-                    &insn,
-                    0,
-                    &cfg_nodes,
-                    executable.get_function_registry(),
-                    executable.get_loader(),
-                    executable.get_sbpf_version(),
-                );
-                println!(
-                    "{:02X};{:>7.3};{}",
-                    opcode, machine_code_length_per_instruction, assembly
-                );
-            }
         }
     }
 }

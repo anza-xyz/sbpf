@@ -227,6 +227,30 @@ pub struct CallFrame {
     pub target_pc: u64,
 }
 
+/// Indices of slots inside [EbpfVm]
+pub enum RuntimeEnvironmentSlot {
+    /// [EbpfVm::host_stack_pointer]
+    HostStackPointer = 0,
+    /// [EbpfVm::call_depth]
+    CallDepth = 1,
+    /// [EbpfVm::context_object_pointer]
+    ContextObjectPointer = 2,
+    /// [EbpfVm::previous_instruction_meter]
+    PreviousInstructionMeter = 3,
+    /// [EbpfVm::due_insn_count]
+    DueInsnCount = 4,
+    /// [EbpfVm::stopwatch_numerator]
+    StopwatchNumerator = 5,
+    /// [EbpfVm::stopwatch_denominator]
+    StopwatchDenominator = 6,
+    /// [EbpfVm::registers]
+    Registers = 7,
+    /// [EbpfVm::program_result]
+    ProgramResult = 19,
+    /// [EbpfVm::memory_mapping]
+    MemoryMapping = 27,
+}
+
 /// A virtual machine to run eBPF programs.
 ///
 /// # Examples
