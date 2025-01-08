@@ -10,9 +10,9 @@ extern crate test_utils;
 
 use solana_sbpf::program::{FunctionRegistry, SBPFVersion};
 use solana_sbpf::vm::Config;
-use solana_sbpf::{assembler::assemble, ebpf, program::BuiltinProgram, vm::TestContextObject};
+use solana_sbpf::{assembler::assemble, ebpf, program::BuiltinProgram};
 use std::sync::Arc;
-use test_utils::{TCP_SACK_ASM, TCP_SACK_BIN};
+use test_utils::{TestContextObject, TCP_SACK_ASM, TCP_SACK_BIN};
 
 fn asm(src: &str) -> Result<Vec<ebpf::Insn>, String> {
     asm_with_config(src, Config::default())

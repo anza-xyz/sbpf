@@ -28,10 +28,10 @@ use solana_sbpf::{
     elf::Executable,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     verifier::{RequisiteVerifier, Verifier, VerifierError},
-    vm::{Config, ContextObject, TestContextObject},
+    vm::{Config, ContextObject},
 };
 use std::sync::Arc;
-use test_utils::{assert_error, create_vm, syscalls};
+use test_utils::{assert_error, create_vm, syscalls, TestContextObject};
 use thiserror::Error;
 
 /// Error definitions

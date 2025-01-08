@@ -20,10 +20,10 @@ use solana_sbpf::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{Config, ContextObject, TestContextObject},
+    vm::{Config, ContextObject},
 };
 use std::sync::Arc;
-use test_utils::{create_vm, test_interpreter_and_jit};
+use test_utils::{create_vm, test_interpreter_and_jit, TestContextObject};
 
 // BPF_ALU32_LOAD : Arithmetic and Logic
 #[test]

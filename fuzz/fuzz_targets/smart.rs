@@ -12,9 +12,8 @@ use solana_sbpf::{
     memory_region::MemoryRegion,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     verifier::{RequisiteVerifier, Verifier},
-    vm::TestContextObject,
 };
-use test_utils::create_vm;
+use test_utils::{create_vm, TestContextObject};
 
 use crate::common::ConfigTemplate;
 

@@ -19,7 +19,7 @@ use crate::{
     interpreter::Interpreter,
     memory_region::MemoryMapping,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::{Analysis, TraceLogEntry},
+    static_analysis::Analysis,
 };
 use std::{collections::BTreeMap, fmt::Debug};
 
@@ -137,51 +137,6 @@ pub trait ContextObject {
     fn get_remaining(&self) -> u64;
 }
 
-/// Simple instruction meter for testing
-#[derive(Debug, Clone, Default)]
-pub struct TestContextObject {
-    /// Contains the register state at every instruction in order of execution
-    pub trace_log: Vec<TraceLogEntry>,
-    /// Maximal amount of instructions which still can be executed
-    pub remaining: u64,
-}
-
-impl ContextObject for TestContextObject {
-    fn trace(&mut self, state: [u64; 12]) {
-        self.trace_log.push(state);
-    }
-
-    fn consume(&mut self, amount: u64) {
-        self.remaining = self.remaining.saturating_sub(amount);
-    }
-
-    fn get_remaining(&self) -> u64 {
-        self.remaining
-    }
-}
-
-impl TestContextObject {
-    /// Initialize with instruction meter
-    pub fn new(remaining: u64) -> Self {
-        Self {
-            trace_log: Vec::new(),
-            remaining,
-        }
-    }
-
-    /// Compares an interpreter trace and a JIT trace.
-    ///
-    /// The log of the JIT can be longer because it only validates the instruction meter at branches.
-    pub fn compare_trace_log(interpreter: &Self, jit: &Self) -> bool {
-        let interpreter = interpreter.trace_log.as_slice();
-        let mut jit = jit.trace_log.as_slice();
-        if jit.len() > interpreter.len() {
-            jit = &jit[0..interpreter.len()];
-        }
-        interpreter == jit
-    }
-}
-
 /// Statistic of taken branches (from a recorded trace)
 pub struct DynamicAnalysis {
     /// Maximal edge counter value
@@ -263,8 +218,9 @@ pub enum RuntimeEnvironmentSlot {
 ///     memory_region::{MemoryMapping, MemoryRegion},
 ///     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
 ///     verifier::RequisiteVerifier,
-///     vm::{Config, EbpfVm, TestContextObject},
+///     vm::{Config, EbpfVm},
 /// };
+/// use test_utils::TestContextObject;
 ///
 /// let prog = &[
 ///     0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit

@@ -7,7 +7,7 @@ use crate::{
     elf::Executable,
     error::EbpfError,
     program::SBPFVersion,
-    vm::{ContextObject, DynamicAnalysis, TestContextObject},
+    vm::{ContextObject, DynamicAnalysis},
 };
 use rustc_demangle::demangle;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -124,10 +124,22 @@ impl Default for CfgNode {
     }
 }
 
+struct DummyContextObject {}
+
+impl ContextObject for DummyContextObject {
+    fn trace(&mut self, _state: [u64; 12]) {}
+
+    fn consume(&mut self, _amount: u64) {}
+
+    fn get_remaining(&self) -> u64 {
+        0
+    }
+}
+
 /// Result of the executable analysis
 pub struct Analysis<'a> {
     /// The program which is analyzed
-    executable: &'a Executable<TestContextObject>,
+    executable: &'a Executable<DummyContextObject>,
     /// Plain list of instructions as they occur in the executable
     pub instructions: Vec<ebpf::Insn>,
     /// Functions in the executable
@@ -182,7 +194,7 @@ impl<'a> Analysis<'a> {
         let mut result = Self {
             // Removes the generic ContextObject which is safe because we are not going to execute the program
             executable: unsafe {
-                std::mem::transmute::<&Executable<C>, &Executable<TestContextObject>>(executable)
+                std::mem::transmute::<&Executable<C>, &Executable<DummyContextObject>>(executable)
             },
             instructions,
             functions,

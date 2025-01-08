@@ -9,9 +9,9 @@ use solana_sbpf::{
     elf::Executable,
     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
-    vm::TestContextObject,
 };
 use std::sync::Arc;
+use test_utils::TestContextObject;
 
 // Simply disassemble a program into human-readable instructions.
 fn main() {

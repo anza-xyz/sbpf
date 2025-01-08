@@ -8,9 +8,10 @@ use solana_sbpf::{
     program::{BuiltinProgram, FunctionRegistry},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{Config, DynamicAnalysis, EbpfVm, TestContextObject},
+    vm::{Config, DynamicAnalysis, EbpfVm},
 };
 use std::{fs::File, io::Read, path::Path, sync::Arc};
+use test_utils::TestContextObject;
 
 fn main() {
     let matches = App::new("Solana BPF CLI")

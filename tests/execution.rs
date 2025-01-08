@@ -24,13 +24,13 @@ use solana_sbpf::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{Config, ContextObject, TestContextObject},
+    vm::{Config, ContextObject},
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test_utils::{
     assert_error, create_vm, syscalls, test_interpreter_and_jit, test_interpreter_and_jit_asm,
-    test_interpreter_and_jit_elf, test_syscall_asm, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH,
-    TCP_SACK_NOMATCH,
+    test_interpreter_and_jit_elf, test_syscall_asm, TestContextObject, PROG_TCP_PORT_80,
+    TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
 };
 
 // BPF_ALU32_LOAD : Arithmetic and Logic

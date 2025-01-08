@@ -12,10 +12,10 @@ use solana_sbpf::{
     },
     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::CfgNode,
-    vm::{Config, TestContextObject},
+    vm::Config,
 };
 use std::{collections::BTreeMap, sync::Arc};
-use test_utils::syscalls;
+use test_utils::{syscalls, TestContextObject};
 
 fn create_mockup_executable(config: Config, program: &[u8]) -> Executable<TestContextObject> {
     let sbpf_version = *config.enabled_sbpf_versions.end();

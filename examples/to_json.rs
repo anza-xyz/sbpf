@@ -15,9 +15,9 @@ use solana_sbpf::{
     elf::Executable,
     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
-    vm::TestContextObject,
 };
 use std::sync::Arc;
+use test_utils::TestContextObject;
 // Turn a program into a JSON string.
 //
 // Relies on `json` crate.
