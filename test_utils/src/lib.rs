@@ -17,6 +17,8 @@ use solana_sbpf::{
     vm::ContextObject,
 };
 
+pub mod syscalls;
+
 // Assembly code and data for tcp_sack testcases.
 
 pub const PROG_TCP_PORT_80: &str = "

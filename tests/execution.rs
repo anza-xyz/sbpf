@@ -23,13 +23,12 @@ use solana_sbpf::{
     memory_region::{AccessType, MemoryMapping, MemoryRegion},
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
-    syscalls,
     verifier::RequisiteVerifier,
     vm::{Config, ContextObject, TestContextObject},
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test_utils::{
-    assert_error, create_vm, test_interpreter_and_jit, test_interpreter_and_jit_asm,
+    assert_error, create_vm, syscalls, test_interpreter_and_jit, test_interpreter_and_jit_asm,
     test_interpreter_and_jit_elf, test_syscall_asm, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH,
     TCP_SACK_NOMATCH,
 };

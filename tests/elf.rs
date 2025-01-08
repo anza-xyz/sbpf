@@ -11,11 +11,10 @@ use solana_sbpf::{
     error::ProgramResult,
     fuzz::fuzz,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    syscalls,
     vm::{Config, TestContextObject},
 };
 use std::{fs::File, io::Read, sync::Arc};
-use test_utils::assert_error;
+use test_utils::{assert_error, syscalls};
 
 type ElfExecutable = Executable<TestContextObject>;
 

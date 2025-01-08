@@ -27,12 +27,11 @@ use solana_sbpf::{
     ebpf,
     elf::Executable,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    syscalls,
     verifier::{RequisiteVerifier, Verifier, VerifierError},
     vm::{Config, ContextObject, TestContextObject},
 };
 use std::sync::Arc;
-use test_utils::{assert_error, create_vm};
+use test_utils::{assert_error, create_vm, syscalls};
 use thiserror::Error;
 
 /// Error definitions

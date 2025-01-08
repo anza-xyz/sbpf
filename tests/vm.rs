@@ -1,11 +1,10 @@
 use solana_sbpf::{
     elf::Executable,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
-    syscalls,
     vm::{Config, RuntimeEnvironmentSlot, TestContextObject},
 };
 use std::{fs::File, io::Read, sync::Arc};
-use test_utils::create_vm;
+use test_utils::{create_vm, syscalls};
 
 #[test]
 fn test_runtime_environment_slots() {

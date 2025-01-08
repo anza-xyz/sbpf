@@ -13,11 +13,11 @@ extern crate test_utils;
 use solana_sbpf::{
     elf::Executable,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
-    syscalls,
     vm::{Config, TestContextObject},
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test::Bencher;
+use test_utils::syscalls;
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
     let mut function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
