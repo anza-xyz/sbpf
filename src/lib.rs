@@ -31,7 +31,6 @@ pub mod ebpf;
 pub mod elf;
 pub mod elf_parser;
 pub mod error;
-pub mod fuzz;
 pub mod insn_builder;
 pub mod interpreter;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
