@@ -11,6 +11,7 @@
 
 //! Virtual machine for SBPF programs.
 #![warn(missing_docs)]
+#![allow(clippy::literal_string_with_formatting_args)]
 #![deny(clippy::arithmetic_side_effects)]
 #![deny(clippy::ptr_as_ptr)]
 

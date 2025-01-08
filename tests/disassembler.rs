@@ -1,3 +1,5 @@
+#![allow(clippy::literal_string_with_formatting_args)]
+
 // Copyright 2017 Jan-Erik Rediger <badboy@archlinux.us>
 //
 // Adopted from tests in `tests/assembler.rs`

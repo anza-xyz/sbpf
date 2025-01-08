@@ -1,3 +1,5 @@
+#![allow(clippy::literal_string_with_formatting_args)]
+
 // Converted from the tests for uBPF <https://github.com/iovisor/ubpf>
 // Copyright 2015 Big Switch Networks, Inc
 // Copyright 2016 6WIND S.A. <quentin.monnet@6wind.com>

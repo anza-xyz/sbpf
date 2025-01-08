@@ -1,3 +1,4 @@
+#![allow(clippy::literal_string_with_formatting_args)]
 #![cfg(all(test, target_arch = "x86_64", not(target_os = "windows")))]
 
 use byteorder::{ByteOrder, LittleEndian};

@@ -1,3 +1,5 @@
+#![allow(clippy::literal_string_with_formatting_args)]
+
 use byteorder::{ByteOrder, LittleEndian};
 use solana_sbpf::{
     ebpf,
