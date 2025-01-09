@@ -216,8 +216,9 @@ const ANCHOR_CALL_UNSUPPORTED_INSTRUCTION: usize = 11;
 const ANCHOR_EXTERNAL_FUNCTION_CALL: usize = 12;
 const ANCHOR_INTERNAL_FUNCTION_CALL_PROLOGUE: usize = 13;
 const ANCHOR_INTERNAL_FUNCTION_CALL_REG: usize = 14;
-const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 21;
-const ANCHOR_COUNT: usize = 34; // Update me when adding or removing anchors
+const ANCHOR_VALIDATE_AND_PROFILE_INSTRUCTION_COUNT: usize = 15;
+const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 16;
+const ANCHOR_COUNT: usize = 28; // Update me when adding or removing anchors
 
 const REGISTER_MAP: [X86Register; 11] = [
     CALLER_SAVED_REGISTERS[0], // RAX
@@ -442,7 +443,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
             match insn.opc {
                 ebpf::LD_DW_IMM if !self.executable.get_sbpf_version().disable_lddw() => {
-                    self.emit_validate_and_profile_instruction_count(Some(self.pc + 2));
+                    self.emit_validate_and_profile_instruction_count(self.pc + 2);
                     self.pc += 1;
                     self.result.pc_section[self.pc] = unsafe { self.anchors[ANCHOR_CALL_UNSUPPORTED_INSTRUCTION].offset_from(self.result.text_section.as_ptr()) as u32 };
                     ebpf::augment_lddw_unchecked(self.program, &mut insn);
@@ -721,8 +722,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
                 // BPF_JMP class
                 ebpf::JA         => {
-                    self.emit_validate_and_profile_instruction_count(Some(target_pc));
-                    self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, target_pc as i64));
+                    self.emit_validate_and_profile_instruction_count(target_pc);
                     let jump_offset = self.relative_to_target_pc(target_pc, 5);
                     self.emit_ins(X86Instruction::jump_immediate(jump_offset));
                 },
@@ -792,7 +792,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                         || (insn.opc == ebpf::RETURN && !self.executable.get_sbpf_version().static_syscalls()) {
                         return Err(EbpfError::UnsupportedInstruction);
                     }
-                    self.emit_validate_and_profile_instruction_count(Some(0));
+                    self.emit_validate_and_profile_instruction_count(0);
 
                     let call_depth_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::CallDepth));
                     // If env.call_depth == 0, we've reached the exit instruction of the entry point
@@ -817,7 +817,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         if self.offset_in_text_section + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION * 2 >= self.result.text_section.len() {
             return Err(EbpfError::ExhaustedTextSegment(self.pc));
         }
-        self.emit_validate_and_profile_instruction_count(Some(self.pc + 1));
+        self.emit_validate_and_profile_instruction_count(self.pc + 1);
         self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64)); // Save pc
         self.emit_set_exception_kind(EbpfError::ExecutionOverrun);
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 5)));
@@ -982,9 +982,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     #[inline]
-    fn emit_validate_and_profile_instruction_count(&mut self, target_pc: Option<usize>) {
-        self.emit_validate_instruction_count(Some(self.pc));
-        self.emit_profile_instruction_count(target_pc);
+    fn emit_validate_and_profile_instruction_count(&mut self, target_pc: usize) {
+        self.last_instruction_meter_validation_pc = self.pc;
+        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, ((target_pc << 32 | self.pc) as i64) ^ self.immediate_value_key));
+        self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_VALIDATE_AND_PROFILE_INSTRUCTION_COUNT, 5)));
     }
 
     fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<X86Register>) {
@@ -1141,7 +1142,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     #[inline]
     fn emit_syscall_dispatch(&mut self, function: BuiltinFunction<C>) {
-        self.emit_validate_and_profile_instruction_count(Some(0));
+        self.emit_validate_and_profile_instruction_count(0);
         self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, function as usize as i64));
         self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL, 5)));
         self.emit_undo_profile_instruction_count(0);
@@ -1216,13 +1217,12 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     #[inline]
     fn emit_conditional_branch_reg(&mut self, op: u8, bitwise: bool, first_operand: X86Register, second_operand: X86Register, target_pc: usize) {
-        self.emit_validate_and_profile_instruction_count(Some(target_pc));
+        self.emit_validate_and_profile_instruction_count(target_pc);
         if bitwise { // Logical
             self.emit_ins(X86Instruction::test(OperandSize::S64, first_operand, second_operand, None));
         } else { // Arithmetic
             self.emit_ins(X86Instruction::cmp(OperandSize::S64, first_operand, second_operand, None));
         }
-        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, target_pc as i64));
         let jump_offset = self.relative_to_target_pc(target_pc, 6);
         self.emit_ins(X86Instruction::conditional_jump_immediate(op, jump_offset));
         self.emit_undo_profile_instruction_count(target_pc);
@@ -1230,20 +1230,21 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     #[inline]
     fn emit_conditional_branch_imm(&mut self, op: u8, bitwise: bool, immediate: i64, second_operand: X86Register, target_pc: usize) {
-        self.emit_validate_and_profile_instruction_count(Some(target_pc));
+        self.emit_validate_and_profile_instruction_count(target_pc);
         if self.should_sanitize_constant(immediate) {
+            self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, REGISTER_SCRATCH, MM0));        
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
             if bitwise { // Logical
                 self.emit_ins(X86Instruction::test(OperandSize::S64, REGISTER_SCRATCH, second_operand, None));
             } else { // Arithmetic
                 self.emit_ins(X86Instruction::cmp(OperandSize::S64, REGISTER_SCRATCH, second_operand, None));
             }
+            self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, MM0, REGISTER_SCRATCH));
         } else if bitwise { // Logical
             self.emit_ins(X86Instruction::test_immediate(OperandSize::S64, second_operand, immediate, None));
         } else { // Arithmetic
             self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S64, second_operand, immediate, None));
         }
-        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, target_pc as i64));
         let jump_offset = self.relative_to_target_pc(target_pc, 6);
         self.emit_ins(X86Instruction::conditional_jump_immediate(op, jump_offset));
         self.emit_undo_profile_instruction_count(target_pc);
@@ -1583,8 +1584,25 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_MAP[0], RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Swap REGISTER_MAP[0] and host_target_address
         self.emit_ins(X86Instruction::return_near()); // Tail call to host_target_address
 
-        // Translates a vm memory address to a host memory address
+        // Routine for emit_validate_and_profile_instruction_count()
+        self.set_anchor(ANCHOR_VALIDATE_AND_PROFILE_INSTRUCTION_COUNT);
+        self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, REGISTER_SCRATCH, MM0));
         let lower_key = self.immediate_value_key as i32 as i64;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0x81, 6, REGISTER_SCRATCH, lower_key, None)); // REGISTER_SCRATCH ^= lower_key;
+        // If instruction_meter >= pc, throw ExceededMaxInstructions
+        self.emit_ins(X86Instruction::cmp(OperandSize::S64, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None));
+        self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
+        // A version of `self.emit_profile_instruction_count(None);` which reads self.pc from REGISTER_SCRATCH
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter -= self.pc;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter -= 1;
+        self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, MM0, REGISTER_SCRATCH));
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 5, REGISTER_SCRATCH, 32, None)); // wrapping_shr(32)
+        let upper_key = (self.immediate_value_key >> 32) as i32 as i64;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S32, 0x81, 6, REGISTER_SCRATCH, upper_key, None)); // REGISTER_SCRATCH ^= upper_key;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += target_pc;
+        self.emit_ins(X86Instruction::return_near());
+
+        // Translates a vm memory address to a host memory address
         for (anchor_base, len) in &[
             (0, 1i32), (0, 2i32), (0, 4i32), (0, 8i32),
             (4, 1i32), (4, 2i32), (4, 4i32), (4, 8i32),
