@@ -344,11 +344,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.registers[1] = ebpf::MM_INPUT_START;
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
-        let initial_insn_count = if config.enable_instruction_meter {
-            self.context_object_pointer.get_remaining()
-        } else {
-            0
-        };
+        let initial_insn_count = self.context_object_pointer.get_remaining();
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
