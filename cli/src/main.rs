@@ -5,7 +5,7 @@ use solana_sbpf::{
     ebpf,
     elf::Executable,
     memory_region::{MemoryMapping, MemoryRegion},
-    program::{BuiltinProgram, FunctionRegistry},
+    program::BuiltinProgram,
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
     vm::{Config, DynamicAnalysis, EbpfVm},
@@ -94,15 +94,11 @@ fn main() {
         )
         .get_matches();
 
-    let loader = Arc::new(BuiltinProgram::new_loader(
-        Config {
-            enable_instruction_tracing: matches.is_present("trace")
-                || matches.is_present("profile"),
-            enable_symbol_and_section_labels: true,
-            ..Config::default()
-        },
-        FunctionRegistry::default(),
-    ));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config {
+        enable_instruction_tracing: matches.is_present("trace") || matches.is_present("profile"),
+        enable_symbol_and_section_labels: true,
+        ..Config::default()
+    }));
     #[allow(unused_mut)]
     let mut executable = match matches.value_of("assembler") {
         Some(asm_file_name) => {

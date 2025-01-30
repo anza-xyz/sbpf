@@ -19,7 +19,7 @@ use solana_sbpf::{
     assembler::assemble,
     ebpf,
     memory_region::MemoryRegion,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinProgram, SBPFVersion},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
     vm::{Config, ContextObject},
@@ -441,8 +441,7 @@ fn test_ins(v0: bool, ins: String, prng: &mut SmallRng, cu: u64) {
     if v0 {
         config.enabled_sbpf_versions = SBPFVersion::V0..=SBPFVersion::V0;
     }
-    let function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-    let loader = Arc::new(BuiltinProgram::new_loader(config, function_registry));
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
     let mut executable = assemble(asm.as_str(), loader).unwrap();
     test_interpreter_and_jit!(
         override_budget => true,

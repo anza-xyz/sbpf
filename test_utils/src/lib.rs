@@ -397,19 +397,17 @@ macro_rules! test_interpreter_and_jit {
 
 #[macro_export]
 macro_rules! test_interpreter_and_jit_asm {
-    ($source:expr, $config:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
+    ($source:expr, $config:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
         #[allow(unused_mut)]
         {
             let mut config = $config;
             config.enable_instruction_tracing = true;
-            let mut function_registry =
-                FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-            let loader = Arc::new(BuiltinProgram::new_loader(config, function_registry));
+            let loader = Arc::new(BuiltinProgram::new_loader(config));
             let mut executable = assemble($source, loader).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
         }
     };
-    ($source:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
+    ($source:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
         #[allow(unused_mut)]
         {
             test_interpreter_and_jit_asm!(
@@ -424,55 +422,47 @@ macro_rules! test_interpreter_and_jit_asm {
 }
 
 #[macro_export]
-macro_rules! test_interpreter_and_jit_elf {
-    (register, $function_registry:expr, $location:expr => $syscall_function:expr) => {
-        $function_registry
-            .register_function_hashed($location.as_bytes(), $syscall_function)
-            .unwrap();
-    };
-    ($source:tt, $config:tt, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        let mut file = File::open($source).unwrap();
-        let mut elf = Vec::new();
-        file.read_to_end(&mut elf).unwrap();
-        #[allow(unused_mut)]
-        {
-            let mut function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-            $(test_interpreter_and_jit_elf!(register, function_registry, $location => $syscall_function);)*
-            let loader = Arc::new(BuiltinProgram::new_loader($config, function_registry));
-            let mut executable = Executable::<TestContextObject>::from_elf(&elf, loader).unwrap();
-            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
-        }
-    };
-    ($source:tt, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        let config = Config {
-            enable_instruction_tracing: true,
-            ..Config::default()
-        };
-        test_interpreter_and_jit_elf!($source, config, $mem, ($($location => $syscall_function),*), $context_object, $expected_result);
-    };
-}
-
-#[macro_export]
 macro_rules! test_syscall_asm {
-    (register, $loader:expr, $syscall_number:literal => $syscall_name:expr => $syscall_function:expr) => {
-        let _ = $loader.register_function($syscall_name, $syscall_number, $syscall_function).unwrap();
+    (register, $loader:expr, $syscall_name:expr => $syscall_function:expr) => {
+        let _ = $loader.register_function($syscall_name, $syscall_function).unwrap();
     };
-    ($source:tt, $mem:tt, ($($syscall_number:literal => $syscall_name:expr => $syscall_function:expr),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+    ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut config = Config {
             enable_instruction_tracing: true,
             ..Config::default()
         };
         for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
             config.enabled_sbpf_versions = sbpf_version..=sbpf_version;
-            let src = if sbpf_version == SBPFVersion::V0 {
-                format!($source, $($syscall_name, )*)
-            } else {
-                format!($source, $($syscall_number, )*)
-            };
-            let mut loader = BuiltinProgram::new_loader_with_dense_registration(config.clone());
-            $(test_syscall_asm!(register, loader, $syscall_number => $syscall_name => $syscall_function);)*
-            let mut executable = assemble(src.as_str(), Arc::new(loader)).unwrap();
+            let mut loader = BuiltinProgram::new_loader(config.clone());
+            $(test_syscall_asm!(register, loader, $syscall_name => $syscall_function);)*
+            let mut executable = assemble($source, Arc::new(loader)).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
         }
+    };
+}
+
+#[macro_export]
+macro_rules! test_interpreter_and_jit_elf {
+    (register, $loader:expr, $syscall_name:expr => $syscall_function:expr) => {
+        $loader.register_function($syscall_name, $syscall_function).unwrap();
+    };
+    ($source:expr, $config:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+        let mut file = File::open($source).unwrap();
+        let mut elf = Vec::new();
+        file.read_to_end(&mut elf).unwrap();
+        #[allow(unused_mut)]
+        {
+            let mut loader = BuiltinProgram::new_loader($config);
+            $(test_interpreter_and_jit_elf!(register, loader, $syscall_name => $syscall_function);)*
+            let mut executable = Executable::<TestContextObject>::from_elf(&elf, Arc::new(loader)).unwrap();
+            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
+        }
+    };
+    ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+        let config = Config {
+            enable_instruction_tracing: true,
+            ..Config::default()
+        };
+        test_interpreter_and_jit_elf!($source, config, $mem, ($($syscall_name => $syscall_function),*), $context_object, $expected_result);
     };
 }

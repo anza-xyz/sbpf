@@ -10,7 +10,7 @@ use solana_sbpf::{
         Elf64, ElfParserError, SECTION_NAME_LENGTH_MAXIMUM,
     },
     error::ProgramResult,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinProgram, SBPFVersion},
     vm::Config,
 };
 use std::{fs::File, io::Read, sync::Arc};
@@ -19,17 +19,14 @@ use test_utils::{assert_error, syscalls, TestContextObject};
 type ElfExecutable = Executable<TestContextObject>;
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
-    let mut function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-    function_registry
-        .register_function_hashed(*b"log", syscalls::SyscallString::vm)
+    let mut loader = BuiltinProgram::new_loader(Config::default());
+    loader
+        .register_function("log", syscalls::SyscallString::vm)
         .unwrap();
-    function_registry
-        .register_function_hashed(*b"log_64", syscalls::SyscallU64::vm)
+    loader
+        .register_function("log_64", syscalls::SyscallU64::vm)
         .unwrap();
-    Arc::new(BuiltinProgram::new_loader(
-        Config::default(),
-        function_registry,
-    ))
+    Arc::new(loader)
 }
 
 #[test]
@@ -39,13 +36,10 @@ fn test_strict_header() {
 
     // Check that the unmodified file can be parsed
     {
-        let loader = Arc::new(BuiltinProgram::new_loader(
-            Config {
-                enable_symbol_and_section_labels: true,
-                ..Config::default()
-            },
-            FunctionRegistry::<BuiltinFunction<TestContextObject>>::default(),
-        ));
+        let loader = Arc::new(BuiltinProgram::new_loader(Config {
+            enable_symbol_and_section_labels: true,
+            ..Config::default()
+        }));
         let executable = ElfExecutable::load(&elf_bytes, loader.clone()).unwrap();
         let (name, _pc) = executable.get_function_registry().lookup_by_key(4).unwrap();
         assert_eq!(name, b"entrypoint");
@@ -829,14 +823,11 @@ fn test_relative_call_oob_forward() {
 #[test]
 #[should_panic(expected = "validation failed: UnresolvedSymbol(\"log\", 39, 312)")]
 fn test_err_unresolved_syscall_reloc_64_32() {
-    let loader = BuiltinProgram::new_loader(
-        Config {
-            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
-            reject_broken_elfs: true,
-            ..Config::default()
-        },
-        FunctionRegistry::default(),
-    );
+    let loader = BuiltinProgram::new_loader(Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        reject_broken_elfs: true,
+        ..Config::default()
+    });
     let elf_bytes =
         std::fs::read("tests/elfs/syscall_reloc_64_32_sbpfv0.so").expect("failed to read elf file");
     ElfExecutable::load(&elf_bytes, Arc::new(loader)).expect("validation failed");

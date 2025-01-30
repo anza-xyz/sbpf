@@ -161,13 +161,10 @@ fn test_verifier_err_lddw_cannot_be_last() {
         let prog = &[0x18, 0x00, 0x00, 0x00, 0x88, 0x77, 0x66, 0x55];
         let executable = Executable::<TestContextObject>::from_text_bytes(
             prog,
-            Arc::new(BuiltinProgram::new_loader(
-                Config {
-                    enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
-                    ..Config::default()
-                },
-                FunctionRegistry::default(),
-            )),
+            Arc::new(BuiltinProgram::new_loader(Config {
+                enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
+                ..Config::default()
+            })),
             highest_sbpf_version,
             FunctionRegistry::default(),
         )
@@ -185,13 +182,10 @@ fn test_verifier_err_invalid_reg_dst() {
             "
             mov r11, 1
             exit",
-            Arc::new(BuiltinProgram::new_loader(
-                Config {
-                    enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
-                    ..Config::default()
-                },
-                FunctionRegistry::default(),
-            )),
+            Arc::new(BuiltinProgram::new_loader(Config {
+                enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
+                ..Config::default()
+            })),
         )
         .unwrap();
         let result = executable.verify::<RequisiteVerifier>();
@@ -208,13 +202,10 @@ fn test_verifier_err_invalid_reg_src() {
             "
             mov r0, r11
             exit",
-            Arc::new(BuiltinProgram::new_loader(
-                Config {
-                    enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
-                    ..Config::default()
-                },
-                FunctionRegistry::default(),
-            )),
+            Arc::new(BuiltinProgram::new_loader(Config {
+                enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
+                ..Config::default()
+            })),
         )
         .unwrap();
         let result = executable.verify::<RequisiteVerifier>();
@@ -229,13 +220,10 @@ fn test_verifier_resize_stack_ptr_success() {
         add r10, -64
         add r10, 64
         exit",
-        Arc::new(BuiltinProgram::new_loader(
-            Config {
-                enable_stack_frame_gaps: false,
-                ..Config::default()
-            },
-            FunctionRegistry::default(),
-        )),
+        Arc::new(BuiltinProgram::new_loader(Config {
+            enable_stack_frame_gaps: false,
+            ..Config::default()
+        })),
     )
     .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
@@ -304,13 +292,10 @@ fn test_verifier_err_callx_cannot_use_r10() {
         callx r10
         exit
         ",
-            Arc::new(BuiltinProgram::new_loader(
-                Config {
-                    enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
-                    ..Config::default()
-                },
-                FunctionRegistry::default(),
-            )),
+            Arc::new(BuiltinProgram::new_loader(Config {
+                enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
+                ..Config::default()
+            })),
         )
         .unwrap();
         executable.verify::<RequisiteVerifier>().unwrap();
@@ -390,10 +375,10 @@ fn test_verifier_err_invalid_exit() {
 }
 
 #[test]
-#[should_panic(expected = "InvalidSyscall(2)")]
+#[should_panic(expected = "InvalidSyscall(2432830685)")]
 fn test_verifier_unknown_syscall() {
     let prog = &[
-        0x95, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // syscall 2
+        0x95, 0x00, 0x00, 0x00, 0xDD, 0x0C, 0x02, 0x91, // syscall gather_bytes
         0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // return
     ];
     let executable = Executable::<TestContextObject>::from_text_bytes(
@@ -409,13 +394,13 @@ fn test_verifier_unknown_syscall() {
 #[test]
 fn test_verifier_known_syscall() {
     let prog = &[
-        0x95, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // syscall 2
+        0x95, 0x00, 0x00, 0x00, 0xDD, 0x0C, 0x02, 0x91, // syscall gather_bytes
         0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // return
     ];
 
-    let mut loader = BuiltinProgram::new_loader_with_dense_registration(Config::default());
+    let mut loader = BuiltinProgram::new_loader(Config::default());
     loader
-        .register_function("my_syscall", 2, syscalls::SyscallString::vm)
+        .register_function("gather_bytes", syscalls::SyscallString::vm)
         .unwrap();
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
@@ -492,13 +477,10 @@ fn test_sdiv_disabled() {
             let assembly = format!("\n{instruction}\nexit");
             let executable = assemble::<TestContextObject>(
                 &assembly,
-                Arc::new(BuiltinProgram::new_loader(
-                    Config {
-                        enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
-                        ..Config::default()
-                    },
-                    FunctionRegistry::default(),
-                )),
+                Arc::new(BuiltinProgram::new_loader(Config {
+                    enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
+                    ..Config::default()
+                })),
             )
             .unwrap();
             let result = executable.verify::<RequisiteVerifier>();
@@ -541,13 +523,10 @@ fn return_in_v2() {
     let executable = assemble::<TestContextObject>(
         "mov r0, 2
                  return",
-        Arc::new(BuiltinProgram::new_loader(
-            Config {
-                enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
-                ..Config::default()
-            },
-            FunctionRegistry::default(),
-        )),
+        Arc::new(BuiltinProgram::new_loader(Config {
+            enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+            ..Config::default()
+        })),
     )
     .unwrap();
     let result = executable.verify::<RequisiteVerifier>();
@@ -559,13 +538,10 @@ fn function_without_return() {
     let executable = assemble::<TestContextObject>(
         "mov r0, 2
                 add64 r0, 5",
-        Arc::new(BuiltinProgram::new_loader(
-            Config {
-                enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
-                ..Config::default()
-            },
-            FunctionRegistry::default(),
-        )),
+        Arc::new(BuiltinProgram::new_loader(Config {
+            enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+            ..Config::default()
+        })),
     )
     .unwrap();
     let result = executable.verify::<RequisiteVerifier>();

@@ -39,7 +39,6 @@ fuzz_target!(|data: DumbFuzzData| {
         &prog,
         std::sync::Arc::new(BuiltinProgram::new_loader(
             config,
-            FunctionRegistry::default(),
         )),
         SBPFVersion::V3,
         function_registry,

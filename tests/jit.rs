@@ -20,9 +20,9 @@ use test_utils::{syscalls, TestContextObject};
 
 fn create_mockup_executable(config: Config, program: &[u8]) -> Executable<TestContextObject> {
     let sbpf_version = *config.enabled_sbpf_versions.end();
-    let mut loader = BuiltinProgram::new_loader_with_dense_registration(config);
+    let mut loader = BuiltinProgram::new_loader(config);
     loader
-        .register_function("gather_bytes", 1, syscalls::SyscallGatherBytes::vm)
+        .register_function("gather_bytes", syscalls::SyscallGatherBytes::vm)
         .unwrap();
     let mut function_registry = FunctionRegistry::default();
     function_registry
@@ -112,7 +112,7 @@ fn test_code_length_estimate() {
                 0x85 if !sbpf_version.static_syscalls() => (0x00, Some(8)),
                 0x85 if sbpf_version.static_syscalls() => (0x00, None),
                 0x8D => (0x88, Some(0)),
-                0x95 if sbpf_version.static_syscalls() => (0x00, Some(1)),
+                0x95 if sbpf_version.static_syscalls() => (0x00, Some(0x91020CDD)),
                 0xE5 if !sbpf_version.static_syscalls() => {
                     // Put external function calls on a separate loop iteration
                     opcode = 0x85;

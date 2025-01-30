@@ -10,12 +10,7 @@ extern crate solana_sbpf;
 extern crate test;
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-use solana_sbpf::{
-    ebpf,
-    memory_region::MemoryRegion,
-    program::{FunctionRegistry, SBPFVersion},
-    vm::Config,
-};
+use solana_sbpf::{ebpf, memory_region::MemoryRegion, program::SBPFVersion, vm::Config};
 use solana_sbpf::{elf::Executable, program::BuiltinProgram, verifier::RequisiteVerifier};
 use std::{fs::File, io::Read, sync::Arc};
 use test::Bencher;
@@ -83,10 +78,7 @@ fn bench_jit_vs_interpreter(
 ) {
     let mut executable = solana_sbpf::assembler::assemble::<TestContextObject>(
         assembly,
-        Arc::new(BuiltinProgram::new_loader(
-            config,
-            FunctionRegistry::default(),
-        )),
+        Arc::new(BuiltinProgram::new_loader(config)),
     )
     .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();

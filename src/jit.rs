@@ -752,7 +752,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     // For JIT, external functions MUST be registered at compile time.
                     if let (false, Some((_, function))) =
                             (self.executable.get_sbpf_version().static_syscalls(),
-                                self.executable.get_loader().get_function_registry(self.executable.get_sbpf_version()).lookup_by_key(insn.imm as u32)) {
+                                self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32)) {
                         // SBPFv0 syscall
                         self.emit_syscall_dispatch(function);
                     } else if let Some((_function_name, target_pc)) =
@@ -772,7 +772,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     }
                 },
                 ebpf::SYSCALL if self.executable.get_sbpf_version().static_syscalls() => {
-                    if let Some((_, function)) = self.executable.get_loader().get_function_registry(self.executable.get_sbpf_version()).lookup_by_key(insn.imm as u32) {
+                    if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
                         self.emit_syscall_dispatch(function);
                     } else {
                         debug_assert!(false, "Invalid syscall should have been detected in the verifier.")

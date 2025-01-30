@@ -10,7 +10,7 @@
 extern crate solana_sbpf;
 extern crate test_utils;
 
-use solana_sbpf::program::{FunctionRegistry, SBPFVersion};
+use solana_sbpf::program::SBPFVersion;
 use solana_sbpf::vm::Config;
 use solana_sbpf::{assembler::assemble, ebpf, program::BuiltinProgram};
 use std::sync::Arc;
@@ -21,7 +21,7 @@ fn asm(src: &str) -> Result<Vec<ebpf::Insn>, String> {
 }
 
 fn asm_with_config(src: &str, config: Config) -> Result<Vec<ebpf::Insn>, String> {
-    let loader = BuiltinProgram::new_loader(config, FunctionRegistry::default());
+    let loader = BuiltinProgram::new_loader(config);
     let executable = assemble::<TestContextObject>(src, Arc::new(loader))?;
     let (_program_vm_addr, program) = executable.get_text_bytes();
     Ok((0..program.len() / ebpf::INSN_SIZE)
@@ -524,14 +524,9 @@ fn test_tcp_sack() {
         enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
         ..Config::default()
     };
-    let executable = assemble::<TestContextObject>(
-        TCP_SACK_ASM,
-        Arc::new(BuiltinProgram::new_loader(
-            config,
-            FunctionRegistry::default(),
-        )),
-    )
-    .unwrap();
+    let executable =
+        assemble::<TestContextObject>(TCP_SACK_ASM, Arc::new(BuiltinProgram::new_loader(config)))
+            .unwrap();
     let (_program_vm_addr, program) = executable.get_text_bytes();
     assert_eq!(program, TCP_SACK_BIN.to_vec());
 }

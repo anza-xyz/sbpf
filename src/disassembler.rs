@@ -271,7 +271,7 @@ pub fn disassemble_instruction<C: ContextObject>(
             let mut function_name = function_registry.lookup_by_key(key).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
             if !sbpf_version.static_syscalls() && function_name.is_none() {
                 name = "syscall";
-                function_name = loader.get_function_registry(sbpf_version).lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
+                function_name = loader.get_function_registry().lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
             }
             desc = format!("{} {}", name, function_name.unwrap_or_else(|| "[invalid]".to_string()));
         },

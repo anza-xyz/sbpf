@@ -2,7 +2,7 @@
 
 use solana_sbpf::{
     elf::Executable,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
+    program::BuiltinProgram,
     vm::{Config, RuntimeEnvironmentSlot},
 };
 use std::{fs::File, io::Read, sync::Arc};
@@ -54,27 +54,24 @@ fn test_runtime_environment_slots() {
 
 #[test]
 fn test_builtin_program_eq() {
-    let mut function_registry_a = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-    function_registry_a
-        .register_function_hashed(*b"log", syscalls::SyscallString::vm)
+    let mut builtin_program_a = BuiltinProgram::new_loader(Config::default());
+    let mut builtin_program_b = BuiltinProgram::new_loader(Config::default());
+    let mut builtin_program_c = BuiltinProgram::new_loader(Config::default());
+    builtin_program_a
+        .register_function("log", syscalls::SyscallString::vm)
         .unwrap();
-    function_registry_a
-        .register_function_hashed(*b"log_64", syscalls::SyscallU64::vm)
+    builtin_program_a
+        .register_function("log_64", syscalls::SyscallU64::vm)
         .unwrap();
-    let mut function_registry_b = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-    function_registry_b
-        .register_function_hashed(*b"log_64", syscalls::SyscallU64::vm)
+    builtin_program_b
+        .register_function("log_64", syscalls::SyscallU64::vm)
         .unwrap();
-    function_registry_b
-        .register_function_hashed(*b"log", syscalls::SyscallString::vm)
+    builtin_program_b
+        .register_function("log", syscalls::SyscallString::vm)
         .unwrap();
-    let mut function_registry_c = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-    function_registry_c
-        .register_function_hashed(*b"log_64", syscalls::SyscallU64::vm)
+    builtin_program_c
+        .register_function("log_64", syscalls::SyscallU64::vm)
         .unwrap();
-    let builtin_program_a = BuiltinProgram::new_loader(Config::default(), function_registry_a);
-    let builtin_program_b = BuiltinProgram::new_loader(Config::default(), function_registry_b);
     assert_eq!(builtin_program_a, builtin_program_b);
-    let builtin_program_c = BuiltinProgram::new_loader(Config::default(), function_registry_c);
     assert_ne!(builtin_program_a, builtin_program_c);
 }

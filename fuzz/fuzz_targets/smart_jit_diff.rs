@@ -59,7 +59,6 @@ fuzz_target!(|data: FuzzData| {
         prog.into_bytes(),
         std::sync::Arc::new(BuiltinProgram::new_loader(
             config,
-            FunctionRegistry::default(),
         )),
         SBPFVersion::V3,
         function_registry,

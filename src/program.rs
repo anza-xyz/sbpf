@@ -134,18 +134,6 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
         Ok(())
     }
 
-    /// Register a symbol with an implicit key
-    pub fn register_function_hashed(
-        &mut self,
-        name: impl Into<Vec<u8>>,
-        value: T,
-    ) -> Result<u32, ElfError> {
-        let name = name.into();
-        let key = ebpf::hash_symbol_name(name.as_slice());
-        self.register_function(key, name, value)?;
-        Ok(key)
-    }
-
     /// Used for transitioning from SBPFv0 to SBPFv3
     pub(crate) fn register_function_hashed_legacy<C: ContextObject>(
         &mut self,
@@ -165,11 +153,7 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
             } else {
                 ebpf::hash_symbol_name(&usize::from(value).to_le_bytes())
             };
-            if loader
-                .get_function_registry(SBPFVersion::V0)
-                .lookup_by_key(hash)
-                .is_some()
-            {
+            if loader.get_function_registry().lookup_by_key(hash).is_some() {
                 return Err(ElfError::SymbolHashCollision(hash));
             }
             hash
@@ -246,34 +230,28 @@ pub struct BuiltinProgram<C: ContextObject> {
     config: Option<Box<Config>>,
     /// Function pointers by symbol with sparse indexing
     sparse_registry: FunctionRegistry<BuiltinFunction<C>>,
-    /// Function pointers by symbol with dense indexing
-    dense_registry: FunctionRegistry<BuiltinFunction<C>>,
 }
 
 impl<C: ContextObject> PartialEq for BuiltinProgram<C> {
     fn eq(&self, other: &Self) -> bool {
-        self.config.eq(&other.config)
-            && self.sparse_registry.eq(&other.sparse_registry)
-            && self.dense_registry.eq(&other.dense_registry)
+        self.config.eq(&other.config) && self.sparse_registry.eq(&other.sparse_registry)
     }
 }
 
 impl<C: ContextObject> BuiltinProgram<C> {
     /// Constructs a loader built-in program
-    pub fn new_loader(config: Config, functions: FunctionRegistry<BuiltinFunction<C>>) -> Self {
+    pub fn new_loader(config: Config) -> Self {
         Self {
             config: Some(Box::new(config)),
-            sparse_registry: functions,
-            dense_registry: FunctionRegistry::default(),
+            sparse_registry: FunctionRegistry::default(),
         }
     }
 
     /// Constructs a built-in program
-    pub fn new_builtin(functions: FunctionRegistry<BuiltinFunction<C>>) -> Self {
+    pub fn new_builtin() -> Self {
         Self {
             config: None,
-            sparse_registry: functions,
-            dense_registry: FunctionRegistry::default(),
+            sparse_registry: FunctionRegistry::default(),
         }
     }
 
@@ -282,17 +260,6 @@ impl<C: ContextObject> BuiltinProgram<C> {
         Self {
             config: Some(Box::default()),
             sparse_registry: FunctionRegistry::default(),
-            dense_registry: FunctionRegistry::default(),
-        }
-    }
-
-    /// Create a new loader with both dense and sparse function indexation
-    /// Use `BuiltinProgram::register_function` for registrations.
-    pub fn new_loader_with_dense_registration(config: Config) -> Self {
-        Self {
-            config: Some(Box::new(config)),
-            sparse_registry: FunctionRegistry::default(),
-            dense_registry: FunctionRegistry::default(),
         }
     }
 
@@ -302,15 +269,8 @@ impl<C: ContextObject> BuiltinProgram<C> {
     }
 
     /// Get the function registry depending on the SBPF version
-    pub fn get_function_registry(
-        &self,
-        sbpf_version: SBPFVersion,
-    ) -> &FunctionRegistry<BuiltinFunction<C>> {
-        if sbpf_version.static_syscalls() {
-            &self.dense_registry
-        } else {
-            &self.sparse_registry
-        }
+    pub fn get_function_registry(&self) -> &FunctionRegistry<BuiltinFunction<C>> {
+        &self.sparse_registry
     }
 
     /// Calculate memory size
@@ -322,19 +282,18 @@ impl<C: ContextObject> BuiltinProgram<C> {
                 0
             })
             .saturating_add(self.sparse_registry.mem_size())
-            .saturating_add(self.dense_registry.mem_size())
     }
 
     /// Register a function both in the sparse and dense registries
     pub fn register_function(
         &mut self,
         name: &str,
-        dense_key: u32,
         value: BuiltinFunction<C>,
     ) -> Result<(), ElfError> {
-        self.sparse_registry.register_function_hashed(name, value)?;
-        self.dense_registry
-            .register_function(dense_key, name, value)
+        let key = ebpf::hash_symbol_name(name.as_bytes());
+        self.sparse_registry
+            .register_function(key, name, value)
+            .map(|_| ())
     }
 }
 
@@ -343,16 +302,12 @@ impl<C: ContextObject> std::fmt::Debug for BuiltinProgram<C> {
         unsafe {
             writeln!(
                 f,
-                "sparse: {:?}\n dense: {:?}",
+                "registry: {:?}",
                 // `derive(Debug)` does not know that `C: ContextObject` does not need to implement `Debug`
                 std::mem::transmute::<
                     &FunctionRegistry<BuiltinFunction<C>>,
                     &FunctionRegistry<usize>,
-                >(&self.sparse_registry,),
-                std::mem::transmute::<
-                    &FunctionRegistry<BuiltinFunction<C>>,
-                    &FunctionRegistry<usize>,
-                >(&self.dense_registry,)
+                >(&self.sparse_registry),
             )?;
         }
         Ok(())

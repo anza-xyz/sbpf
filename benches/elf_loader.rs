@@ -10,24 +10,17 @@ extern crate solana_sbpf;
 extern crate test;
 extern crate test_utils;
 
-use solana_sbpf::{
-    elf::Executable,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
-    vm::Config,
-};
+use solana_sbpf::{elf::Executable, program::BuiltinProgram, vm::Config};
 use std::{fs::File, io::Read, sync::Arc};
 use test::Bencher;
 use test_utils::{syscalls, TestContextObject};
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
-    let mut function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-    function_registry
-        .register_function_hashed(*b"log", syscalls::SyscallString::vm)
+    let mut loader = BuiltinProgram::new_loader(Config::default());
+    loader
+        .register_function("log", syscalls::SyscallString::vm)
         .unwrap();
-    Arc::new(BuiltinProgram::new_loader(
-        Config::default(),
-        function_registry,
-    ))
+    Arc::new(loader)
 }
 
 #[bench]
