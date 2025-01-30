@@ -1,15 +1,32 @@
 SECTIONS
 {
-  .text 0x000000000 : { *(.text*) } :text
-  .rodata 0x100000000 : { *(.rodata*) } :rodata
-  .bss.stack 0x200000000 : { *(.bss.stack*) } :stack
-  .bss.heap 0x300000000 : { *(.bss.heap*) } :heap
-  .dynsym 0xFFFFFFFF00000000 : { *(.dynsym) } :dynsym
-  .dynstr : { *(.dynstr) } :other
-  .dynamic : { *(.dynamic) } :other
-  .symtab : { *(.symtab) } :other
-  .shstrtab : { *(.shstrtab) } :other
-  .strtab : { *(.strtab) } :other
+  .text 0x000000000 : {
+     *(.text*)
+  } :text
+  .rodata 0x100000000 : {
+    *(.rodata*)
+    *(.data.rel.ro*)
+    BYTE(0);
+    . = ALIGN(8);
+  } :rodata
+  .bss.stack 0x200000000 (NOLOAD) : {
+      _stack_start = .;
+      . = . + 0x1000;
+      _stack_end = .;
+      . = ALIGN(8);
+   } :stack
+  .bss.heap 0x300000000 (NOLOAD) : {
+        _heap_start = .;
+        . = . + 0x1000;
+        _heap_end = .;
+        . = ALIGN(8);
+   } :heap
+  .dynsym 0xFFFFFFFF00000000 : {
+    *(.dynsym)
+    . = ALIGN(8);
+  } :dynsym
+   .strtab : { *(.strtab) } :other
+   .dynstr : { *(.dynstr) } :other
   /DISCARD/ : {
       *(.comment*)
       *(.eh_frame*)
@@ -17,6 +34,7 @@ SECTIONS
       *(.bss*)
       *(.data*)
       *(.rel.dyn*)
+      *(.dynamic)
     }
 }
 
