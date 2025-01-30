@@ -1,6 +1,6 @@
 [package]
 name = "sbpf_cli"
-version = "0.9.0"
+version = "0.10.0"
 description = "CLI to test and analyze eBPF programs"
 authors = ["Solana Maintainers <maintainers@solana.foundation>"]
 repository = "https://github.com/anza-xyz/sbpf"
