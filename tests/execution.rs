@@ -2884,11 +2884,9 @@ fn test_reloc_64_relative_sbpfv0() {
 fn test_reloc_64_relative_data_sbfv1() {
     // Tests the correctness of R_BPF_64_RELATIVE relocations in sections other
     // than .text. The program returns the address of the first .rodata byte.
-    // [ 1] .text             PROGBITS        00000000000000e8 0000e8 000020 00  AX  0   0  8
-    // [ 2] .rodata           PROGBITS        0000000000000108 000108 000019 01 AMS  0   0  1
+    // [ 1] .text             PROGBITS        0000000000000120 000120 000020 00  AX  0   0  8
+    // [ 2] .rodata           PROGBITS        0000000000000140 000140 000019 01 AMS  0   0  1
     //
-    // 00000000000001f8 <FILE>:
-    // 63:       08 01 00 00 00 00 00 00
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
@@ -2899,7 +2897,7 @@ fn test_reloc_64_relative_data_sbfv1() {
         [],
         (),
         TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x108),
+        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x140),
     );
 }
 
@@ -2913,11 +2911,9 @@ fn test_reloc_64_relative_data_sbpfv0() {
     // compatibility when dealing with non-sbpfv3 files. See also Elf::relocate().
     //
     // The program returns the address of the first .rodata byte.
-    // [ 1] .text             PROGBITS        00000000000000e8 0000e8 000020 00  AX  0   0  8
-    // [ 2] .rodata           PROGBITS        0000000000000108 000108 000019 01 AMS  0   0  1
+    // [ 1] .text             PROGBITS        0000000000000120 000120 000020 00  AX  0   0  8
+    // [ 2] .rodata           PROGBITS        0000000000000140 000140 000019 01 AMS  0   0  1
     //
-    // 00000000000001f8 <FILE>:
-    // 63:       00 00 00 00 08 01 00 00
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
@@ -2928,7 +2924,7 @@ fn test_reloc_64_relative_data_sbpfv0() {
         [],
         (),
         TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x108),
+        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x140),
     );
 }
 

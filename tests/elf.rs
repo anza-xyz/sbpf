@@ -807,7 +807,7 @@ fn test_program_headers_overflow() {
 fn test_relative_call_oob_backward() {
     let mut elf_bytes =
         std::fs::read("tests/elfs/relative_call_sbpfv0.so").expect("failed to read elf file");
-    LittleEndian::write_i32(&mut elf_bytes[0x1044..0x1048], -11i32);
+    LittleEndian::write_i32(&mut elf_bytes[0x164..0x168], -11i32);
     ElfExecutable::load(&elf_bytes, loader()).expect("validation failed");
 }
 
@@ -816,7 +816,7 @@ fn test_relative_call_oob_backward() {
 fn test_relative_call_oob_forward() {
     let mut elf_bytes =
         std::fs::read("tests/elfs/relative_call_sbpfv0.so").expect("failed to read elf file");
-    LittleEndian::write_i32(&mut elf_bytes[0x105C..0x1060], 5);
+    LittleEndian::write_i32(&mut elf_bytes[0x17c..0x180], 5);
     ElfExecutable::load(&elf_bytes, loader()).expect("validation failed");
 }
 
