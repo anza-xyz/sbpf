@@ -61,9 +61,7 @@ fn test_strict_header() {
     let expected_results = std::iter::repeat(&Err(ElfParserError::InvalidFileHeader))
         .take(40)
         .chain(std::iter::repeat(&Ok(())).take(12))
-        .chain(std::iter::repeat(&Err(ElfParserError::InvalidFileHeader)).take(4))
-        .chain(std::iter::repeat(&Err(ElfParserError::InvalidProgramHeader)).take(1))
-        .chain(std::iter::repeat(&Err(ElfParserError::InvalidFileHeader)).take(3))
+        .chain(std::iter::repeat(&Err(ElfParserError::InvalidFileHeader)).take(8))
         .chain(std::iter::repeat(&Ok(())).take(2))
         .chain(std::iter::repeat(&Err(ElfParserError::InvalidFileHeader)).take(2));
     for (offset, expected) in (0..std::mem::size_of::<Elf64Ehdr>()).zip(expected_results) {
@@ -113,8 +111,8 @@ fn test_strict_header() {
             .chain(std::iter::repeat(&Err(ElfParserError::OutOfBounds)).take(8))
             .chain(std::iter::repeat(&Err(ElfParserError::InvalidSize)).take(1))
             .chain(std::iter::repeat(&Err(ElfParserError::OutOfBounds)).take(7));
-        for (offset, expected) in (0x3000 + std::mem::size_of::<Elf64Sym>() * index
-            ..0x3000 + std::mem::size_of::<Elf64Sym>() * (index + 1))
+        for (offset, expected) in (0x1d0 + std::mem::size_of::<Elf64Sym>() * index
+            ..0x1d0 + std::mem::size_of::<Elf64Sym>() * (index + 1))
             .zip(expected_results)
         {
             let mut elf_bytes = elf_bytes.clone();
@@ -128,7 +126,7 @@ fn test_strict_header() {
     // Check that an empty function symbol fails
     {
         let mut elf_bytes = elf_bytes.clone();
-        elf_bytes[0x3040] = 0x00;
+        elf_bytes[0x210] = 0x00;
         let err = ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
         assert_eq!(err, ElfParserError::InvalidSize);
     }
@@ -136,7 +134,7 @@ fn test_strict_header() {
     // Check that bytecode not covered by function symbols fails
     {
         let mut elf_bytes = elf_bytes.clone();
-        elf_bytes[0x3040] = 0x08;
+        elf_bytes[0x210] = 0x08;
         let err = ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
         assert_eq!(err, ElfParserError::OutOfBounds);
     }
