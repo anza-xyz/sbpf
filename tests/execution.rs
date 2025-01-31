@@ -2124,7 +2124,7 @@ fn test_err_mem_access_out_of_bound() {
 // CALL_IMM & CALL_REG : Procedure Calls
 
 #[test]
-fn test_relative_call() {
+fn test_relative_call_sbpfv0() {
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
@@ -2135,6 +2135,22 @@ fn test_relative_call() {
         [1],
         (),
         TestContextObject::new(16),
+        ProgramResult::Ok(3),
+    );
+}
+
+#[test]
+fn test_relative_call_sbpfv3() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/relative_call.so",
+        config,
+        [1],
+        (),
+        TestContextObject::new(18),
         ProgramResult::Ok(3),
     );
 }
@@ -2829,6 +2845,24 @@ fn test_err_call_unresolved() {
 }
 
 #[test]
+fn test_syscall_static() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/syscall_static.so",
+        config,
+        [],
+        (
+            "log" => syscalls::SyscallString::vm,
+        ),
+        TestContextObject::new(6),
+        ProgramResult::Ok(0),
+    );
+}
+
+#[test]
 fn test_syscall_reloc_64_32() {
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
@@ -2861,6 +2895,19 @@ fn test_reloc_64_64_sbpfv0() {
 }
 
 #[test]
+fn test_reloc_64_64() {
+    // Tests the correctness of link-time R_BPF_64_64 relocations. The program returns the
+    // address of the entrypoint.
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/reloc_64_64.so",
+        [],
+        (),
+        TestContextObject::new(3),
+        ProgramResult::Ok(ebpf::MM_BYTECODE_START),
+    );
+}
+
+#[test]
 fn test_reloc_64_relative_sbpfv0() {
     // Tests the correctness of R_BPF_64_RELATIVE relocations. The program
     // returns the address of the first .rodata byte.
@@ -2881,23 +2928,41 @@ fn test_reloc_64_relative_sbpfv0() {
 }
 
 #[test]
-fn test_reloc_64_relative_data_sbfv1() {
-    // Tests the correctness of R_BPF_64_RELATIVE relocations in sections other
-    // than .text. The program returns the address of the first .rodata byte.
-    // [ 1] .text             PROGBITS        0000000000000120 000120 000020 00  AX  0   0  8
-    // [ 2] .rodata           PROGBITS        0000000000000140 000140 000019 01 AMS  0   0  1
-    //
+fn test_reloc_64_relative() {
+    // Tests the correctness of link-time R_BPF_64_RELATIVE relocations. The program
+    // returns the address of the first .rodata byte.
     let config = Config {
-        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
         ..Config::default()
     };
     test_interpreter_and_jit_elf!(
-        "tests/elfs/reloc_64_relative_data_sbpfv0.so",
+        "tests/elfs/reloc_64_relative.so",
         config,
         [],
         (),
         TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x140),
+        ProgramResult::Ok(ebpf::MM_RODATA_START),
+    );
+}
+
+#[test]
+fn test_reloc_64_relative_data() {
+    //  Tests the correctness of link-time R_BPF_64_RELATIVE relocations in sections other
+    // than .text. The program returns the address of the first .rodata byte.
+    // [ 1] .text             PROGBITS        0000000000000000 000190 000020 00  AX  0   0  8
+    // [ 2] .rodata           PROGBITS        0000000100000000 0001b0 000030 00 WAMS 0   0  8
+    //
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/reloc_64_relative_data.so",
+        config,
+        [],
+        (),
+        TestContextObject::new(4),
+        ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
 
@@ -2946,7 +3011,24 @@ fn test_load_elf_rodata_sbpfv0() {
 }
 
 #[test]
-fn test_struct_func_pointer() {
+fn test_load_elf_rodata() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        optimize_rodata: false,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/rodata_section.so",
+        config,
+        [],
+        (),
+        TestContextObject::new(4),
+        ProgramResult::Ok(42),
+    );
+}
+
+#[test]
+fn test_struct_func_pointer_sbpfv0() {
     // This tests checks that a struct field adjacent to another field
     // which is a relocatable function pointer is not overwritten when
     // the function pointer is relocated at load time.
@@ -2972,6 +3054,25 @@ fn test_strict_header() {
         (),
         TestContextObject::new(6),
         ProgramResult::Ok(42),
+    );
+}
+
+#[test]
+fn test_struct_func_pointer() {
+    // This tests checks that a struct field adjacent to another field
+    // which is a relocatable function pointer is not overwritten when
+    // the function pointer is relocated at load time.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/struct_func_pointer.so",
+        config,
+        [],
+        (),
+        TestContextObject::new(3),
+        ProgramResult::Ok(0x102030405060708),
     );
 }
 
