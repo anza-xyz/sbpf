@@ -121,6 +121,14 @@ impl JitProgram {
         registers: [u64; 12],
     ) {
         unsafe {
+            let runtime_environment = std::ptr::addr_of_mut!(*vm)
+                .cast::<u64>()
+                .offset(get_runtime_environment_key() as isize);
+            let instruction_meter =
+                (vm.previous_instruction_meter as i64).wrapping_add(registers[11] as i64);
+            let entrypoint = &self.text_section
+                [self.pc_section[registers[11] as usize] as usize & (i32::MAX as u32 as usize)]
+                as *const u8;
             std::arch::asm!(
                 // RBP and RBX must be saved and restored manually in the current version of rustc and llvm.
                 "push rbx",
@@ -128,6 +136,7 @@ impl JitProgram {
                 "mov [{host_stack_pointer}], rsp",
                 "add QWORD PTR [{host_stack_pointer}], -8",
                 // RBP is zeroed out in order not to compromise the runtime environment (RDI) encryption.
+                #[cfg(not(feature = "jit-enable-host-stack-frames"))]
                 "xor rbp, rbp",
                 "mov [rsp-8], rax",
                 "mov rax, [r11 + 0x00]",
@@ -146,9 +155,9 @@ impl JitProgram {
                 "pop rbp",
                 "pop rbx",
                 host_stack_pointer = in(reg) &mut vm.host_stack_pointer,
-                inlateout("rdi") std::ptr::addr_of_mut!(*vm).cast::<u64>().offset(get_runtime_environment_key() as isize) => _,
-                inlateout("r10") (vm.previous_instruction_meter as i64).wrapping_add(registers[11] as i64) => _,
-                inlateout("rax") &self.text_section[self.pc_section[registers[11] as usize] as usize & (i32::MAX as u32 as usize)] as *const u8 => _,
+                inlateout("rdi") runtime_environment => _,
+                inlateout("r10") instruction_meter => _,
+                inlateout("rax") entrypoint => _,
                 inlateout("r11") &registers => _,
                 lateout("rsi") _, lateout("rdx") _, lateout("rcx") _, lateout("r8") _,
                 lateout("r9") _, lateout("r12") _, lateout("r13") _, lateout("r14") _, lateout("r15") _,

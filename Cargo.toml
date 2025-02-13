@@ -39,6 +39,7 @@ libc = { version = "0.2", optional = true }
 [features]
 default = ["jit"]
 jit = ["libc", "winapi"]
+jit-enable-host-stack-frames = ["jit"]
 fuzzer-not-safe-for-production = ["arbitrary"]
 debugger = ["gdbstub"]
 shuttle-test = ["dep:shuttle"]
