@@ -129,14 +129,22 @@ impl JitProgram {
             let entrypoint = &self.text_section
                 [self.pc_section[registers[11] as usize] as usize & (i32::MAX as u32 as usize)]
                 as *const u8;
-            std::arch::asm!(
+            macro_rules! stmt_expr_attribute_asm {
+                ($($prologue:literal,)+ cfg(not(feature = $feature:literal)), $guarded:tt, $($epilogue:tt)+) => {
+                    #[cfg(feature = $feature)]
+                    std::arch::asm!($($prologue,)+ $($epilogue)+);
+                    #[cfg(not(feature = $feature))]
+                    std::arch::asm!($($prologue,)+ $guarded, $($epilogue)+);
+                }
+            }
+            stmt_expr_attribute_asm!(
                 // RBP and RBX must be saved and restored manually in the current version of rustc and llvm.
                 "push rbx",
                 "push rbp",
                 "mov [{host_stack_pointer}], rsp",
                 "add QWORD PTR [{host_stack_pointer}], -8",
                 // RBP is zeroed out in order not to compromise the runtime environment (RDI) encryption.
-                #[cfg(not(feature = "jit-enable-host-stack-frames"))]
+                cfg(not(feature = "jit-enable-host-stack-frames")),
                 "xor rbp, rbp",
                 "mov [rsp-8], rax",
                 "mov rax, [r11 + 0x00]",
