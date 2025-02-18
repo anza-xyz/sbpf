@@ -58,12 +58,17 @@ fn test_strict_header() {
     assert_eq!(err, ElfParserError::OutOfBounds);
 
     // Break the file header one byte at a time
-    let expected_results = std::iter::repeat(&Err(ElfParserError::InvalidFileHeader))
-        .take(40)
-        .chain(std::iter::repeat(&Ok(())).take(12))
-        .chain(std::iter::repeat(&Err(ElfParserError::InvalidFileHeader)).take(8))
-        .chain(std::iter::repeat(&Ok(())).take(2))
-        .chain(std::iter::repeat(&Err(ElfParserError::InvalidFileHeader)).take(2));
+    let expected_results = std::iter::repeat_n(&Err(ElfParserError::InvalidFileHeader), 40)
+        .chain(std::iter::repeat_n(&Ok(()), 12))
+        .chain(std::iter::repeat_n(
+            &Err(ElfParserError::InvalidFileHeader),
+            8,
+        ))
+        .chain(std::iter::repeat_n(&Ok(()), 2))
+        .chain(std::iter::repeat_n(
+            &Err(ElfParserError::InvalidFileHeader),
+            2,
+        ));
     for (offset, expected) in (0..std::mem::size_of::<Elf64Ehdr>()).zip(expected_results) {
         let mut elf_bytes = elf_bytes.clone();
         elf_bytes[offset] = 0xAF;
@@ -72,16 +77,19 @@ fn test_strict_header() {
     }
 
     // Break the program header table one byte at a time
-    let expected_results_readonly = std::iter::repeat(&Err(ElfParserError::InvalidProgramHeader))
-        .take(48)
-        .chain(std::iter::repeat(&Ok(())).take(8))
-        .collect::<Vec<_>>();
-    let expected_results_writable = std::iter::repeat(&Err(ElfParserError::InvalidProgramHeader))
-        .take(40)
-        .chain(std::iter::repeat(&Ok(())).take(4))
-        .chain(std::iter::repeat(&Err(ElfParserError::InvalidProgramHeader)).take(4))
-        .chain(std::iter::repeat(&Ok(())).take(8))
-        .collect::<Vec<_>>();
+    let expected_results_readonly =
+        std::iter::repeat_n(&Err(ElfParserError::InvalidProgramHeader), 48)
+            .chain(std::iter::repeat_n(&Ok(()), 8))
+            .collect::<Vec<_>>();
+    let expected_results_writable =
+        std::iter::repeat_n(&Err(ElfParserError::InvalidProgramHeader), 40)
+            .chain(std::iter::repeat_n(&Ok(()), 4))
+            .chain(std::iter::repeat_n(
+                &Err(ElfParserError::InvalidProgramHeader),
+                4,
+            ))
+            .chain(std::iter::repeat_n(&Ok(()), 8))
+            .collect::<Vec<_>>();
     let expected_results = vec![
         expected_results_readonly.iter(),
         expected_results_readonly.iter(),
@@ -106,11 +114,10 @@ fn test_strict_header() {
 
     // Break the dynamic symbol table one byte at a time
     for index in 1..3 {
-        let expected_results = std::iter::repeat(&Ok(()))
-            .take(8)
-            .chain(std::iter::repeat(&Err(ElfParserError::OutOfBounds)).take(8))
-            .chain(std::iter::repeat(&Err(ElfParserError::InvalidSize)).take(1))
-            .chain(std::iter::repeat(&Err(ElfParserError::OutOfBounds)).take(7));
+        let expected_results = std::iter::repeat_n(&Ok(()), 8)
+            .chain(std::iter::repeat_n(&Err(ElfParserError::OutOfBounds), 8))
+            .chain(std::iter::repeat_n(&Err(ElfParserError::InvalidSize), 1))
+            .chain(std::iter::repeat_n(&Err(ElfParserError::OutOfBounds), 7));
         for (offset, expected) in (0x1d0 + std::mem::size_of::<Elf64Sym>() * index
             ..0x1d0 + std::mem::size_of::<Elf64Sym>() * (index + 1))
             .zip(expected_results)
