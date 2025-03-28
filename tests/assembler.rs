@@ -1,19 +1,28 @@
+#![allow(clippy::literal_string_with_formatting_args)]
 #![allow(clippy::arithmetic_side_effects)]
+
 // Copyright 2017 Rich Lane <lanerl@gmail.com>
 //
 // Licensed under the Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0> or
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test_utils;
 
-use solana_rbpf::{assembler::assemble, ebpf, program::BuiltinProgram, vm::TestContextObject};
+use solana_sbpf::program::SBPFVersion;
+use solana_sbpf::vm::Config;
+use solana_sbpf::{assembler::assemble, ebpf, program::BuiltinProgram};
 use std::sync::Arc;
-use test_utils::{TCP_SACK_ASM, TCP_SACK_BIN};
+use test_utils::{TestContextObject, TCP_SACK_ASM, TCP_SACK_BIN};
 
 fn asm(src: &str) -> Result<Vec<ebpf::Insn>, String> {
-    let executable = assemble::<TestContextObject>(src, Arc::new(BuiltinProgram::new_mock()))?;
+    asm_with_config(src, Config::default())
+}
+
+fn asm_with_config(src: &str, config: Config) -> Result<Vec<ebpf::Insn>, String> {
+    let loader = BuiltinProgram::new_loader(config);
+    let executable = assemble::<TestContextObject>(src, Arc::new(loader))?;
     let (_program_vm_addr, program) = executable.get_text_bytes();
     Ok((0..program.len() / ebpf::INSN_SIZE)
         .map(|insn_ptr| ebpf::get_insn(program, insn_ptr))
@@ -50,7 +59,47 @@ fn test_fill() {
 // Example for InstructionType::NoOperand.
 #[test]
 fn test_exit() {
-    assert_eq!(asm("exit"), Ok(vec![insn(0, ebpf::EXIT, 0, 0, 0, 0)]));
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    assert_eq!(
+        asm_with_config("exit", config.clone()),
+        Ok(vec![insn(0, ebpf::EXIT, 0, 0, 0, 0)])
+    );
+    assert_eq!(
+        asm_with_config("return", config),
+        Ok(vec![insn(0, ebpf::EXIT, 0, 0, 0, 0)])
+    );
+}
+
+#[test]
+fn test_static_syscall() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+
+    assert_eq!(
+        asm_with_config("syscall 3", config),
+        Ok(vec![insn(0, ebpf::SYSCALL, 0, 0, 0, 3)])
+    );
+}
+
+#[test]
+fn test_return() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+    assert_eq!(
+        asm_with_config("exit", config.clone()),
+        Ok(vec![insn(0, ebpf::RETURN, 0, 0, 0, 0)])
+    );
+    assert_eq!(
+        asm_with_config("return", config),
+        Ok(vec![insn(0, ebpf::RETURN, 0, 0, 0, 0)])
+    );
 }
 
 // Example for InstructionType::AluBinary.
@@ -70,33 +119,6 @@ fn test_add64() {
 #[test]
 fn test_neg64() {
     assert_eq!(asm("neg64 r1"), Ok(vec![insn(0, ebpf::NEG64, 1, 0, 0, 0)]));
-}
-
-// Example for InstructionType::LoadReg.
-#[test]
-fn test_ldxw() {
-    assert_eq!(
-        asm("ldxw r1, [r2+5]"),
-        Ok(vec![insn(0, ebpf::LD_W_REG, 1, 2, 5, 0)])
-    );
-}
-
-// Example for InstructionType::StoreImm.
-#[test]
-fn test_stw() {
-    assert_eq!(
-        asm("stw [r2+5], 7"),
-        Ok(vec![insn(0, ebpf::ST_W_IMM, 2, 0, 5, 7)])
-    );
-}
-
-// Example for InstructionType::StoreReg.
-#[test]
-fn test_stxw() {
-    assert_eq!(
-        asm("stxw [r2+5], r8"),
-        Ok(vec![insn(0, ebpf::ST_W_REG, 2, 8, 5, 0)])
-    );
 }
 
 // Example for InstructionType::JumpUnconditional.
@@ -132,7 +154,7 @@ fn test_call_reg() {
 fn test_call_imm() {
     assert_eq!(
         asm("call 299"),
-        Ok(vec![insn(0, ebpf::CALL_IMM, 0, 1, 0, 300)])
+        Ok(vec![insn(0, ebpf::CALL_IMM, 0, 0, 0, 299)])
     );
 }
 
@@ -158,33 +180,6 @@ fn test_lddw() {
             insn(0, ebpf::LD_DW_IMM, 1, 0, 0, 0xffffffffdd33cc44u64 as i64),
             insn(1, 0, 0, 0, 0, 0xffffffffff11ee22u64 as i64)
         ])
-    );
-}
-
-// Example for InstructionType::LoadReg.
-#[test]
-fn test_ldxdw() {
-    assert_eq!(
-        asm("ldxdw r1, [r2+3]"),
-        Ok(vec![insn(0, ebpf::LD_DW_REG, 1, 2, 3, 0)])
-    );
-}
-
-// Example for InstructionType::StoreImm.
-#[test]
-fn test_sth() {
-    assert_eq!(
-        asm("sth [r1+2], 3"),
-        Ok(vec![insn(0, ebpf::ST_H_IMM, 1, 0, 2, 3)])
-    );
-}
-
-// Example for InstructionType::StoreReg.
-#[test]
-fn test_stxh() {
-    assert_eq!(
-        asm("stxh [r1+2], r3"),
-        Ok(vec![insn(0, ebpf::ST_H_REG, 1, 3, 2, 0)])
     );
 }
 
@@ -385,15 +380,15 @@ fn test_alu_unary() {
 #[test]
 fn test_load_reg() {
     assert_eq!(
-        asm("ldxw r1, [r2+3]
+        asm("ldxb r1, [r2+3]
              ldxh r1, [r2+3]
-             ldxb r1, [r2+3]
+             ldxw r1, [r2+3]
              ldxdw r1, [r2+3]"),
         Ok(vec![
-            insn(0, ebpf::LD_W_REG, 1, 2, 3, 0),
-            insn(1, ebpf::LD_H_REG, 1, 2, 3, 0),
-            insn(2, ebpf::LD_B_REG, 1, 2, 3, 0),
-            insn(3, ebpf::LD_DW_REG, 1, 2, 3, 0)
+            insn(0, ebpf::LD_1B_REG, 1, 2, 3, 0),
+            insn(1, ebpf::LD_2B_REG, 1, 2, 3, 0),
+            insn(2, ebpf::LD_4B_REG, 1, 2, 3, 0),
+            insn(3, ebpf::LD_8B_REG, 1, 2, 3, 0)
         ])
     );
 }
@@ -402,15 +397,15 @@ fn test_load_reg() {
 #[test]
 fn test_store_imm() {
     assert_eq!(
-        asm("stw [r1+2], 3
+        asm("stb [r1+2], 3
              sth [r1+2], 3
-             stb [r1+2], 3
+             stw [r1+2], 3
              stdw [r1+2], 3"),
         Ok(vec![
-            insn(0, ebpf::ST_W_IMM, 1, 0, 2, 3),
-            insn(1, ebpf::ST_H_IMM, 1, 0, 2, 3),
-            insn(2, ebpf::ST_B_IMM, 1, 0, 2, 3),
-            insn(3, ebpf::ST_DW_IMM, 1, 0, 2, 3)
+            insn(0, ebpf::ST_1B_IMM, 1, 0, 2, 3),
+            insn(1, ebpf::ST_2B_IMM, 1, 0, 2, 3),
+            insn(2, ebpf::ST_4B_IMM, 1, 0, 2, 3),
+            insn(3, ebpf::ST_8B_IMM, 1, 0, 2, 3)
         ])
     );
 }
@@ -419,15 +414,15 @@ fn test_store_imm() {
 #[test]
 fn test_store_reg() {
     assert_eq!(
-        asm("stxw [r1+2], r3
+        asm("stxb [r1+2], r3
              stxh [r1+2], r3
-             stxb [r1+2], r3
+             stxw [r1+2], r3
              stxdw [r1+2], r3"),
         Ok(vec![
-            insn(0, ebpf::ST_W_REG, 1, 3, 2, 0),
-            insn(1, ebpf::ST_H_REG, 1, 3, 2, 0),
-            insn(2, ebpf::ST_B_REG, 1, 3, 2, 0),
-            insn(3, ebpf::ST_DW_REG, 1, 3, 2, 0)
+            insn(0, ebpf::ST_1B_REG, 1, 3, 2, 0),
+            insn(1, ebpf::ST_2B_REG, 1, 3, 2, 0),
+            insn(2, ebpf::ST_4B_REG, 1, 3, 2, 0),
+            insn(3, ebpf::ST_8B_REG, 1, 3, 2, 0)
         ])
     );
 }
@@ -525,8 +520,13 @@ fn test_large_immediate() {
 
 #[test]
 fn test_tcp_sack() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
     let executable =
-        assemble::<TestContextObject>(TCP_SACK_ASM, Arc::new(BuiltinProgram::new_mock())).unwrap();
+        assemble::<TestContextObject>(TCP_SACK_ASM, Arc::new(BuiltinProgram::new_loader(config)))
+            .unwrap();
     let (_program_vm_addr, program) = executable.get_text_bytes();
     assert_eq!(program, TCP_SACK_BIN.to_vec());
 }

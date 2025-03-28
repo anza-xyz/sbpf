@@ -4,15 +4,14 @@ use std::hint::black_box;
 
 use libfuzzer_sys::fuzz_target;
 
-use solana_rbpf::{
+use solana_sbpf::{
     ebpf,
     elf::Executable,
     memory_region::MemoryRegion,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     verifier::{RequisiteVerifier, Verifier},
-    vm::TestContextObject,
 };
-use test_utils::create_vm;
+use test_utils::{create_vm, TestContextObject};
 
 use crate::common::ConfigTemplate;
 
@@ -29,7 +28,9 @@ fuzz_target!(|data: DumbFuzzData| {
     let prog = data.prog;
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
-    if RequisiteVerifier::verify(&prog, &config, &SBPFVersion::V2, &function_registry).is_err() {
+    let syscall_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
+
+    if RequisiteVerifier::verify(&prog, &config, SBPFVersion::V3, &function_registry, &syscall_registry).is_err() {
         // verify please
         return;
     }
@@ -38,9 +39,8 @@ fuzz_target!(|data: DumbFuzzData| {
         &prog,
         std::sync::Arc::new(BuiltinProgram::new_loader(
             config,
-            FunctionRegistry::default(),
         )),
-        SBPFVersion::V2,
+        SBPFVersion::V3,
         function_registry,
     )
     .unwrap();

@@ -1,5 +1,7 @@
+#![allow(clippy::literal_string_with_formatting_args)]
 #![allow(clippy::arithmetic_side_effects)]
 #![cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+
 // Copyright 2020 Solana Maintainers <maintainers@solana.com>
 //
 // Licensed under the Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0> or
@@ -8,130 +10,24 @@
 
 extern crate byteorder;
 extern crate libc;
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test_utils;
 extern crate thiserror;
 
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
-use solana_rbpf::{
+use solana_sbpf::{
     assembler::assemble,
     ebpf,
     memory_region::MemoryRegion,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
+    program::{BuiltinProgram, SBPFVersion},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{Config, ContextObject, TestContextObject},
+    vm::{Config, ContextObject},
 };
 use std::sync::Arc;
-use test_utils::create_vm;
+use test_utils::{create_vm, test_interpreter_and_jit, TestContextObject};
 
-macro_rules! test_interpreter_and_jit {
-    (register, $function_registry:expr, $location:expr => $syscall_function:expr) => {
-        $function_registry
-            .register_function_hashed($location.as_bytes(), $syscall_function)
-            .unwrap();
-    };
-    ($executable:expr, $mem:tt, $context_object:expr $(,)?) => {
-        let expected_instruction_count = $context_object.get_remaining();
-        #[allow(unused_mut)]
-        let mut context_object = $context_object;
-        $executable.verify::<RequisiteVerifier>().unwrap();
-        let (
-            instruction_count_interpreter,
-            interpreter_final_pc,
-            _tracer_interpreter,
-            interpreter_result,
-            interpreter_mem,
-        ) = {
-            let mut mem = $mem.clone();
-            let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
-            let mut context_object = context_object.clone();
-            create_vm!(
-                vm,
-                &$executable,
-                &mut context_object,
-                stack,
-                heap,
-                vec![mem_region],
-                None
-            );
-            let (instruction_count_interpreter, result) = vm.execute_program(&$executable, true);
-            (
-                instruction_count_interpreter,
-                vm.registers[11],
-                vm.context_object_pointer.clone(),
-                result.unwrap(),
-                mem,
-            )
-        };
-        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-        {
-            #[allow(unused_mut)]
-            $executable.jit_compile().unwrap();
-            let mut mem = $mem;
-            let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
-            create_vm!(
-                vm,
-                &$executable,
-                &mut context_object,
-                stack,
-                heap,
-                vec![mem_region],
-                None
-            );
-            let (instruction_count_jit, result) = vm.execute_program(&$executable, false);
-            let tracer_jit = &vm.context_object_pointer;
-            if !TestContextObject::compare_trace_log(&_tracer_interpreter, tracer_jit) {
-                let analysis = Analysis::from_executable(&$executable).unwrap();
-                let stdout = std::io::stdout();
-                analysis
-                    .disassemble_trace_log(&mut stdout.lock(), &_tracer_interpreter.trace_log)
-                    .unwrap();
-                analysis
-                    .disassemble_trace_log(&mut stdout.lock(), &tracer_jit.trace_log)
-                    .unwrap();
-                panic!();
-            }
-            assert_eq!(
-                result.unwrap(),
-                interpreter_result,
-                "Unexpected result for JIT"
-            );
-            assert_eq!(
-                instruction_count_interpreter, instruction_count_jit,
-                "Interpreter and JIT instruction meter diverged",
-            );
-            assert_eq!(
-                interpreter_final_pc, vm.registers[11],
-                "Interpreter and JIT instruction final PC diverged",
-            );
-            assert_eq!(interpreter_mem, mem, "Interpreter and JIT memory diverged",);
-        }
-        if $executable.get_config().enable_instruction_meter {
-            assert_eq!(
-                instruction_count_interpreter, expected_instruction_count,
-                "Instruction meter did not consume expected amount"
-            );
-        }
-    };
-}
-
-macro_rules! test_interpreter_and_jit_asm {
-    ($source:expr, $config:expr, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr $(,)?) => {
-        #[allow(unused_mut)]
-        {
-            let mut config = $config;
-            config.enable_instruction_tracing = true;
-            let mut function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-            $(test_interpreter_and_jit!(register, function_registry, $location => $syscall_function);)*
-            let loader = Arc::new(BuiltinProgram::new_loader(config, function_registry));
-            let mut executable = assemble($source, loader).unwrap();
-            test_interpreter_and_jit!(executable, $mem, $context_object);
-        }
-    };
-}
-
-// BPF_ALU : Arithmetic and Logic
+// BPF_ALU32_LOAD : Arithmetic and Logic
 #[test]
 fn fuzz_alu() {
     let seed = 0xC2DB2F8F282284A0;
@@ -508,7 +404,7 @@ fn fuzz_alu() {
     }
 }
 
-fn test_ins(v1: bool, ins: String, prng: &mut SmallRng, cu: u64) {
+fn test_ins(v0: bool, ins: String, prng: &mut SmallRng, cu: u64) {
     let mut input = [0u8; 80];
 
     prng.fill_bytes(&mut input);
@@ -538,9 +434,19 @@ fn test_ins(v1: bool, ins: String, prng: &mut SmallRng, cu: u64) {
         exit"
     );
 
-    let mut config = Config::default();
-    if v1 {
-        config.enable_sbpf_v2 = false;
+    let mut config = Config {
+        enable_instruction_tracing: true,
+        ..Config::default()
+    };
+    if v0 {
+        config.enabled_sbpf_versions = SBPFVersion::V0..=SBPFVersion::V0;
     }
-    test_interpreter_and_jit_asm!(asm.as_str(), config, input, (), TestContextObject::new(cu));
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let mut executable = assemble(asm.as_str(), loader).unwrap();
+    test_interpreter_and_jit!(
+        override_budget => true,
+        executable,
+        input,
+        TestContextObject::new(cu),
+    );
 }

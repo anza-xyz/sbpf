@@ -6,7 +6,8 @@ use crate::{
     ebpf,
     elf::Executable,
     error::EbpfError,
-    vm::{ContextObject, DynamicAnalysis, TestContextObject},
+    program::SBPFVersion,
+    vm::{ContextObject, DynamicAnalysis},
 };
 use rustc_demangle::demangle;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -123,10 +124,22 @@ impl Default for CfgNode {
     }
 }
 
+struct DummyContextObject {}
+
+impl ContextObject for DummyContextObject {
+    fn trace(&mut self, _state: [u64; 12]) {}
+
+    fn consume(&mut self, _amount: u64) {}
+
+    fn get_remaining(&self) -> u64 {
+        0
+    }
+}
+
 /// Result of the executable analysis
 pub struct Analysis<'a> {
     /// The program which is analyzed
-    executable: &'a Executable<TestContextObject>,
+    executable: &'a Executable<DummyContextObject>,
     /// Plain list of instructions as they occur in the executable
     pub instructions: Vec<ebpf::Insn>,
     /// Functions in the executable
@@ -181,7 +194,7 @@ impl<'a> Analysis<'a> {
         let mut result = Self {
             // Removes the generic ContextObject which is safe because we are not going to execute the program
             executable: unsafe {
-                std::mem::transmute::<&Executable<C>, &Executable<TestContextObject>>(executable)
+                std::mem::transmute::<&Executable<C>, &Executable<DummyContextObject>>(executable)
             },
             instructions,
             functions,
@@ -192,7 +205,7 @@ impl<'a> Analysis<'a> {
             dfg_forward_edges: BTreeMap::new(),
             dfg_reverse_edges: BTreeMap::new(),
         };
-        result.split_into_basic_blocks(false);
+        result.split_into_basic_blocks(false, executable.get_sbpf_version());
         result.control_flow_graph_tarjan();
         result.control_flow_graph_dominance_hierarchy();
         result.label_basic_blocks();
@@ -223,30 +236,19 @@ impl<'a> Analysis<'a> {
     /// Splits the sequence of instructions into basic blocks
     ///
     /// Also links the control-flow graph edges between the basic blocks.
-    pub fn split_into_basic_blocks(&mut self, flatten_call_graph: bool) {
+    pub fn split_into_basic_blocks(&mut self, flatten_call_graph: bool, sbpf_version: SBPFVersion) {
         self.cfg_nodes.insert(0, CfgNode::default());
         for pc in self.functions.keys() {
             self.cfg_nodes.entry(*pc).or_default();
         }
         let mut cfg_edges = BTreeMap::new();
-        for insn in self.instructions.iter() {
+        for (pc, insn) in self.instructions.iter().enumerate() {
             let target_pc = (insn.ptr as isize + insn.off as isize + 1) as usize;
             match insn.opc {
                 ebpf::CALL_IMM => {
-                    if let Some((function_name, _function)) = self
-                        .executable
-                        .get_loader()
-                        .get_function_registry()
-                        .lookup_by_key(insn.imm as u32)
-                    {
-                        if function_name == b"abort" {
-                            self.cfg_nodes.entry(insn.ptr + 1).or_default();
-                            cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
-                        }
-                    } else if let Some((_function_name, target_pc)) = self
-                        .executable
-                        .get_function_registry()
-                        .lookup_by_key(insn.imm as u32)
+                    let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
+                    if let Some((_function_name, target_pc)) =
+                        self.executable.get_function_registry().lookup_by_key(key)
                     {
                         self.cfg_nodes.entry(insn.ptr + 1).or_default();
                         self.cfg_nodes.entry(target_pc).or_default();
@@ -268,7 +270,11 @@ impl<'a> Analysis<'a> {
                     };
                     cfg_edges.insert(insn.ptr, (insn.opc, destinations));
                 }
-                ebpf::EXIT => {
+                ebpf::EXIT if !sbpf_version.static_syscalls() => {
+                    self.cfg_nodes.entry(insn.ptr + 1).or_default();
+                    cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
+                }
+                ebpf::RETURN if sbpf_version.static_syscalls() => {
                     self.cfg_nodes.entry(insn.ptr + 1).or_default();
                     cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
                 }
@@ -441,9 +447,10 @@ impl<'a> Analysis<'a> {
     }
 
     /// Generates assembler code for a single instruction
-    pub fn disassemble_instruction(&self, insn: &ebpf::Insn) -> String {
+    pub fn disassemble_instruction(&self, insn: &ebpf::Insn, pc: usize) -> String {
         disassemble_instruction(
             insn,
+            pc,
             &self.cfg_nodes,
             self.executable.get_function_registry(),
             self.executable.get_loader(),
@@ -454,14 +461,14 @@ impl<'a> Analysis<'a> {
     /// Generates assembler code for the analyzed executable
     pub fn disassemble<W: std::io::Write>(&self, output: &mut W) -> std::io::Result<()> {
         let mut last_basic_block = usize::MAX;
-        for insn in self.instructions.iter() {
+        for (pc, insn) in self.instructions.iter().enumerate() {
             self.disassemble_label(
                 output,
                 Some(insn) == self.instructions.first(),
                 insn.ptr,
                 &mut last_basic_block,
             )?;
-            writeln!(output, "    {}", self.disassemble_instruction(insn))?;
+            writeln!(output, "    {}", self.disassemble_instruction(insn, pc))?;
         }
         Ok(())
     }
@@ -492,7 +499,7 @@ impl<'a> Analysis<'a> {
                 index,
                 &entry[0..11],
                 pc,
-                self.disassemble_instruction(insn),
+                self.disassemble_instruction(insn, pc),
             )?;
         }
         Ok(())
@@ -544,9 +551,9 @@ impl<'a> Analysis<'a> {
             writeln!(output, "    lbb_{} [label=<<table border=\"0\" cellborder=\"0\" cellpadding=\"3\">{}</table>>];",
                 cfg_node_start,
                 analysis.instructions[cfg_node.instructions.clone()].iter()
-                .map(|insn| {
+                .enumerate().map(|(pc, insn)| {
                     let desc = analysis.disassemble_instruction(
-                        insn
+                        insn, pc
                     );
                     if let Some(split_index) = desc.find(' ') {
                         let mut rest = desc[split_index+1..].to_string();

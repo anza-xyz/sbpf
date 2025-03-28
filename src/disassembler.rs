@@ -111,11 +111,12 @@ fn jmp_reg_str(name: &str, insn: &ebpf::Insn, cfg_nodes: &BTreeMap<usize, CfgNod
 /// Disassemble an eBPF instruction
 #[rustfmt::skip]
 pub fn disassemble_instruction<C: ContextObject>(
-    insn: &ebpf::Insn, 
+    insn: &ebpf::Insn,
+    pc: usize,
     cfg_nodes: &BTreeMap<usize, CfgNode>,
     function_registry: &FunctionRegistry<usize>,
     loader: &BuiltinProgram<C>,
-    sbpf_version: &SBPFVersion,
+    sbpf_version: SBPFVersion,
 ) -> String {
     let name;
     let desc;
@@ -124,32 +125,34 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::LD_DW_IMM  => { name = "lddw"; desc = format!("{} r{:}, {:#x}", name, insn.dst, insn.imm); },
 
         // BPF_LDX class
-        ebpf::LD_B_REG   => { name = "ldxb";  desc = ld_reg_str(name, insn); },
-        ebpf::LD_H_REG   => { name = "ldxh";  desc = ld_reg_str(name, insn); },
-        ebpf::LD_W_REG   => { name = "ldxw";  desc = ld_reg_str(name, insn); },
-        ebpf::LD_DW_REG  => { name = "ldxdw"; desc = ld_reg_str(name, insn); },
+        ebpf::LD_B_REG  if !sbpf_version.move_memory_instruction_classes() => { name = "ldxb";  desc = ld_reg_str(name, insn); },
+        ebpf::LD_H_REG  if !sbpf_version.move_memory_instruction_classes() => { name = "ldxh";  desc = ld_reg_str(name, insn); },
+        ebpf::LD_W_REG  if !sbpf_version.move_memory_instruction_classes() => { name = "ldxw";  desc = ld_reg_str(name, insn); },
+        ebpf::LD_DW_REG if !sbpf_version.move_memory_instruction_classes() => { name = "ldxdw"; desc = ld_reg_str(name, insn); },
 
         // BPF_ST class
-        ebpf::ST_B_IMM   => { name = "stb";  desc = ld_st_imm_str(name, insn); },
-        ebpf::ST_H_IMM   => { name = "sth";  desc = ld_st_imm_str(name, insn); },
-        ebpf::ST_W_IMM   => { name = "stw";  desc = ld_st_imm_str(name, insn); },
-        ebpf::ST_DW_IMM  => { name = "stdw"; desc = ld_st_imm_str(name, insn); },
+        ebpf::ST_B_IMM  if !sbpf_version.move_memory_instruction_classes() => { name = "stb";   desc = ld_st_imm_str(name, insn); },
+        ebpf::ST_H_IMM  if !sbpf_version.move_memory_instruction_classes() => { name = "sth";   desc = ld_st_imm_str(name, insn); },
+        ebpf::ST_W_IMM  if !sbpf_version.move_memory_instruction_classes() => { name = "stw";   desc = ld_st_imm_str(name, insn); },
+        ebpf::ST_DW_IMM if !sbpf_version.move_memory_instruction_classes() => { name = "stdw";  desc = ld_st_imm_str(name, insn); },
 
         // BPF_STX class
-        ebpf::ST_B_REG   => { name = "stxb";      desc = st_reg_str(name, insn); },
-        ebpf::ST_H_REG   => { name = "stxh";      desc = st_reg_str(name, insn); },
-        ebpf::ST_W_REG   => { name = "stxw";      desc = st_reg_str(name, insn); },
-        ebpf::ST_DW_REG  => { name = "stxdw";     desc = st_reg_str(name, insn); },
+        ebpf::ST_B_REG  if !sbpf_version.move_memory_instruction_classes() => { name = "stxb";  desc = st_reg_str(name, insn); },
+        ebpf::ST_H_REG  if !sbpf_version.move_memory_instruction_classes() => { name = "stxh";  desc = st_reg_str(name, insn); },
+        ebpf::ST_W_REG  if !sbpf_version.move_memory_instruction_classes() => { name = "stxw";  desc = st_reg_str(name, insn); },
+        ebpf::ST_DW_REG if !sbpf_version.move_memory_instruction_classes() => { name = "stxdw"; desc = st_reg_str(name, insn); },
 
-        // BPF_ALU class
+        // BPF_ALU32_LOAD class
         ebpf::ADD32_IMM  => { name = "add32";  desc = alu_imm_str(name, insn);  },
         ebpf::ADD32_REG  => { name = "add32";  desc = alu_reg_str(name, insn);  },
         ebpf::SUB32_IMM  => { name = "sub32";  desc = alu_imm_str(name, insn);  },
         ebpf::SUB32_REG  => { name = "sub32";  desc = alu_reg_str(name, insn);  },
-        ebpf::MUL32_IMM  => { name = "mul32";  desc = alu_imm_str(name, insn);  },
-        ebpf::MUL32_REG  => { name = "mul32";  desc = alu_reg_str(name, insn);  },
-        ebpf::DIV32_IMM  => { name = "div32";  desc = alu_imm_str(name, insn);  },
-        ebpf::DIV32_REG  => { name = "div32";  desc = alu_reg_str(name, insn);  },
+        ebpf::MUL32_IMM  if !sbpf_version.enable_pqr() => { name = "mul32";  desc = alu_imm_str(name, insn);  },
+        ebpf::MUL32_REG  if !sbpf_version.enable_pqr() => { name = "mul32";  desc = alu_reg_str(name, insn);  },
+        ebpf::LD_1B_REG  if sbpf_version.move_memory_instruction_classes() => { name = "ldxb";  desc = ld_reg_str(name, insn); },
+        ebpf::DIV32_IMM  if !sbpf_version.enable_pqr() => { name = "div32";  desc = alu_imm_str(name, insn);  },
+        ebpf::DIV32_REG  if !sbpf_version.enable_pqr() => { name = "div32";  desc = alu_reg_str(name, insn);  },
+        ebpf::LD_2B_REG  if sbpf_version.move_memory_instruction_classes() => { name = "ldxh";  desc = ld_reg_str(name, insn); },
         ebpf::OR32_IMM   => { name = "or32";   desc = alu_imm_str(name, insn);  },
         ebpf::OR32_REG   => { name = "or32";   desc = alu_reg_str(name, insn);  },
         ebpf::AND32_IMM  => { name = "and32";  desc = alu_imm_str(name, insn);  },
@@ -158,9 +161,11 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::LSH32_REG  => { name = "lsh32";  desc = alu_reg_str(name, insn);  },
         ebpf::RSH32_IMM  => { name = "rsh32";  desc = alu_imm_str(name, insn);  },
         ebpf::RSH32_REG  => { name = "rsh32";  desc = alu_reg_str(name, insn);  },
-        ebpf::NEG32      => { name = "neg32";  desc = format!("{} r{}", name, insn.dst); },
-        ebpf::MOD32_IMM  => { name = "mod32";  desc = alu_imm_str(name, insn);  },
-        ebpf::MOD32_REG  => { name = "mod32";  desc = alu_reg_str(name, insn);  },
+        ebpf::NEG32      if !sbpf_version.disable_neg() => { name = "neg32";  desc = format!("{} r{}", name, insn.dst); },
+        ebpf::LD_4B_REG  if sbpf_version.move_memory_instruction_classes() => { name = "ldxw";  desc = ld_reg_str(name, insn); },
+        ebpf::MOD32_IMM  if !sbpf_version.enable_pqr() => { name = "mod32";  desc = alu_imm_str(name, insn);  },
+        ebpf::MOD32_REG  if !sbpf_version.enable_pqr() => { name = "mod32";  desc = alu_reg_str(name, insn);  },
+        ebpf::LD_8B_REG  if sbpf_version.move_memory_instruction_classes() => { name = "ldxdw"; desc = ld_reg_str(name, insn); },
         ebpf::XOR32_IMM  => { name = "xor32";  desc = alu_imm_str(name, insn);  },
         ebpf::XOR32_REG  => { name = "xor32";  desc = alu_reg_str(name, insn);  },
         ebpf::MOV32_IMM  => { name = "mov32";  desc = alu_imm_str(name, insn);  },
@@ -170,15 +175,19 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::LE         => { name = "le";     desc = byteswap_str(name, insn); },
         ebpf::BE         => { name = "be";     desc = byteswap_str(name, insn); },
 
-        // BPF_ALU64 class
+        // BPF_ALU64_STORE class
         ebpf::ADD64_IMM  => { name = "add64";  desc = alu_imm_str(name, insn); },
         ebpf::ADD64_REG  => { name = "add64";  desc = alu_reg_str(name, insn); },
         ebpf::SUB64_IMM  => { name = "sub64";  desc = alu_imm_str(name, insn); },
         ebpf::SUB64_REG  => { name = "sub64";  desc = alu_reg_str(name, insn); },
-        ebpf::MUL64_IMM  => { name = "mul64";  desc = alu_imm_str(name, insn); },
-        ebpf::MUL64_REG  => { name = "mul64";  desc = alu_reg_str(name, insn); },
-        ebpf::DIV64_IMM  => { name = "div64";  desc = alu_imm_str(name, insn); },
-        ebpf::DIV64_REG  => { name = "div64";  desc = alu_reg_str(name, insn); },
+        ebpf::MUL64_IMM  if !sbpf_version.enable_pqr() => { name = "mul64";  desc = alu_imm_str(name, insn); },
+        ebpf::ST_1B_IMM  if sbpf_version.move_memory_instruction_classes() => { name = "stb";   desc = ld_st_imm_str(name, insn); },
+        ebpf::MUL64_REG  if !sbpf_version.enable_pqr() => { name = "mul64";  desc = alu_reg_str(name, insn); },
+        ebpf::ST_1B_REG  if sbpf_version.move_memory_instruction_classes() => { name = "stxb";  desc = st_reg_str(name, insn); },
+        ebpf::DIV64_IMM  if !sbpf_version.enable_pqr() => { name = "div64";  desc = alu_imm_str(name, insn); },
+        ebpf::ST_2B_IMM  if sbpf_version.move_memory_instruction_classes() => { name = "sth";   desc = ld_st_imm_str(name, insn); },
+        ebpf::DIV64_REG  if !sbpf_version.enable_pqr() => { name = "div64";  desc = alu_reg_str(name, insn); },
+        ebpf::ST_2B_REG  if sbpf_version.move_memory_instruction_classes() => { name = "stxh";  desc = st_reg_str(name, insn); },
         ebpf::OR64_IMM   => { name = "or64";   desc = alu_imm_str(name, insn); },
         ebpf::OR64_REG   => { name = "or64";   desc = alu_reg_str(name, insn); },
         ebpf::AND64_IMM  => { name = "and64";  desc = alu_imm_str(name, insn); },
@@ -187,9 +196,13 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::LSH64_REG  => { name = "lsh64";  desc = alu_reg_str(name, insn); },
         ebpf::RSH64_IMM  => { name = "rsh64";  desc = alu_imm_str(name, insn); },
         ebpf::RSH64_REG  => { name = "rsh64";  desc = alu_reg_str(name, insn); },
-        ebpf::NEG64      => { name = "neg64";  desc = format!("{} r{}", name, insn.dst); },
-        ebpf::MOD64_IMM  => { name = "mod64";  desc = alu_imm_str(name, insn); },
-        ebpf::MOD64_REG  => { name = "mod64";  desc = alu_reg_str(name, insn); },
+        ebpf::ST_4B_IMM  if sbpf_version.move_memory_instruction_classes() => { name = "stw";   desc = ld_st_imm_str(name, insn); },
+        ebpf::NEG64      if !sbpf_version.disable_neg() => { name = "neg64";  desc = format!("{} r{}", name, insn.dst); },
+        ebpf::ST_4B_REG  if sbpf_version.move_memory_instruction_classes() => { name = "stxw";  desc = st_reg_str(name, insn); },
+        ebpf::MOD64_IMM  if !sbpf_version.enable_pqr() => { name = "mod64";  desc = alu_imm_str(name, insn); },
+        ebpf::ST_8B_IMM  if sbpf_version.move_memory_instruction_classes() => { name = "stdw";  desc = ld_st_imm_str(name, insn); },
+        ebpf::MOD64_REG  if !sbpf_version.enable_pqr() => { name = "mod64";  desc = alu_reg_str(name, insn); },
+        ebpf::ST_8B_REG  if sbpf_version.move_memory_instruction_classes() => { name = "stxdw"; desc = st_reg_str(name, insn); },
         ebpf::XOR64_IMM  => { name = "xor64";  desc = alu_imm_str(name, insn); },
         ebpf::XOR64_REG  => { name = "xor64";  desc = alu_reg_str(name, insn); },
         ebpf::MOV64_IMM  => { name = "mov64";  desc = alu_imm_str(name, insn); },
@@ -199,30 +212,30 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::HOR64_IMM  => { name = "hor64"; desc = alu_imm_str(name, insn); },
 
         // BPF_PQR class
-        ebpf::LMUL32_IMM  => { name = "lmul32"; desc = alu_imm_str(name, insn); },
-        ebpf::LMUL32_REG  => { name = "lmul32"; desc = alu_reg_str(name, insn); },
-        ebpf::LMUL64_IMM  => { name = "lmul64"; desc = alu_imm_str(name, insn); },
-        ebpf::LMUL64_REG  => { name = "lmul64"; desc = alu_reg_str(name, insn); },
-        ebpf::UHMUL64_IMM => { name = "uhmul64"; desc = alu_imm_str(name, insn); },
-        ebpf::UHMUL64_REG => { name = "uhmul64"; desc = alu_reg_str(name, insn); },
-        ebpf::SHMUL64_IMM => { name = "shmul64"; desc = alu_imm_str(name, insn); },
-        ebpf::SHMUL64_REG => { name = "shmul64"; desc = alu_reg_str(name, insn); },
-        ebpf::UDIV32_IMM  => { name = "udiv32"; desc = alu_imm_str(name, insn); },
-        ebpf::UDIV32_REG  => { name = "udiv32"; desc = alu_reg_str(name, insn); },
-        ebpf::UDIV64_IMM  => { name = "udiv64"; desc = alu_imm_str(name, insn); },
-        ebpf::UDIV64_REG  => { name = "udiv64"; desc = alu_reg_str(name, insn); },
-        ebpf::UREM32_IMM  => { name = "urem32"; desc = alu_imm_str(name, insn); },
-        ebpf::UREM32_REG  => { name = "urem32"; desc = alu_reg_str(name, insn); },
-        ebpf::UREM64_IMM  => { name = "urem64"; desc = alu_imm_str(name, insn); },
-        ebpf::UREM64_REG  => { name = "urem64"; desc = alu_reg_str(name, insn); },
-        ebpf::SDIV32_IMM  => { name = "sdiv32"; desc = alu_imm_str(name, insn); },
-        ebpf::SDIV32_REG  => { name = "sdiv32"; desc = alu_reg_str(name, insn); },
-        ebpf::SDIV64_IMM  => { name = "sdiv64"; desc = alu_imm_str(name, insn); },
-        ebpf::SDIV64_REG  => { name = "sdiv64"; desc = alu_reg_str(name, insn); },
-        ebpf::SREM32_IMM  => { name = "srem32"; desc = alu_imm_str(name, insn); },
-        ebpf::SREM32_REG  => { name = "srem32"; desc = alu_reg_str(name, insn); },
-        ebpf::SREM64_IMM  => { name = "srem64"; desc = alu_imm_str(name, insn); },
-        ebpf::SREM64_REG  => { name = "srem64"; desc = alu_reg_str(name, insn); },
+        ebpf::LMUL32_IMM  if sbpf_version.enable_pqr() => { name = "lmul32"; desc = alu_imm_str(name, insn); },
+        ebpf::LMUL32_REG  if sbpf_version.enable_pqr() => { name = "lmul32"; desc = alu_reg_str(name, insn); },
+        ebpf::LMUL64_IMM  if sbpf_version.enable_pqr() => { name = "lmul64"; desc = alu_imm_str(name, insn); },
+        ebpf::LMUL64_REG  if sbpf_version.enable_pqr() => { name = "lmul64"; desc = alu_reg_str(name, insn); },
+        ebpf::UHMUL64_IMM if sbpf_version.enable_pqr() => { name = "uhmul64"; desc = alu_imm_str(name, insn); },
+        ebpf::UHMUL64_REG if sbpf_version.enable_pqr() => { name = "uhmul64"; desc = alu_reg_str(name, insn); },
+        ebpf::SHMUL64_IMM if sbpf_version.enable_pqr() => { name = "shmul64"; desc = alu_imm_str(name, insn); },
+        ebpf::SHMUL64_REG if sbpf_version.enable_pqr() => { name = "shmul64"; desc = alu_reg_str(name, insn); },
+        ebpf::UDIV32_IMM  if sbpf_version.enable_pqr() => { name = "udiv32"; desc = alu_imm_str(name, insn); },
+        ebpf::UDIV32_REG  if sbpf_version.enable_pqr() => { name = "udiv32"; desc = alu_reg_str(name, insn); },
+        ebpf::UDIV64_IMM  if sbpf_version.enable_pqr() => { name = "udiv64"; desc = alu_imm_str(name, insn); },
+        ebpf::UDIV64_REG  if sbpf_version.enable_pqr() => { name = "udiv64"; desc = alu_reg_str(name, insn); },
+        ebpf::UREM32_IMM  if sbpf_version.enable_pqr() => { name = "urem32"; desc = alu_imm_str(name, insn); },
+        ebpf::UREM32_REG  if sbpf_version.enable_pqr() => { name = "urem32"; desc = alu_reg_str(name, insn); },
+        ebpf::UREM64_IMM  if sbpf_version.enable_pqr() => { name = "urem64"; desc = alu_imm_str(name, insn); },
+        ebpf::UREM64_REG  if sbpf_version.enable_pqr() => { name = "urem64"; desc = alu_reg_str(name, insn); },
+        ebpf::SDIV32_IMM  if sbpf_version.enable_pqr() => { name = "sdiv32"; desc = alu_imm_str(name, insn); },
+        ebpf::SDIV32_REG  if sbpf_version.enable_pqr() => { name = "sdiv32"; desc = alu_reg_str(name, insn); },
+        ebpf::SDIV64_IMM  if sbpf_version.enable_pqr() => { name = "sdiv64"; desc = alu_imm_str(name, insn); },
+        ebpf::SDIV64_REG  if sbpf_version.enable_pqr() => { name = "sdiv64"; desc = alu_reg_str(name, insn); },
+        ebpf::SREM32_IMM  if sbpf_version.enable_pqr() => { name = "srem32"; desc = alu_imm_str(name, insn); },
+        ebpf::SREM32_REG  if sbpf_version.enable_pqr() => { name = "srem32"; desc = alu_reg_str(name, insn); },
+        ebpf::SREM64_IMM  if sbpf_version.enable_pqr() => { name = "srem64"; desc = alu_imm_str(name, insn); },
+        ebpf::SREM64_REG  if sbpf_version.enable_pqr() => { name = "srem64"; desc = alu_reg_str(name, insn); },
 
         // BPF_JMP class
         ebpf::JA         => {
@@ -253,25 +266,19 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::JSLE_IMM   => { name = "jsle"; desc = jmp_imm_str(name, insn, cfg_nodes); },
         ebpf::JSLE_REG   => { name = "jsle"; desc = jmp_reg_str(name, insn, cfg_nodes); },
         ebpf::CALL_IMM   => {
-            let mut function_name = None;
-            if sbpf_version.static_syscalls() {
-                if insn.src != 0 {
-                    function_name = Some(resolve_label(cfg_nodes, insn.imm as usize).to_string());
-                }
-            } else {
-                function_name = function_registry.lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
-            }
-            let function_name = if let Some(function_name) = function_name {
-                name = "call";
-                function_name
-            } else {
+            let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
+            let mut name = "call";
+            let mut function_name = function_registry.lookup_by_key(key).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
+            if !sbpf_version.static_syscalls() && function_name.is_none() {
                 name = "syscall";
-                loader.get_function_registry().lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string()).unwrap_or_else(|| "[invalid]".to_string())
-            };
-            desc = format!("{name} {function_name}");
+                function_name = loader.get_function_registry().lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
+            }
+            desc = format!("{} {}", name, function_name.unwrap_or_else(|| "[invalid]".to_string()));
         },
         ebpf::CALL_REG   => { name = "callx"; desc = format!("{} r{}", name, if sbpf_version.callx_uses_src_reg() { insn.src } else { insn.imm as u8 }); },
-        ebpf::EXIT       => { name = "exit"; desc = name.to_string(); },
+        ebpf::EXIT     if !sbpf_version.static_syscalls() => { name = "exit"; desc = name.to_string(); },
+        ebpf::RETURN   if sbpf_version.static_syscalls() =>  { name = "return"; desc = name.to_string(); },
+        ebpf::SYSCALL  if sbpf_version.static_syscalls() =>  { desc = format!("syscall {}", insn.imm); },
 
         _                => { name = "unknown"; desc = format!("{} opcode={:#x}", name, insn.opc); },
     };

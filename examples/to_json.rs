@@ -10,14 +10,14 @@ extern crate json;
 extern crate elf;
 use std::path::PathBuf;
 
-extern crate solana_rbpf;
-use solana_rbpf::{
+extern crate solana_sbpf;
+use solana_sbpf::{
     elf::Executable,
     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
-    vm::TestContextObject,
 };
 use std::sync::Arc;
+use test_utils::TestContextObject;
 // Turn a program into a JSON string.
 //
 // Relies on `json` crate.
@@ -31,14 +31,14 @@ fn to_json(program: &[u8]) -> String {
     let executable = Executable::<TestContextObject>::from_text_bytes(
         program,
         Arc::new(BuiltinProgram::new_mock()),
-        SBPFVersion::V2,
+        SBPFVersion::V3,
         FunctionRegistry::default(),
     )
     .unwrap();
     let analysis = Analysis::from_executable(&executable).unwrap();
 
     let mut json_insns = vec![];
-    for insn in analysis.instructions.iter() {
+    for (pc, insn) in analysis.instructions.iter().enumerate() {
         json_insns.push(object!(
             "opc"  => format!("{:#x}", insn.opc), // => insn.opc,
             "dst"  => format!("{:#x}", insn.dst), // => insn.dst,
@@ -53,7 +53,8 @@ fn to_json(program: &[u8]) -> String {
             // has no effect and the complete value is printed anyway.
             "imm"  => format!("{:#x}", insn.imm as i32), // => insn.imm,
             "desc" => analysis.disassemble_instruction(
-                insn
+                insn,
+                pc
             ),
         ));
     }

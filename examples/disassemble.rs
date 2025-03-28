@@ -4,14 +4,14 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-extern crate solana_rbpf;
-use solana_rbpf::{
+extern crate solana_sbpf;
+use solana_sbpf::{
     elf::Executable,
     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
-    vm::TestContextObject,
 };
 use std::sync::Arc;
+use test_utils::TestContextObject;
 
 // Simply disassemble a program into human-readable instructions.
 fn main() {
@@ -35,7 +35,7 @@ fn main() {
     let executable = Executable::<TestContextObject>::from_text_bytes(
         program,
         loader,
-        SBPFVersion::V2,
+        SBPFVersion::V3,
         FunctionRegistry::default(),
     )
     .unwrap();

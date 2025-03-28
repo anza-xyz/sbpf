@@ -1,3 +1,5 @@
+#![allow(clippy::literal_string_with_formatting_args)]
+
 // Copyright 2017 Jan-Erik Rediger <badboy@archlinux.us>
 //
 // Adopted from tests in `tests/assembler.rs`
@@ -6,26 +8,26 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-extern crate solana_rbpf;
-use solana_rbpf::{
-    assembler::assemble,
-    program::{BuiltinProgram, FunctionRegistry},
-    static_analysis::Analysis,
-    vm::{Config, TestContextObject},
+extern crate solana_sbpf;
+use solana_sbpf::program::SBPFVersion;
+use solana_sbpf::{
+    assembler::assemble, program::BuiltinProgram, static_analysis::Analysis, vm::Config,
 };
 use std::sync::Arc;
+use test_utils::TestContextObject;
 
 // Using a macro to keep actual line numbers in failure output
 macro_rules! disasm {
     ($src:expr) => {{
+        let config = Config {
+            enable_symbol_and_section_labels: true,
+            ..Config::default()
+        };
+        disasm!($src, config);
+    }};
+    ($src:expr, $config:expr) => {{
         let src = $src;
-        let loader = BuiltinProgram::new_loader(
-            Config {
-                enable_symbol_and_section_labels: true,
-                ..Config::default()
-            },
-            FunctionRegistry::default(),
-        );
+        let loader = BuiltinProgram::new_loader($config);
         let executable = assemble::<TestContextObject>(src, Arc::new(loader)).unwrap();
         let analysis = Analysis::from_executable(&executable).unwrap();
         let mut reasm = Vec::new();
@@ -42,7 +44,29 @@ fn test_empty() {
 // Example for InstructionType::NoOperand.
 #[test]
 fn test_exit() {
-    disasm!("entrypoint:\n    exit\n");
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    disasm!("entrypoint:\n    exit\n", config);
+}
+
+#[test]
+fn test_return() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+    disasm!("entrypoint:\n    return\n", config);
+}
+
+#[test]
+fn test_static_syscall() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+    disasm!("entrypoint:\n    syscall 5\n", config);
 }
 
 // Example for InstructionType::AluBinary.
@@ -50,12 +74,6 @@ fn test_exit() {
 fn test_add64() {
     disasm!("entrypoint:\n    add64 r1, r3\n");
     disasm!("entrypoint:\n    add64 r1, 5\n");
-}
-
-// Example for InstructionType::AluUnary.
-#[test]
-fn test_neg64() {
-    disasm!("entrypoint:\n    neg64 r1\n");
 }
 
 // Example for InstructionType::LoadReg.
@@ -86,7 +104,7 @@ fn test_ja() {
         "entrypoint:
     ja lbb_1
 lbb_1:
-    exit
+    return
 "
     );
 }
@@ -98,14 +116,14 @@ fn test_jeq() {
         "entrypoint:
     jeq r1, 4, lbb_1
 lbb_1:
-    exit
+    return
 "
     );
     disasm!(
         "entrypoint:
     jeq r1, r3, lbb_1
 lbb_1:
-    exit
+    return
 "
     );
 }
@@ -118,7 +136,7 @@ fn test_call() {
     call function_1
 
 function_1:
-    exit
+    return
 "
     );
 }
@@ -164,13 +182,10 @@ fn test_alu_binary() {
         "entrypoint:
     add64 r1, r2
     sub64 r1, r2
-    mul64 r1, r2
-    div64 r1, r2
     or64 r1, r2
     and64 r1, r2
     lsh64 r1, r2
     rsh64 r1, r2
-    mod64 r1, r2
     xor64 r1, r2
     mov64 r1, r2
     arsh64 r1, r2
@@ -181,13 +196,10 @@ fn test_alu_binary() {
         "entrypoint:
     add64 r1, 2
     sub64 r1, 2
-    mul64 r1, 2
-    div64 r1, 2
     or64 r1, 2
     and64 r1, 2
     lsh64 r1, 2
     rsh64 r1, 2
-    mod64 r1, 2
     xor64 r1, 2
     mov64 r1, 2
     arsh64 r1, 2
@@ -198,13 +210,10 @@ fn test_alu_binary() {
         "entrypoint:
     add32 r1, r2
     sub32 r1, r2
-    mul32 r1, r2
-    div32 r1, r2
     or32 r1, r2
     and32 r1, r2
     lsh32 r1, r2
     rsh32 r1, r2
-    mod32 r1, r2
     xor32 r1, r2
     mov32 r1, r2
     arsh32 r1, r2
@@ -215,27 +224,47 @@ fn test_alu_binary() {
         "entrypoint:
     add32 r1, 2
     sub32 r1, 2
-    mul32 r1, 2
-    div32 r1, 2
     or32 r1, 2
     and32 r1, 2
     lsh32 r1, 2
     rsh32 r1, 2
-    mod32 r1, 2
     xor32 r1, 2
     mov32 r1, 2
     arsh32 r1, 2
 "
     );
-}
 
-// Test all supported AluUnary mnemonics.
-#[test]
-fn test_alu_unary() {
     disasm!(
         "entrypoint:
-    neg64 r1
-    neg32 r1
+    lmul64 r1, r2
+    lmul32 r1, r2
+    uhmul64 r1, r2
+    shmul64 r1, r2
+    udiv64 r1, r2
+    udiv32 r1, r2
+    urem64 r1, r2
+    urem32 r1, r2
+    sdiv64 r1, r2
+    sdiv32 r1, r2
+    srem64 r1, r2
+    srem32 r1, r2
+"
+    );
+
+    disasm!(
+        "entrypoint:
+    lmul64 r1, 2
+    lmul32 r1, 2
+    uhmul64 r1, 2
+    shmul64 r1, 2
+    udiv64 r1, 2
+    udiv32 r1, 2
+    urem64 r1, 2
+    urem32 r1, 2
+    sdiv64 r1, 2
+    sdiv32 r1, 2
+    srem64 r1, 2
+    srem32 r1, 2
 "
     );
 }
@@ -296,7 +325,7 @@ fn test_jump_conditional() {
     jslt r1, r2, lbb_11
     jsle r1, r2, lbb_11
 lbb_11:
-    exit
+    return
 "
     );
 
@@ -314,7 +343,7 @@ lbb_11:
     jslt r1, 2, lbb_11
     jsle r1, 2, lbb_11
 lbb_11:
-    exit
+    return
 "
     );
 }

@@ -15,14 +15,14 @@ use std::{
     ptr::{self, copy_nonoverlapping},
 };
 
-/* Explaination of the Gapped Memory
+/* Explanation of the Gapped Memory
 
     The MemoryMapping supports a special mapping mode which is used for the stack MemoryRegion.
     In this mode the backing address space of the host is sliced in power-of-two aligned frames.
     The exponent of this alignment is specified in vm_gap_shift. Then the virtual address space
     of the guest is spread out in a way which leaves gapes, the same size as the frames, in
     between the frames. This effectively doubles the size of the guests virtual address space.
-    But the acutual mapped memory stays the same, as the gaps are not mapped and accessing them
+    But the actual mapped memory stays the same, as the gaps are not mapped and accessing them
     results in an AccessViolation.
 
     Guest: frame 0 | gap 0 | frame 1 | gap 1 | frame 2 | gap 2 | ...
@@ -190,12 +190,12 @@ pub struct UnalignedMemoryMapping<'a> {
     /// VM configuration
     config: &'a Config,
     /// Executable sbpf_version
-    sbpf_version: &'a SBPFVersion,
+    sbpf_version: SBPFVersion,
     /// CoW callback
     cow_cb: Option<MemoryCowCallback>,
 }
 
-impl<'a> fmt::Debug for UnalignedMemoryMapping<'a> {
+impl fmt::Debug for UnalignedMemoryMapping<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnalignedMemoryMapping")
             .field("regions", &self.regions)
@@ -242,7 +242,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         mut regions: Vec<MemoryRegion>,
         cow_cb: Option<MemoryCowCallback>,
         config: &'a Config,
-        sbpf_version: &'a SBPFVersion,
+        sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
         regions.sort();
         for index in 1..regions.len() {
@@ -272,7 +272,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
-        sbpf_version: &'a SBPFVersion,
+        sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
         Self::new_internal(regions, None, config, sbpf_version)
     }
@@ -284,7 +284,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         regions: Vec<MemoryRegion>,
         cow_cb: MemoryCowCallback,
         config: &'a Config,
-        sbpf_version: &'a SBPFVersion,
+        sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
         Self::new_internal(regions, Some(cow_cb), config, sbpf_version)
     }
@@ -554,12 +554,12 @@ pub struct AlignedMemoryMapping<'a> {
     /// VM configuration
     config: &'a Config,
     /// Executable sbpf_version
-    sbpf_version: &'a SBPFVersion,
+    sbpf_version: SBPFVersion,
     /// CoW callback
     cow_cb: Option<MemoryCowCallback>,
 }
 
-impl<'a> fmt::Debug for AlignedMemoryMapping<'a> {
+impl fmt::Debug for AlignedMemoryMapping<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AlignedMemoryMapping")
             .field("regions", &self.regions)
@@ -581,7 +581,7 @@ impl<'a> AlignedMemoryMapping<'a> {
         mut regions: Vec<MemoryRegion>,
         cow_cb: Option<MemoryCowCallback>,
         config: &'a Config,
-        sbpf_version: &'a SBPFVersion,
+        sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
         regions.insert(0, MemoryRegion::new_readonly(&[], 0));
         regions.sort();
@@ -607,7 +607,7 @@ impl<'a> AlignedMemoryMapping<'a> {
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
-        sbpf_version: &'a SBPFVersion,
+        sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
         Self::new_internal(regions, None, config, sbpf_version)
     }
@@ -619,7 +619,7 @@ impl<'a> AlignedMemoryMapping<'a> {
         regions: Vec<MemoryRegion>,
         cow_cb: MemoryCowCallback,
         config: &'a Config,
-        sbpf_version: &'a SBPFVersion,
+        sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
         Self::new_internal(regions, Some(cow_cb), config, sbpf_version)
     }
@@ -750,7 +750,7 @@ impl<'a> MemoryMapping<'a> {
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
-        sbpf_version: &'a SBPFVersion,
+        sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
         if config.aligned_memory_mapping {
             AlignedMemoryMapping::new(regions, config, sbpf_version).map(MemoryMapping::Aligned)
@@ -767,7 +767,7 @@ impl<'a> MemoryMapping<'a> {
         regions: Vec<MemoryRegion>,
         cow_cb: MemoryCowCallback,
         config: &'a Config,
-        sbpf_version: &'a SBPFVersion,
+        sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
         if config.aligned_memory_mapping {
             AlignedMemoryMapping::new_with_cow(regions, cow_cb, config, sbpf_version)
@@ -869,7 +869,7 @@ fn ensure_writable_region(region: &MemoryRegion, cow_cb: &Option<MemoryCowCallba
 /// Helper for map to generate errors
 fn generate_access_violation(
     config: &Config,
-    sbpf_version: &SBPFVersion,
+    sbpf_version: SBPFVersion,
     access_type: AccessType,
     vm_addr: u64,
     len: u64,
@@ -888,8 +888,8 @@ fn generate_access_violation(
             stack_frame,
         ))
     } else {
-        let region_name = match vm_addr & (!ebpf::MM_PROGRAM_START.saturating_sub(1)) {
-            ebpf::MM_PROGRAM_START => "program",
+        let region_name = match vm_addr & (!ebpf::MM_RODATA_START.saturating_sub(1)) {
+            ebpf::MM_RODATA_START => "program",
             ebpf::MM_STACK_START => "stack",
             ebpf::MM_HEAP_START => "heap",
             ebpf::MM_INPUT_START => "input",
@@ -1026,13 +1026,13 @@ mod test {
     #[test]
     fn test_map_empty() {
         let config = Config::default();
-        let m = UnalignedMemoryMapping::new(vec![], &config, &SBPFVersion::V2).unwrap();
+        let m = UnalignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
         assert_error!(
             m.map(AccessType::Load, ebpf::MM_INPUT_START, 8),
             "AccessViolation"
         );
 
-        let m = AlignedMemoryMapping::new(vec![], &config, &SBPFVersion::V2).unwrap();
+        let m = AlignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
         assert_error!(
             m.map(AccessType::Load, ebpf::MM_INPUT_START, 8),
             "AccessViolation"
@@ -1049,11 +1049,11 @@ mod test {
             let mut mem1 = vec![0xff; 8];
             let m = MemoryMapping::new(
                 vec![
-                    MemoryRegion::new_readonly(&[0; 8], ebpf::MM_PROGRAM_START),
+                    MemoryRegion::new_readonly(&[0; 8], ebpf::MM_RODATA_START),
                     MemoryRegion::new_writable_gapped(&mut mem1, ebpf::MM_STACK_START, 2),
                 ],
                 &config,
-                &SBPFVersion::V2,
+                SBPFVersion::V3,
             )
             .unwrap();
             for frame in 0..4 {
@@ -1081,7 +1081,7 @@ mod test {
                     MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64 - 1),
                 ],
                 &config,
-                &SBPFVersion::V2,
+                SBPFVersion::V3,
             ),
             "InvalidMemoryRegion(1)"
         );
@@ -1091,7 +1091,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .is_ok());
     }
@@ -1117,7 +1117,7 @@ mod test {
                 ),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1191,7 +1191,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + 4),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
         assert_error!(
@@ -1247,33 +1247,33 @@ mod test {
         let mem2 = vec![0xDD; 4];
         let m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&mut mem1, ebpf::MM_PROGRAM_START),
+                MemoryRegion::new_writable(&mut mem1, ebpf::MM_RODATA_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_STACK_START),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
         assert_error!(
-            m.region(AccessType::Load, ebpf::MM_PROGRAM_START - 1),
+            m.region(AccessType::Load, ebpf::MM_RODATA_START - 1),
             "AccessViolation"
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_PROGRAM_START)
+            m.region(AccessType::Load, ebpf::MM_RODATA_START)
                 .unwrap()
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_PROGRAM_START + 3)
+            m.region(AccessType::Load, ebpf::MM_RODATA_START + 3)
                 .unwrap()
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
         );
         assert_error!(
-            m.region(AccessType::Load, ebpf::MM_PROGRAM_START + 4),
+            m.region(AccessType::Load, ebpf::MM_RODATA_START + 4),
             "AccessViolation"
         );
 
@@ -1325,7 +1325,7 @@ mod test {
                 ),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1367,7 +1367,7 @@ mod test {
                 ),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
         m.store(0x1122u16, ebpf::MM_INPUT_START).unwrap();
@@ -1394,7 +1394,7 @@ mod test {
         let m = MemoryMapping::new(
             vec![MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START)],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1428,7 +1428,7 @@ mod test {
                 MemoryRegion::new_writable(&mut mem2, ebpf::MM_INPUT_START + 7),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1456,7 +1456,7 @@ mod test {
         let m = MemoryMapping::new(
             vec![MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START)],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
         m.store(0x11u8, ebpf::MM_INPUT_START).unwrap();
@@ -1474,7 +1474,7 @@ mod test {
                 MemoryRegion::new_writable(&mut mem2, ebpf::MM_INPUT_START + 4),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
         m.store(0x1122334455667788u64, ebpf::MM_INPUT_START)
@@ -1500,7 +1500,7 @@ mod test {
         let m = MemoryMapping::new(
             vec![MemoryRegion::new_readonly(&mem1, ebpf::MM_INPUT_START)],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
         assert_eq!(m.load::<u8>(ebpf::MM_INPUT_START).unwrap(), 0xff);
@@ -1516,7 +1516,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + 4),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
         assert_eq!(
@@ -1541,7 +1541,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
         m.store(0x11223344, ebpf::MM_INPUT_START).unwrap();
@@ -1559,7 +1559,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1627,11 +1627,11 @@ mod test {
         let mem3 = [33, 33];
         let mut m = AlignedMemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, ebpf::MM_PROGRAM_START),
+                MemoryRegion::new_readonly(&mem1, ebpf::MM_RODATA_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_STACK_START),
             ],
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1682,22 +1682,22 @@ mod test {
 
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
-                vec![MemoryRegion::new_cow(&original, ebpf::MM_PROGRAM_START, 42)],
+                vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
                 Box::new(move |_| {
                     c.borrow_mut().extend_from_slice(&original);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
                 }),
                 &config,
-                &SBPFVersion::V2,
+                SBPFVersion::V3,
             )
             .unwrap();
 
             assert_eq!(
-                m.map(AccessType::Load, ebpf::MM_PROGRAM_START, 1).unwrap(),
+                m.map(AccessType::Load, ebpf::MM_RODATA_START, 1).unwrap(),
                 original.as_ptr() as u64
             );
             assert_eq!(
-                m.map(AccessType::Store, ebpf::MM_PROGRAM_START, 1).unwrap(),
+                m.map(AccessType::Store, ebpf::MM_RODATA_START, 1).unwrap(),
                 copied.borrow().as_ptr() as u64
             );
         }
@@ -1715,29 +1715,29 @@ mod test {
 
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
-                vec![MemoryRegion::new_cow(&original, ebpf::MM_PROGRAM_START, 42)],
+                vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
                 Box::new(move |_| {
                     c.borrow_mut().extend_from_slice(&original);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
                 }),
                 &config,
-                &SBPFVersion::V2,
+                SBPFVersion::V3,
             )
             .unwrap();
 
             assert_eq!(
-                m.map(AccessType::Load, ebpf::MM_PROGRAM_START, 1).unwrap(),
+                m.map(AccessType::Load, ebpf::MM_RODATA_START, 1).unwrap(),
                 original.as_ptr() as u64
             );
 
-            assert_eq!(m.load::<u8>(ebpf::MM_PROGRAM_START).unwrap(), 11);
-            assert_eq!(m.load::<u8>(ebpf::MM_PROGRAM_START + 1).unwrap(), 22);
+            assert_eq!(m.load::<u8>(ebpf::MM_RODATA_START).unwrap(), 11);
+            assert_eq!(m.load::<u8>(ebpf::MM_RODATA_START + 1).unwrap(), 22);
             assert!(copied.borrow().is_empty());
 
-            m.store(33u8, ebpf::MM_PROGRAM_START).unwrap();
+            m.store(33u8, ebpf::MM_RODATA_START).unwrap();
             assert_eq!(original[0], 11);
-            assert_eq!(m.load::<u8>(ebpf::MM_PROGRAM_START).unwrap(), 33);
-            assert_eq!(m.load::<u8>(ebpf::MM_PROGRAM_START + 1).unwrap(), 22);
+            assert_eq!(m.load::<u8>(ebpf::MM_RODATA_START).unwrap(), 33);
+            assert_eq!(m.load::<u8>(ebpf::MM_RODATA_START + 1).unwrap(), 22);
         }
     }
 
@@ -1755,8 +1755,8 @@ mod test {
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
                 vec![
-                    MemoryRegion::new_cow(&original1, ebpf::MM_PROGRAM_START, 42),
-                    MemoryRegion::new_cow(&original2, ebpf::MM_PROGRAM_START + 0x100000000, 24),
+                    MemoryRegion::new_cow(&original1, ebpf::MM_RODATA_START, 42),
+                    MemoryRegion::new_cow(&original2, ebpf::MM_RODATA_START + 0x100000000, 24),
                 ],
                 Box::new(move |id| {
                     // check that the argument passed to MemoryRegion::new_cow is then passed to the
@@ -1766,13 +1766,13 @@ mod test {
                     Ok(c.borrow().as_slice().as_ptr() as u64)
                 }),
                 &config,
-                &SBPFVersion::V2,
+                SBPFVersion::V3,
             )
             .unwrap();
 
-            m.store(55u8, ebpf::MM_PROGRAM_START).unwrap();
+            m.store(55u8, ebpf::MM_RODATA_START).unwrap();
             assert_eq!(original1[0], 11);
-            assert_eq!(m.load::<u8>(ebpf::MM_PROGRAM_START).unwrap(), 55);
+            assert_eq!(m.load::<u8>(ebpf::MM_RODATA_START).unwrap(), 55);
         }
     }
 
@@ -1783,14 +1783,14 @@ mod test {
         let original = [11, 22];
 
         let m = MemoryMapping::new_with_cow(
-            vec![MemoryRegion::new_cow(&original, ebpf::MM_PROGRAM_START, 42)],
+            vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
             Box::new(|_| Err(())),
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
-        m.map(AccessType::Store, ebpf::MM_PROGRAM_START, 1).unwrap();
+        m.map(AccessType::Store, ebpf::MM_RODATA_START, 1).unwrap();
     }
 
     #[test]
@@ -1800,13 +1800,13 @@ mod test {
         let original = [11, 22];
 
         let m = MemoryMapping::new_with_cow(
-            vec![MemoryRegion::new_cow(&original, ebpf::MM_PROGRAM_START, 42)],
+            vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
             Box::new(|_| Err(())),
             &config,
-            &SBPFVersion::V2,
+            SBPFVersion::V3,
         )
         .unwrap();
 
-        m.store(33u8, ebpf::MM_PROGRAM_START).unwrap();
+        m.store(33u8, ebpf::MM_RODATA_START).unwrap();
     }
 }

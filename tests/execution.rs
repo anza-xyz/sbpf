@@ -1,5 +1,7 @@
+#![allow(clippy::literal_string_with_formatting_args)]
 #![allow(clippy::arithmetic_side_effects)]
 #![cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+
 // Copyright 2020 Solana Maintainers <maintainers@solana.com>
 //
 // Licensed under the Apache License, Version 2.0 <http://www.apache.org/licenses/LICENSE-2.0> or
@@ -8,219 +10,114 @@
 
 extern crate byteorder;
 extern crate libc;
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test_utils;
 extern crate thiserror;
 
 use byteorder::{ByteOrder, LittleEndian};
 #[cfg(all(not(windows), target_arch = "x86_64"))]
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
-use solana_rbpf::{
+use solana_sbpf::{
     assembler::assemble,
     declare_builtin_function, ebpf,
     elf::Executable,
     error::{EbpfError, ProgramResult},
     memory_region::{AccessType, MemoryMapping, MemoryRegion},
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
-    syscalls,
     verifier::RequisiteVerifier,
-    vm::{Config, ContextObject, TestContextObject},
+    vm::{Config, ContextObject},
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test_utils::{
-    assert_error, create_vm, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
+    assert_error, create_vm, syscalls, test_interpreter_and_jit, test_interpreter_and_jit_asm,
+    test_interpreter_and_jit_elf, test_syscall_asm, TestContextObject, PROG_TCP_PORT_80,
+    TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
 };
 
-const INSTRUCTION_METER_BUDGET: u64 = 1024;
-
-macro_rules! test_interpreter_and_jit {
-    (register, $function_registry:expr, $location:expr => $syscall_function:expr) => {
-        $function_registry
-            .register_function_hashed($location.as_bytes(), $syscall_function)
-            .unwrap();
-    };
-    ($executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
-        let expected_instruction_count = $context_object.get_remaining();
-        #[allow(unused_mut)]
-        let mut context_object = $context_object;
-        let expected_result = format!("{:?}", $expected_result);
-        if !expected_result.contains("ExceededMaxInstructions") {
-            context_object.remaining = INSTRUCTION_METER_BUDGET;
-        }
-        $executable.verify::<RequisiteVerifier>().unwrap();
-        let (instruction_count_interpreter, interpreter_final_pc, _tracer_interpreter) = {
-            let mut mem = $mem;
-            let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
-            let mut context_object = context_object.clone();
-            create_vm!(
-                vm,
-                &$executable,
-                &mut context_object,
-                stack,
-                heap,
-                vec![mem_region],
-                None
-            );
-            let (instruction_count_interpreter, result) = vm.execute_program(&$executable, true);
-            assert_eq!(
-                format!("{:?}", result),
-                expected_result,
-                "Unexpected result for Interpreter"
-            );
-            (
-                instruction_count_interpreter,
-                vm.registers[11],
-                vm.context_object_pointer.clone(),
-            )
-        };
-        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-        {
-            #[allow(unused_mut)]
-            let compilation_result = $executable.jit_compile();
-            let mut mem = $mem;
-            let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
-            create_vm!(
-                vm,
-                &$executable,
-                &mut context_object,
-                stack,
-                heap,
-                vec![mem_region],
-                None
-            );
-            match compilation_result {
-                Err(err) => assert_eq!(
-                    format!("{:?}", err),
-                    expected_result,
-                    "Unexpected result for JIT compilation"
-                ),
-                Ok(()) => {
-                    let (instruction_count_jit, result) = vm.execute_program(&$executable, false);
-                    let tracer_jit = &vm.context_object_pointer;
-                    if !TestContextObject::compare_trace_log(&_tracer_interpreter, tracer_jit) {
-                        let analysis = Analysis::from_executable(&$executable).unwrap();
-                        let stdout = std::io::stdout();
-                        analysis
-                            .disassemble_trace_log(
-                                &mut stdout.lock(),
-                                &_tracer_interpreter.trace_log,
-                            )
-                            .unwrap();
-                        analysis
-                            .disassemble_trace_log(&mut stdout.lock(), &tracer_jit.trace_log)
-                            .unwrap();
-                        panic!();
-                    }
-                    assert_eq!(
-                        format!("{:?}", result),
-                        expected_result,
-                        "Unexpected result for JIT"
-                    );
-                    assert_eq!(
-                        instruction_count_interpreter, instruction_count_jit,
-                        "Interpreter and JIT instruction meter diverged",
-                    );
-                    assert_eq!(
-                        interpreter_final_pc, vm.registers[11],
-                        "Interpreter and JIT instruction final PC diverged",
-                    );
-                }
-            }
-        }
-        if $executable.get_config().enable_instruction_meter {
-            assert_eq!(
-                instruction_count_interpreter, expected_instruction_count,
-                "Instruction meter did not consume expected amount"
-            );
-        }
-    };
-}
-
-macro_rules! test_interpreter_and_jit_asm {
-    ($source:tt, $config:expr, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        #[allow(unused_mut)]
-        {
-            let mut config = $config;
-            config.enable_instruction_tracing = true;
-            let mut function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-            $(test_interpreter_and_jit!(register, function_registry, $location => $syscall_function);)*
-            let loader = Arc::new(BuiltinProgram::new_loader(config, function_registry));
-            let mut executable = assemble($source, loader).unwrap();
-            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
-        }
-    };
-    ($source:tt, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        #[allow(unused_mut)]
-        {
-            test_interpreter_and_jit_asm!($source, Config::default(), $mem, ($($location => $syscall_function),*), $context_object, $expected_result);
-        }
-    };
-}
-
-macro_rules! test_interpreter_and_jit_elf {
-    ($source:tt, $config:tt, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        let mut file = File::open($source).unwrap();
-        let mut elf = Vec::new();
-        file.read_to_end(&mut elf).unwrap();
-        #[allow(unused_mut)]
-        {
-            let mut function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-            $(test_interpreter_and_jit!(register, function_registry, $location => $syscall_function);)*
-            let loader = Arc::new(BuiltinProgram::new_loader($config, function_registry));
-            let mut executable = Executable::<TestContextObject>::from_elf(&elf, loader).unwrap();
-            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
-        }
-    };
-    ($source:tt, $mem:tt, ($($location:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        let config = Config {
-            enable_instruction_tracing: true,
-            ..Config::default()
-        };
-        test_interpreter_and_jit_elf!($source, config, $mem, ($($location => $syscall_function),*), $context_object, $expected_result);
-    };
-}
-
-// BPF_ALU : Arithmetic and Logic
+// BPF_ALU32_LOAD : Arithmetic and Logic
 
 #[test]
-fn test_mov() {
+fn test_mov32_imm() {
     test_interpreter_and_jit_asm!(
         "
-        mov32 r1, 1
-        mov32 r0, r1
+        mov32 r0, 1
         exit",
         [],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(0x1),
+        TestContextObject::new(2),
+        ProgramResult::Ok(1),
     );
-}
-
-#[test]
-fn test_mov32_imm_large() {
     test_interpreter_and_jit_asm!(
         "
         mov32 r0, -1
         exit",
         [],
-        (),
         TestContextObject::new(2),
         ProgramResult::Ok(0xffffffff),
     );
 }
 
 #[test]
-fn test_mov_large() {
+fn test_mov32_reg() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov32 r1, 1
+        mov32 r0, r1
+        exit",
+        [],
+        TestContextObject::new(3),
+        ProgramResult::Ok(0x1),
+    );
     test_interpreter_and_jit_asm!(
         "
         mov32 r1, -1
         mov32 r0, r1
         exit",
         [],
-        (),
         TestContextObject::new(3),
-        ProgramResult::Ok(0xffffffff),
+        ProgramResult::Ok(0xffffffffffffffff),
+    );
+}
+
+#[test]
+fn test_mov64_imm() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 1
+        exit",
+        [],
+        TestContextObject::new(2),
+        ProgramResult::Ok(1),
+    );
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, -1
+        exit",
+        [],
+        TestContextObject::new(2),
+        ProgramResult::Ok(0xffffffffffffffff),
+    );
+}
+
+#[test]
+fn test_mov64_reg() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r1, 1
+        mov64 r0, r1
+        exit",
+        [],
+        TestContextObject::new(3),
+        ProgramResult::Ok(0x1),
+    );
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r1, -1
+        mov64 r0, r1
+        exit",
+        [],
+        TestContextObject::new(3),
+        ProgramResult::Ok(0xffffffffffffffff),
     );
 }
 
@@ -236,7 +133,6 @@ fn test_bounce() {
         mov r0, r9
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -252,7 +148,6 @@ fn test_add32() {
         add32 r0, r1
         exit",
         [],
-        (),
         TestContextObject::new(5),
         ProgramResult::Ok(0x3),
     );
@@ -282,7 +177,6 @@ fn test_alu32_arithmetic() {
         udiv32 r0, r4
         exit",
         [],
-        (),
         TestContextObject::new(19),
         ProgramResult::Ok(110),
     );
@@ -312,7 +206,6 @@ fn test_alu64_arithmetic() {
         udiv r0, r4
         exit",
         [],
-        (),
         TestContextObject::new(19),
         ProgramResult::Ok(110),
     );
@@ -365,7 +258,6 @@ fn test_lmul128() {
         stxdw [r1+0x0], r0
         exit",
         [0; 16],
-        (),
         TestContextObject::new(42),
         ProgramResult::Ok(600),
     );
@@ -397,7 +289,6 @@ fn test_alu32_logic() {
         xor32 r0, r2
         exit",
         [],
-        (),
         TestContextObject::new(21),
         ProgramResult::Ok(0x11),
     );
@@ -431,7 +322,6 @@ fn test_alu64_logic() {
         xor r0, r2
         exit",
         [],
-        (),
         TestContextObject::new(23),
         ProgramResult::Ok(0x11),
     );
@@ -447,7 +337,6 @@ fn test_arsh32_high_shift() {
         arsh32 r0, r1
         exit",
         [],
-        (),
         TestContextObject::new(5),
         ProgramResult::Ok(0x4),
     );
@@ -462,7 +351,6 @@ fn test_arsh32_imm() {
         arsh32 r0, 16
         exit",
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0xffff8000),
     );
@@ -478,7 +366,6 @@ fn test_arsh32_reg() {
         arsh32 r0, r1
         exit",
         [],
-        (),
         TestContextObject::new(5),
         ProgramResult::Ok(0xffff8000),
     );
@@ -495,7 +382,6 @@ fn test_arsh64() {
         arsh r0, r1
         exit",
         [],
-        (),
         TestContextObject::new(6),
         ProgramResult::Ok(0xfffffffffffffff8),
     );
@@ -510,7 +396,6 @@ fn test_lsh64_reg() {
         lsh r0, r7
         exit",
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0x10),
     );
@@ -525,7 +410,6 @@ fn test_rhs32_imm() {
         rsh32 r0, 8
         exit",
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0x00ffffff),
     );
@@ -540,7 +424,6 @@ fn test_rsh64_reg() {
         rsh r0, r7
         exit",
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0x1),
     );
@@ -554,7 +437,6 @@ fn test_be16() {
         be16 r0
         exit",
         [0x11, 0x22],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x1122),
     );
@@ -568,7 +450,6 @@ fn test_be16_high() {
         be16 r0
         exit",
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x1122),
     );
@@ -582,7 +463,6 @@ fn test_be32() {
         be32 r0
         exit",
         [0x11, 0x22, 0x33, 0x44],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x11223344),
     );
@@ -596,7 +476,6 @@ fn test_be32_high() {
         be32 r0
         exit",
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x11223344),
     );
@@ -610,7 +489,6 @@ fn test_be64() {
         be64 r0
         exit",
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x1122334455667788),
     );
@@ -621,14 +499,14 @@ fn test_be64() {
 #[test]
 fn test_pqr() {
     let mut prog = [0; 48];
-    prog[0] = ebpf::MOV64_IMM;
+    prog[0] = ebpf::MOV32_IMM;
     prog[8] = ebpf::HOR64_IMM;
-    prog[16] = ebpf::MOV64_IMM;
+    prog[16] = ebpf::MOV32_IMM;
     prog[17] = 1; // dst = R1
     prog[24] = ebpf::HOR64_IMM;
     prog[25] = 1; // dst = R1
     prog[33] = 16; // src = R1
-    prog[40] = ebpf::EXIT;
+    prog[40] = ebpf::RETURN;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for (opc, dst, src, expected_result) in [
         (ebpf::UHMUL64_IMM, 13u64, 4u64, 0u64),
@@ -636,48 +514,118 @@ fn test_pqr() {
         (ebpf::UDIV64_IMM, 13u64, 4u64, 3u64),
         (ebpf::UREM32_IMM, 13u64, 4u64, 1u64),
         (ebpf::UREM64_IMM, 13u64, 4u64, 1u64),
-        (ebpf::UHMUL64_IMM, 13u64, u64::MAX, 12u64),
-        (ebpf::UDIV32_IMM, 13u64, u64::MAX, 0u64),
-        (ebpf::UDIV64_IMM, 13u64, u64::MAX, 0u64),
-        (ebpf::UREM32_IMM, 13u64, u64::MAX, 13u64),
-        (ebpf::UREM64_IMM, 13u64, u64::MAX, 13u64),
+        (ebpf::UHMUL64_IMM, 13u64, u32::MAX as u64, 0u64),
+        (ebpf::UDIV32_IMM, 13u64, u32::MAX as u64, 0u64),
+        (ebpf::UDIV64_IMM, 13u64, u32::MAX as u64, 0u64),
+        (ebpf::UREM32_IMM, 13u64, u32::MAX as u64, 13u64),
+        (ebpf::UREM64_IMM, 13u64, u32::MAX as u64, 13u64),
         (ebpf::UHMUL64_IMM, u64::MAX, 4u64, 3u64),
         (ebpf::UDIV32_IMM, u64::MAX, 4u64, (u32::MAX / 4) as u64),
         (ebpf::UDIV64_IMM, u64::MAX, 4u64, u64::MAX / 4),
         (ebpf::UREM32_IMM, u64::MAX, 4u64, 3u64),
         (ebpf::UREM64_IMM, u64::MAX, 4u64, 3u64),
-        (ebpf::UHMUL64_IMM, u64::MAX, u64::MAX, u64::MAX - 1),
-        (ebpf::UDIV32_IMM, u64::MAX, u64::MAX, 1u64),
-        (ebpf::UDIV64_IMM, u64::MAX, u64::MAX, 1u64),
-        (ebpf::UREM32_IMM, u64::MAX, u64::MAX, 0u64),
-        (ebpf::UREM64_IMM, u64::MAX, u64::MAX, 0u64),
-        (ebpf::LMUL32_IMM, 13i64 as u64, 4i32 as u64, 52i32 as u64),
+        (
+            ebpf::UHMUL64_IMM,
+            u64::MAX,
+            u32::MAX as u64,
+            u32::MAX as u64 - 1,
+        ),
+        (ebpf::UDIV32_IMM, u64::MAX, u32::MAX as u64, 1u64),
+        (
+            ebpf::UDIV64_IMM,
+            u64::MAX,
+            u32::MAX as u64,
+            u32::MAX as u64 + 2,
+        ),
+        (ebpf::UREM32_IMM, u64::MAX, u32::MAX as u64, 0u64),
+        (ebpf::UREM64_IMM, u64::MAX, u32::MAX as u64, 0u64),
+        (
+            ebpf::LMUL32_IMM,
+            13i64 as u64,
+            4i32 as u32 as u64,
+            52i32 as u32 as u64,
+        ),
         (ebpf::LMUL64_IMM, 13i64 as u64, 4i64 as u64, 52i64 as u64),
         (ebpf::SHMUL64_IMM, 13i64 as u64, 4i64 as u64, 0i64 as u64),
-        (ebpf::SDIV32_IMM, 13i64 as u64, 4i32 as u64, 3i32 as u64),
+        (
+            ebpf::SDIV32_IMM,
+            13i64 as u64,
+            4i32 as u32 as u64,
+            3i32 as u32 as u64,
+        ),
         (ebpf::SDIV64_IMM, 13i64 as u64, 4i64 as u64, 3i64 as u64),
-        (ebpf::SREM32_IMM, 13i64 as u64, 4i32 as u64, 1i64 as u64),
+        (
+            ebpf::SREM32_IMM,
+            13i64 as u64,
+            4i32 as u32 as u64,
+            1i64 as u64,
+        ),
         (ebpf::SREM64_IMM, 13i64 as u64, 4i64 as u64, 1i64 as u64),
-        (ebpf::LMUL32_IMM, 13i64 as u64, -4i32 as u64, -52i32 as u64),
+        (
+            ebpf::LMUL32_IMM,
+            13i64 as u64,
+            -4i32 as u32 as u64,
+            -52i32 as u32 as u64,
+        ),
         (ebpf::LMUL64_IMM, 13i64 as u64, -4i64 as u64, -52i64 as u64),
         (ebpf::SHMUL64_IMM, 13i64 as u64, -4i64 as u64, -1i64 as u64),
-        (ebpf::SDIV32_IMM, 13i64 as u64, -4i32 as u64, -3i32 as u64),
+        (
+            ebpf::SDIV32_IMM,
+            13i64 as u64,
+            -4i32 as u32 as u64,
+            -3i32 as u32 as u64,
+        ),
         (ebpf::SDIV64_IMM, 13i64 as u64, -4i64 as u64, -3i64 as u64),
-        (ebpf::SREM32_IMM, 13i64 as u64, -4i32 as u64, 1i64 as u64),
+        (
+            ebpf::SREM32_IMM,
+            13i64 as u64,
+            -4i32 as u32 as u64,
+            1i64 as u64,
+        ),
         (ebpf::SREM64_IMM, 13i64 as u64, -4i64 as u64, 1i64 as u64),
-        (ebpf::LMUL32_IMM, -13i64 as u64, 4i32 as u64, -52i32 as u64),
+        (
+            ebpf::LMUL32_IMM,
+            -13i64 as u64,
+            4i32 as u32 as u64,
+            -52i32 as u32 as u64,
+        ),
         (ebpf::LMUL64_IMM, -13i64 as u64, 4i64 as u64, -52i64 as u64),
         (ebpf::SHMUL64_IMM, -13i64 as u64, 4i64 as u64, -1i64 as u64),
-        (ebpf::SDIV32_IMM, -13i64 as u64, 4i32 as u64, -3i32 as u64),
+        (
+            ebpf::SDIV32_IMM,
+            -13i64 as u64,
+            4i32 as u32 as u64,
+            -3i32 as u32 as u64,
+        ),
         (ebpf::SDIV64_IMM, -13i64 as u64, 4i64 as u64, -3i64 as u64),
-        (ebpf::SREM32_IMM, -13i64 as u64, 4i32 as u64, -1i64 as u64),
+        (
+            ebpf::SREM32_IMM,
+            -13i64 as u64,
+            4i32 as u32 as u64,
+            -1i32 as u32 as u64,
+        ),
         (ebpf::SREM64_IMM, -13i64 as u64, 4i64 as u64, -1i64 as u64),
-        (ebpf::LMUL32_IMM, -13i64 as u64, -4i32 as u64, 52i32 as u64),
+        (
+            ebpf::LMUL32_IMM,
+            -13i64 as u64,
+            -4i32 as u32 as u64,
+            52i32 as u32 as u64,
+        ),
         (ebpf::LMUL64_IMM, -13i64 as u64, -4i64 as u64, 52i64 as u64),
         (ebpf::SHMUL64_IMM, -13i64 as u64, -4i64 as u64, 0i64 as u64),
-        (ebpf::SDIV32_IMM, -13i64 as u64, -4i32 as u64, 3i32 as u64),
+        (
+            ebpf::SDIV32_IMM,
+            -13i64 as u64,
+            -4i32 as u32 as u64,
+            3i32 as u32 as u64,
+        ),
         (ebpf::SDIV64_IMM, -13i64 as u64, -4i64 as u64, 3i64 as u64),
-        (ebpf::SREM32_IMM, -13i64 as u64, -4i32 as u64, -1i64 as u64),
+        (
+            ebpf::SREM32_IMM,
+            -13i64 as u64,
+            -4i32 as u32 as u64,
+            -1i32 as u32 as u64,
+        ),
         (ebpf::SREM64_IMM, -13i64 as u64, -4i64 as u64, -1i64 as u64),
     ] {
         LittleEndian::write_u32(&mut prog[4..], dst as u32);
@@ -690,7 +638,7 @@ fn test_pqr() {
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
             loader.clone(),
-            SBPFVersion::V2,
+            SBPFVersion::V3,
             FunctionRegistry::default(),
         )
         .unwrap();
@@ -705,7 +653,7 @@ fn test_pqr() {
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
             loader.clone(),
-            SBPFVersion::V2,
+            SBPFVersion::V3,
             FunctionRegistry::default(),
         )
         .unwrap();
@@ -722,7 +670,7 @@ fn test_pqr() {
 fn test_err_divide_by_zero() {
     let mut prog = [0; 24];
     prog[0] = ebpf::MOV32_IMM;
-    prog[16] = ebpf::EXIT;
+    prog[16] = ebpf::RETURN;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for opc in [
         ebpf::UDIV32_REG,
@@ -739,7 +687,7 @@ fn test_err_divide_by_zero() {
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
             loader.clone(),
-            SBPFVersion::V2,
+            SBPFVersion::V3,
             FunctionRegistry::default(),
         )
         .unwrap();
@@ -763,7 +711,7 @@ fn test_err_divide_overflow() {
     LittleEndian::write_i32(&mut prog[20..], -1);
     prog[25] = 16; // src = R1
     LittleEndian::write_i32(&mut prog[28..], -1);
-    prog[32] = ebpf::EXIT;
+    prog[32] = ebpf::RETURN;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for opc in [
         ebpf::SDIV32_IMM,
@@ -781,7 +729,7 @@ fn test_err_divide_overflow() {
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
             loader.clone(),
-            SBPFVersion::V2,
+            SBPFVersion::V3,
             FunctionRegistry::default(),
         )
         .unwrap();
@@ -794,7 +742,182 @@ fn test_err_divide_overflow() {
     }
 }
 
-// BPF_LD : Loads
+// Loads and stores
+
+#[test]
+fn test_memory_instructions() {
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+
+        test_interpreter_and_jit_asm!(
+            "
+            ldxb r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0xcc, 0xdd],
+            TestContextObject::new(2),
+            ProgramResult::Ok(0x11),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            ldxh r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0xcc, 0xdd],
+            TestContextObject::new(2),
+            ProgramResult::Ok(0x2211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            ldxw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0xcc, 0xdd],
+            TestContextObject::new(2),
+            ProgramResult::Ok(0x44332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(2),
+            ProgramResult::Ok(0x8877665544332211),
+        );
+
+        test_interpreter_and_jit_asm!(
+            "
+            stb [r1+2], 0x11
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0xff, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x8877665544332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            stb [r1+2], -1
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x88776655443322FF),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            sth [r1+2], 0x2211
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0xff, 0xff, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x8877665544332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            sth [r1+2], -1
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x887766554433FFFF),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            stw [r1+2], 0x44332211
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x8877665544332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            stw [r1+2], -1
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x88776655FFFFFFFF),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            stdw [r1+2], 0x44332211
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0x44332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            stdw [r1+2], -1
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0xcc, 0xdd],
+            TestContextObject::new(3),
+            ProgramResult::Ok(0xFFFFFFFFFFFFFFFF),
+        );
+
+        test_interpreter_and_jit_asm!(
+            "
+            mov32 r2, 0x11
+            stxb [r1+2], r2
+            ldxb r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0xff, 0xcc, 0xdd],
+            TestContextObject::new(4),
+            ProgramResult::Ok(0x11),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            mov32 r2, 0x2211
+            stxh [r1+2], r2
+            ldxh r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd],
+            TestContextObject::new(4),
+            ProgramResult::Ok(0x2211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            mov32 r2, 0x44332211
+            stxw [r1+2], r2
+            ldxw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd],
+            TestContextObject::new(4),
+            ProgramResult::Ok(0x44332211),
+        );
+        test_interpreter_and_jit_asm!(
+            "
+            mov r2, -2005440939
+            lsh r2, 32
+            or r2, 0x44332211
+            stxdw [r1+2], r2
+            ldxdw r0, [r1+2]
+            exit",
+            config.clone(),
+            [0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd],
+            TestContextObject::new(6),
+            ProgramResult::Ok(0x8877665544332211),
+        );
+    }
+}
 
 #[test]
 fn test_hor64() {
@@ -804,50 +927,8 @@ fn test_hor64() {
         hor64 r0, 0x01020304
         exit",
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x1122334400000000),
-    );
-}
-
-#[test]
-fn test_ldxb() {
-    test_interpreter_and_jit_asm!(
-        "
-        ldxb r0, [r1+2]
-        exit",
-        [0xaa, 0xbb, 0x11, 0xcc, 0xdd],
-        (),
-        TestContextObject::new(2),
-        ProgramResult::Ok(0x11),
-    );
-}
-
-#[test]
-fn test_ldxh() {
-    test_interpreter_and_jit_asm!(
-        "
-        ldxh r0, [r1+2]
-        exit",
-        [0xaa, 0xbb, 0x11, 0x22, 0xcc, 0xdd],
-        (),
-        TestContextObject::new(2),
-        ProgramResult::Ok(0x2211),
-    );
-}
-
-#[test]
-fn test_ldxw() {
-    test_interpreter_and_jit_asm!(
-        "
-        ldxw r0, [r1+2]
-        exit",
-        [
-            0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0xcc, 0xdd, //
-        ],
-        (),
-        TestContextObject::new(2),
-        ProgramResult::Ok(0x44332211),
     );
 }
 
@@ -860,25 +941,8 @@ fn test_ldxh_same_reg() {
         ldxh r0, [r0]
         exit",
         [0xff, 0xff],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0x1234),
-    );
-}
-
-#[test]
-fn test_lldxdw() {
-    test_interpreter_and_jit_asm!(
-        "
-        ldxdw r0, [r1+2]
-        exit",
-        [
-            0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, //
-            0x77, 0x88, 0xcc, 0xdd, //
-        ],
-        (),
-        TestContextObject::new(2),
-        ProgramResult::Ok(0x8877665544332211),
     );
 }
 
@@ -892,7 +956,6 @@ fn test_err_ldxdw_oob() {
             0xaa, 0xbb, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, //
             0x77, 0x88, 0xcc, 0xdd, //
         ],
-        (),
         TestContextObject::new(1),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Load,
@@ -910,7 +973,6 @@ fn test_err_ldxdw_nomem() {
         ldxdw r0, [r1+6]
         exit",
         [],
-        (),
         TestContextObject::new(1),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Load,
@@ -960,7 +1022,6 @@ fn test_ldxb_all() {
             0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, //
             0x08, 0x09, //
         ],
-        (),
         TestContextObject::new(31),
         ProgramResult::Ok(0x9876543210),
     );
@@ -1016,7 +1077,6 @@ fn test_ldxh_all() {
             0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, //
             0x00, 0x08, 0x00, 0x09, //
         ],
-        (),
         TestContextObject::new(41),
         ProgramResult::Ok(0x9876543210),
     );
@@ -1062,7 +1122,6 @@ fn test_ldxh_all2() {
             0x00, 0x10, 0x00, 0x20, 0x00, 0x40, 0x00, 0x80, //
             0x01, 0x00, 0x02, 0x00, //
         ],
-        (),
         TestContextObject::new(31),
         ProgramResult::Ok(0x3ff),
     );
@@ -1110,143 +1169,8 @@ fn test_ldxw_all() {
             0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x08, 0x00, //
             0x00, 0x01, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, //
         ],
-        (),
         TestContextObject::new(31),
         ProgramResult::Ok(0x030f0f),
-    );
-}
-
-#[test]
-fn test_stb() {
-    test_interpreter_and_jit_asm!(
-        "
-        stb [r1+2], 0x11
-        ldxb r0, [r1+2]
-        exit",
-        [0xaa, 0xbb, 0xff, 0xcc, 0xdd],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(0x11),
-    );
-}
-
-#[test]
-fn test_sth() {
-    test_interpreter_and_jit_asm!(
-        "
-        sth [r1+2], 0x2211
-        ldxh r0, [r1+2]
-        exit",
-        [
-            0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd, //
-        ],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(0x2211),
-    );
-}
-
-#[test]
-fn test_stw() {
-    test_interpreter_and_jit_asm!(
-        "
-        stw [r1+2], 0x44332211
-        ldxw r0, [r1+2]
-        exit",
-        [
-            0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd, //
-        ],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(0x44332211),
-    );
-}
-
-#[test]
-fn test_stdw() {
-    test_interpreter_and_jit_asm!(
-        "
-        stdw [r1+2], 0x44332211
-        ldxdw r0, [r1+2]
-        exit",
-        [
-            0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, //
-            0xff, 0xff, 0xcc, 0xdd, //
-        ],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(0x44332211),
-    );
-}
-
-#[test]
-fn test_stxb() {
-    test_interpreter_and_jit_asm!(
-        "
-        mov32 r2, 0x11
-        stxb [r1+2], r2
-        ldxb r0, [r1+2]
-        exit",
-        [
-            0xaa, 0xbb, 0xff, 0xcc, 0xdd, //
-        ],
-        (),
-        TestContextObject::new(4),
-        ProgramResult::Ok(0x11),
-    );
-}
-
-#[test]
-fn test_stxh() {
-    test_interpreter_and_jit_asm!(
-        "
-        mov32 r2, 0x2211
-        stxh [r1+2], r2
-        ldxh r0, [r1+2]
-        exit",
-        [
-            0xaa, 0xbb, 0xff, 0xff, 0xcc, 0xdd, //
-        ],
-        (),
-        TestContextObject::new(4),
-        ProgramResult::Ok(0x2211),
-    );
-}
-
-#[test]
-fn test_stxw() {
-    test_interpreter_and_jit_asm!(
-        "
-        mov32 r2, 0x44332211
-        stxw [r1+2], r2
-        ldxw r0, [r1+2]
-        exit",
-        [
-            0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xcc, 0xdd, //
-        ],
-        (),
-        TestContextObject::new(4),
-        ProgramResult::Ok(0x44332211),
-    );
-}
-
-#[test]
-fn test_stxdw() {
-    test_interpreter_and_jit_asm!(
-        "
-        mov r2, -2005440939
-        lsh r2, 32
-        or r2, 0x44332211
-        stxdw [r1+2], r2
-        ldxdw r0, [r1+2]
-        exit",
-        [
-            0xaa, 0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, //
-            0xff, 0xff, 0xcc, 0xdd, //
-        ],
-        (),
-        TestContextObject::new(6),
-        ProgramResult::Ok(0x8877665544332211),
     );
 }
 
@@ -1276,7 +1200,6 @@ fn test_stxb_all() {
         [
             0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, //
         ],
-        (),
         TestContextObject::new(19),
         ProgramResult::Ok(0xf0f2f3f4f5f6f7f8),
     );
@@ -1295,7 +1218,6 @@ fn test_stxb_all2() {
         be16 r0
         exit",
         [0xff, 0xff],
-        (),
         TestContextObject::new(8),
         ProgramResult::Ok(0xf1f9),
     );
@@ -1330,7 +1252,6 @@ fn test_stxb_chain() {
             0x2a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
             0x00, 0x00, //
         ],
-        (),
         TestContextObject::new(21),
         ProgramResult::Ok(0x2a),
     );
@@ -1340,54 +1261,82 @@ fn test_stxb_chain() {
 
 #[test]
 fn test_exit_capped() {
-    test_interpreter_and_jit_asm!(
-        "
-        exit",
-        [],
-        (),
-        TestContextObject::new(0),
-        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
-    );
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+
+        test_interpreter_and_jit_asm!(
+            "
+            exit",
+            config,
+            [],
+            TestContextObject::new(0),
+            ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+        );
+    }
 }
 
 #[test]
 fn test_exit_without_value() {
-    test_interpreter_and_jit_asm!(
-        "
-        exit",
-        [],
-        (),
-        TestContextObject::new(1),
-        ProgramResult::Ok(0x0),
-    );
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+
+        test_interpreter_and_jit_asm!(
+            "
+            exit",
+            config,
+            [],
+            TestContextObject::new(1),
+            ProgramResult::Ok(0x0),
+        );
+    }
 }
 
 #[test]
 fn test_exit() {
-    test_interpreter_and_jit_asm!(
-        "
-        mov r0, 0
-        exit",
-        [],
-        (),
-        TestContextObject::new(2),
-        ProgramResult::Ok(0x0),
-    );
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+
+        test_interpreter_and_jit_asm!(
+            "
+            mov r0, 0
+            exit",
+            config,
+            [],
+            TestContextObject::new(2),
+            ProgramResult::Ok(0x0),
+        );
+    }
 }
 
 #[test]
 fn test_early_exit() {
-    test_interpreter_and_jit_asm!(
-        "
-        mov r0, 3
-        exit
-        mov r0, 4
-        exit",
-        [],
-        (),
-        TestContextObject::new(2),
-        ProgramResult::Ok(0x3),
-    );
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+
+        test_interpreter_and_jit_asm!(
+            "
+            mov r0, 3
+            exit
+            mov r0, 4
+            exit",
+            config,
+            [],
+            TestContextObject::new(2),
+            ProgramResult::Ok(0x3),
+        );
+    }
 }
 
 #[test]
@@ -1399,7 +1348,6 @@ fn test_ja() {
         mov r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x1),
     );
@@ -1418,7 +1366,6 @@ fn test_jeq_imm() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1438,7 +1385,6 @@ fn test_jeq_reg() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(8),
         ProgramResult::Ok(0x1),
     );
@@ -1457,7 +1403,6 @@ fn test_jge_imm() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1477,7 +1422,6 @@ fn test_jge_reg() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(8),
         ProgramResult::Ok(0x1),
     );
@@ -1497,7 +1441,6 @@ fn test_jle_imm() {
         mov32 r0, 1
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1519,7 +1462,6 @@ fn test_jle_reg() {
         mov r0, 1
         exit",
         [],
-        (),
         TestContextObject::new(9),
         ProgramResult::Ok(0x1),
     );
@@ -1538,7 +1480,6 @@ fn test_jgt_imm() {
         mov32 r0, 1
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1559,7 +1500,6 @@ fn test_jgt_reg() {
         mov r0, 1
         exit",
         [],
-        (),
         TestContextObject::new(9),
         ProgramResult::Ok(0x1),
     );
@@ -1578,7 +1518,6 @@ fn test_jlt_imm() {
         mov32 r0, 1
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1599,7 +1538,6 @@ fn test_jlt_reg() {
         mov r0, 1
         exit",
         [],
-        (),
         TestContextObject::new(9),
         ProgramResult::Ok(0x1),
     );
@@ -1618,7 +1556,6 @@ fn test_jne_imm() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1638,7 +1575,6 @@ fn test_jne_reg() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(8),
         ProgramResult::Ok(0x1),
     );
@@ -1657,7 +1593,6 @@ fn test_jset_imm() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1677,7 +1612,6 @@ fn test_jset_reg() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(8),
         ProgramResult::Ok(0x1),
     );
@@ -1697,7 +1631,6 @@ fn test_jsge_imm() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(8),
         ProgramResult::Ok(0x1),
     );
@@ -1719,7 +1652,6 @@ fn test_jsge_reg() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(10),
         ProgramResult::Ok(0x1),
     );
@@ -1739,7 +1671,6 @@ fn test_jsle_imm() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1762,7 +1693,6 @@ fn test_jsle_reg() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(10),
         ProgramResult::Ok(0x1),
     );
@@ -1781,7 +1711,6 @@ fn test_jsgt_imm() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1801,7 +1730,6 @@ fn test_jsgt_reg() {
         mov32 r0, 2
         exit",
         [],
-        (),
         TestContextObject::new(8),
         ProgramResult::Ok(0x1),
     );
@@ -1820,7 +1748,6 @@ fn test_jslt_imm() {
         mov32 r0, 1
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x1),
     );
@@ -1841,7 +1768,6 @@ fn test_jslt_reg() {
         mov32 r0, 1
         exit",
         [],
-        (),
         TestContextObject::new(9),
         ProgramResult::Ok(0x1),
     );
@@ -1863,7 +1789,6 @@ fn test_stack1() {
         ldxdw r0, [r2-16]
         exit",
         [],
-        (),
         TestContextObject::new(9),
         ProgramResult::Ok(0xcd),
     );
@@ -1871,8 +1796,8 @@ fn test_stack1() {
 
 #[test]
 fn test_stack2() {
-    test_interpreter_and_jit_asm!(
-        "
+    test_syscall_asm!(
+         "
         stb [r10-4], 0x01
         stb [r10-3], 0x02
         stb [r10-2], 0x03
@@ -1901,7 +1826,7 @@ fn test_stack2() {
 
 #[test]
 fn test_string_stack() {
-    test_interpreter_and_jit_asm!(
+    test_syscall_asm!(
         "
         mov r1, 0x78636261
         stxw [r10-8], r1
@@ -1943,7 +1868,7 @@ fn test_string_stack() {
 #[test]
 fn test_err_dynamic_stack_out_of_bound() {
     let config = Config {
-        enable_sbpf_v2: true,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V3,
         max_call_depth: 3,
         ..Config::default()
     };
@@ -1955,9 +1880,8 @@ fn test_err_dynamic_stack_out_of_bound() {
         "
         stb [r10-0x3001], 0
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(1),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Store,
@@ -1972,9 +1896,8 @@ fn test_err_dynamic_stack_out_of_bound() {
         "
         stb [r10], 0
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(1),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Store,
@@ -1990,25 +1913,23 @@ fn test_err_dynamic_stack_ptr_overflow() {
     // See the comment in CallFrames::resize_stack() for the reason why it's
     // safe to let the stack pointer overflow
 
-    // stack_ptr -= stack_ptr + 1
     test_interpreter_and_jit_asm!(
         "
-        add r11, -0x7FFFFFFF
-        add r11, -0x7FFFFFFF
-        add r11, -0x7FFFFFFF
-        add r11, -0x7FFFFFFF
-        add r11, -0x40005
+        add r10, -0x7FFFFF00
+        add r10, -0x7FFFFF00
+        add r10, -0x7FFFFF00
+        add r10, -0x7FFFFF00
+        add r10, -0x40440
         call function_foo
         exit
         function_foo:
         stb [r10], 0
         exit",
         [],
-        (),
         TestContextObject::new(7),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Store,
-            u64::MAX,
+            u64::MAX - 63,
             1,
             "unknown"
         )),
@@ -2027,9 +1948,8 @@ fn test_dynamic_stack_frames_empty() {
         function_foo:
         mov r0, r10
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
     );
@@ -2039,37 +1959,49 @@ fn test_dynamic_stack_frames_empty() {
 fn test_dynamic_frame_ptr() {
     let config = Config::default();
 
-    // Check that upon entering a function (foo) the frame pointer is advanced
-    // to the top of the stack
+    // Check that changes to r10 are immediately visible
     test_interpreter_and_jit_asm!(
         "
-        add r11, -8
+        add r10, -64
+        stxdw [r10+8], r10
+        call function_foo
+        ldxdw r0, [r10+8]
+        exit
+        function_foo:
+        exit",
+        config.clone(),
+        [],
+        TestContextObject::new(6),
+        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
+    );
+
+    // Check that changes to r10 continue to be visible in a callee
+    test_interpreter_and_jit_asm!(
+        "
+        add r10, -64
         call function_foo
         exit
         function_foo:
         mov r0, r10
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(5),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 8),
+        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
     );
 
-    // And check that when exiting a function (foo) the caller's frame pointer
-    // is restored
+    // And check that changes to r10 are undone after returning
     test_interpreter_and_jit_asm!(
         "
-        add r11, -8
         call function_foo
         mov r0, r10
         exit
         function_foo:
+        add r10, -64
         exit
         ",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(5),
         ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
     );
@@ -2083,9 +2015,9 @@ fn test_entrypoint_exit() {
     // can't infer anything from the stack size so we track call depth
     // explicitly. Make sure exit still works with both fixed and dynamic
     // frames.
-    for enable_sbpf_v2 in [false, true] {
+    for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
         let config = Config {
-            enable_sbpf_v2,
+            enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
             ..Config::default()
         };
 
@@ -2102,7 +2034,6 @@ fn test_entrypoint_exit() {
             exit",
             config,
             [],
-            (),
             TestContextObject::new(5),
             ProgramResult::Ok(42),
         );
@@ -2111,9 +2042,9 @@ fn test_entrypoint_exit() {
 
 #[test]
 fn test_stack_call_depth_tracking() {
-    for enable_sbpf_v2 in [false, true] {
+    for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
         let config = Config {
-            enable_sbpf_v2,
+            enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
             max_call_depth: 2,
             ..Config::default()
         };
@@ -2130,9 +2061,8 @@ fn test_stack_call_depth_tracking() {
             function_foo:
             exit
             ",
-            config,
+            config.clone(),
             [],
-            (),
             TestContextObject::new(5),
             ProgramResult::Ok(0),
         );
@@ -2151,7 +2081,6 @@ fn test_stack_call_depth_tracking() {
             ",
             config,
             [],
-            (),
             TestContextObject::new(2),
             ProgramResult::Err(EbpfError::CallDepthExceeded),
         );
@@ -2164,8 +2093,8 @@ fn test_err_mem_access_out_of_bound() {
     let mut prog = [0; 32];
     prog[0] = ebpf::MOV32_IMM;
     prog[8] = ebpf::HOR64_IMM;
-    prog[16] = ebpf::ST_B_IMM;
-    prog[24] = ebpf::EXIT;
+    prog[16] = ebpf::ST_1B_IMM;
+    prog[24] = ebpf::RETURN;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for address in [0x2u64, 0x8002u64, 0x80000002u64, 0x8000000000000002u64] {
         LittleEndian::write_u32(&mut prog[4..], address as u32);
@@ -2174,7 +2103,7 @@ fn test_err_mem_access_out_of_bound() {
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
             loader.clone(),
-            SBPFVersion::V2,
+            SBPFVersion::V3,
             FunctionRegistry::default(),
         )
         .unwrap();
@@ -2195,9 +2124,30 @@ fn test_err_mem_access_out_of_bound() {
 // CALL_IMM & CALL_REG : Procedure Calls
 
 #[test]
-fn test_relative_call() {
+fn test_relative_call_sbpfv0() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/relative_call_sbpfv0.so",
+        config,
+        [1],
+        (),
+        TestContextObject::new(16),
+        ProgramResult::Ok(3),
+    );
+}
+
+#[test]
+fn test_relative_call_sbpfv3() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
         "tests/elfs/relative_call.so",
+        config,
         [1],
         (),
         TestContextObject::new(18),
@@ -2226,7 +2176,6 @@ fn test_bpf_to_bpf_scratch_registers() {
         mov64 r9, 0x00
         exit",
         [],
-        (),
         TestContextObject::new(15),
         ProgramResult::Ok(0xFF),
     );
@@ -2234,7 +2183,7 @@ fn test_bpf_to_bpf_scratch_registers() {
 
 #[test]
 fn test_syscall_parameter_on_stack() {
-    test_interpreter_and_jit_asm!(
+    test_syscall_asm!(
         "
         mov64 r1, r10
         add64 r1, -0x100
@@ -2256,49 +2205,103 @@ fn test_callx() {
     test_interpreter_and_jit_asm!(
         "
         mov64 r0, 0x0
-        mov64 r8, 0x1
-        lsh64 r8, 0x20
-        or64 r8, 0x30
+        or64 r8, 0x20
         callx r8
         exit
         function_foo:
         mov64 r0, 0x2A
         exit",
         [],
-        (),
-        TestContextObject::new(8),
+        TestContextObject::new(6),
         ProgramResult::Ok(42),
     );
 }
 
 #[test]
 fn test_err_callx_unregistered() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+
+    // Callx jumps to `mov64 r0, 0x2A`
     test_interpreter_and_jit_asm!(
         "
         mov64 r0, 0x0
-        mov64 r8, 0x1
-        lsh64 r8, 0x20
-        or64 r8, 0x30
+        lddw r8, 0x100000028
         callx r8
         exit
         mov64 r0, 0x2A
         exit",
+        config,
         [],
-        (),
         TestContextObject::new(6),
+        ProgramResult::Ok(42),
+    );
+
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+
+    // Callx jumps to `mov64 r0, 0x2A`
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0x0
+        or64 r8, 0x28
+        callx r8
+        exit
+        mov64 r0, 0x2A
+        exit",
+        config,
+        [],
+        TestContextObject::new(3),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
+
+    let versions = [SBPFVersion::V0, SBPFVersion::V3];
+    let expected_errors = [
+        EbpfError::CallOutsideTextSegment,
+        EbpfError::UnsupportedInstruction,
+    ];
+
+    // We execute three instructions when callx errors out.
+    for (version, error) in versions.iter().zip(expected_errors) {
+        let config = Config {
+            enabled_sbpf_versions: *version..=*version,
+            ..Config::default()
+        };
+
+        // Callx jumps to a location outside text segment
+        test_interpreter_and_jit_asm!(
+            "
+            mov64 r0, 0x0
+            or64 r8, 0x20
+            callx r8
+            exit
+            mov64 r0, 0x2A
+            exit",
+            config,
+            [],
+            TestContextObject::new(3),
+            ProgramResult::Err(error),
+        );
+    }
 }
 
 #[test]
 fn test_err_callx_oob_low() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
     test_interpreter_and_jit_asm!(
         "
         mov64 r0, 0x3
         callx r0
         exit",
+        config,
         [],
-        (),
         TestContextObject::new(2),
         ProgramResult::Err(EbpfError::CallOutsideTextSegment),
     );
@@ -2314,9 +2317,33 @@ fn test_err_callx_oob_high() {
         callx r0
         exit",
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::CallOutsideTextSegment),
+    );
+}
+
+#[test]
+fn test_err_callx_oob_max() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, -0x8
+        hor64 r0, -0x1
+        callx r0
+        exit",
+        [],
+        TestContextObject::new(3),
+        ProgramResult::Err(EbpfError::CallOutsideTextSegment),
+    );
+}
+
+#[test]
+fn test_callx_unaligned_text_section() {
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/callx_unaligned.so",
+        [],
+        (),
+        TestContextObject::new(129),
+        ProgramResult::Err(EbpfError::CallDepthExceeded),
     );
 }
 
@@ -2338,9 +2365,8 @@ fn test_bpf_to_bpf_depth() {
             add64 r1, -1
             call function_foo
             exit",
-            config,
+            config.clone(),
             [max_call_depth as u8],
-            (),
             TestContextObject::new(max_call_depth as u64 * 4 - 2),
             ProgramResult::Ok(0),
         );
@@ -2358,7 +2384,6 @@ fn test_bpf_to_bpf_depth() {
             exit",
             config,
             [max_call_depth as u8 + 1],
-            (),
             TestContextObject::new(max_call_depth as u64 * 3),
             ProgramResult::Err(EbpfError::CallDepthExceeded),
         );
@@ -2374,14 +2399,11 @@ fn test_err_reg_stack_depth() {
         };
         test_interpreter_and_jit_asm!(
             "
-            mov64 r0, 0x1
-            lsh64 r0, 0x20
             callx r0
             exit",
             config,
             [],
-            (),
-            TestContextObject::new(max_call_depth as u64 * 3),
+            TestContextObject::new(max_call_depth as u64),
             ProgramResult::Err(EbpfError::CallDepthExceeded),
         );
     }
@@ -2416,7 +2438,7 @@ fn test_call_save() {
 
 #[test]
 fn test_err_syscall_string() {
-    test_interpreter_and_jit_asm!(
+    test_syscall_asm!(
         "
         mov64 r1, 0x0
         syscall bpf_syscall_string
@@ -2433,7 +2455,7 @@ fn test_err_syscall_string() {
 
 #[test]
 fn test_syscall_string() {
-    test_interpreter_and_jit_asm!(
+    test_syscall_asm!(
         "
         mov64 r2, 0x5
         syscall bpf_syscall_string
@@ -2450,7 +2472,7 @@ fn test_syscall_string() {
 
 #[test]
 fn test_syscall() {
-    test_interpreter_and_jit_asm!(
+    test_syscall_asm!(
         "
         mov64 r1, 0xAA
         mov64 r2, 0xBB
@@ -2471,7 +2493,7 @@ fn test_syscall() {
 
 #[test]
 fn test_call_gather_bytes() {
-    test_interpreter_and_jit_asm!(
+    test_syscall_asm!(
         "
         mov r1, 1
         mov r2, 2
@@ -2491,7 +2513,7 @@ fn test_call_gather_bytes() {
 
 #[test]
 fn test_call_memfrob() {
-    test_interpreter_and_jit_asm!(
+    test_syscall_asm!(
         "
         mov r6, r1
         add r1, 2
@@ -2518,7 +2540,7 @@ declare_builtin_function!(
         _context_object: &mut TestContextObject,
         depth: u64,
         throw: u64,
-        _arg3: u64,
+        version: u64,
         _arg4: u64,
         _arg5: u64,
         _memory_mapping: &mut MemoryMapping,
@@ -2536,13 +2558,14 @@ declare_builtin_function!(
             };
         #[allow(unused_mut)]
         if depth > 0 {
-            let mut function_registry =
-                FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-            function_registry
-                .register_function_hashed(*b"nested_vm_syscall", SyscallNestedVm::vm)
-                .unwrap();
-            let loader = BuiltinProgram::new_loader(Config::default(), function_registry);
-            let mem = [depth as u8 - 1, throw as u8];
+            let mut config = Config::default();
+            if version == 0 {
+                config.enabled_sbpf_versions = SBPFVersion::V0..=SBPFVersion::V0;
+            } else {
+                config.enabled_sbpf_versions = SBPFVersion::V3..=SBPFVersion::V3;
+            };
+            let mut loader = BuiltinProgram::new_loader(config);
+            loader.register_function("nested_vm_syscall", SyscallNestedVm::vm).unwrap();
             let mut executable = assemble::<TestContextObject>(
                 "
                 ldxb r2, [r1+1]
@@ -2554,7 +2577,7 @@ declare_builtin_function!(
             .unwrap();
             test_interpreter_and_jit!(
                 executable,
-                mem,
+                [depth as u8 - 1, throw as u8],
                 TestContextObject::new(if throw == 0 { 4 } else { 3 }),
                 expected_result,
             );
@@ -2567,10 +2590,18 @@ declare_builtin_function!(
 fn test_nested_vm_syscall() {
     let config = Config::default();
     let mut context_object = TestContextObject::default();
-    let mut memory_mapping = MemoryMapping::new(vec![], &config, &SBPFVersion::V2).unwrap();
+    let mut memory_mapping = MemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
+
+    // SBPFv0
     let result = SyscallNestedVm::rust(&mut context_object, 1, 0, 0, 0, 0, &mut memory_mapping);
-    assert!(result.unwrap() == 42);
+    assert_eq!(result.unwrap(), 42);
     let result = SyscallNestedVm::rust(&mut context_object, 1, 1, 0, 0, 0, &mut memory_mapping);
+    assert_error!(result, "CallDepthExceeded");
+
+    // SBPFv3
+    let result = SyscallNestedVm::rust(&mut context_object, 1, 0, 3, 0, 0, &mut memory_mapping);
+    assert_eq!(result.unwrap(), 42);
+    let result = SyscallNestedVm::rust(&mut context_object, 1, 1, 3, 0, 0, &mut memory_mapping);
     assert_error!(result, "CallDepthExceeded");
 }
 
@@ -2583,7 +2614,6 @@ fn test_tight_infinite_loop_conditional() {
         jsge r0, r0, -1
         exit",
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2596,7 +2626,6 @@ fn test_tight_infinite_loop_unconditional() {
         ja -1
         exit",
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2611,7 +2640,6 @@ fn test_tight_infinite_recursion() {
         call entrypoint
         exit",
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2621,9 +2649,7 @@ fn test_tight_infinite_recursion() {
 fn test_tight_infinite_recursion_callx() {
     test_interpreter_and_jit_asm!(
         "
-        mov64 r8, 0x1
-        lsh64 r8, 0x20
-        or64 r8, 0x28
+        or64 r8, 0x18
         call function_foo
         exit
         function_foo:
@@ -2631,15 +2657,14 @@ fn test_tight_infinite_recursion_callx() {
         callx r8
         exit",
         [],
-        (),
-        TestContextObject::new(8),
+        TestContextObject::new(6),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
 }
 
 #[test]
 fn test_instruction_count_syscall() {
-    test_interpreter_and_jit_asm!(
+    test_syscall_asm!(
         "
         mov64 r2, 0x5
         syscall bpf_syscall_string
@@ -2656,7 +2681,7 @@ fn test_instruction_count_syscall() {
 
 #[test]
 fn test_err_instruction_count_syscall_capped() {
-    test_interpreter_and_jit_asm!(
+    test_syscall_asm!(
         "
         mov64 r2, 0x5
         syscall bpf_syscall_string
@@ -2672,27 +2697,6 @@ fn test_err_instruction_count_syscall_capped() {
 }
 
 #[test]
-fn test_non_terminate_early() {
-    test_interpreter_and_jit_asm!(
-        "
-        mov64 r6, 0x0
-        mov64 r1, 0x0
-        mov64 r2, 0x0
-        mov64 r3, 0x0
-        mov64 r4, 0x0
-        mov64 r5, r6
-        syscall Unresolved
-        add64 r6, 0x1
-        ja -0x8
-        exit",
-        [],
-        (),
-        TestContextObject::new(7),
-        ProgramResult::Err(EbpfError::UnsupportedInstruction),
-    );
-}
-
-#[test]
 fn test_err_non_terminate_capped() {
     test_interpreter_and_jit_asm!(
         "
@@ -2702,14 +2706,10 @@ fn test_err_non_terminate_capped() {
         mov64 r3, 0x0
         mov64 r4, 0x0
         mov64 r5, r6
-        syscall bpf_trace_printf
         add64 r6, 0x1
         ja -0x8
         exit",
         [],
-        (
-            "bpf_trace_printf" => syscalls::SyscallTracePrintf::vm,
-        ),
         TestContextObject::new(7),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2721,14 +2721,10 @@ fn test_err_non_terminate_capped() {
         mov64 r3, 0x0
         mov64 r4, 0x0
         mov64 r5, r6
-        syscall bpf_trace_printf
         add64 r6, 0x1
         ja -0x8
         exit",
         [],
-        (
-            "bpf_trace_printf" => syscalls::SyscallTracePrintf::vm,
-        ),
         TestContextObject::new(1000),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2740,28 +2736,23 @@ fn test_err_capped_before_exception() {
         "
         mov64 r1, 0x0
         mov64 r2, 0x0
-        add64 r0, 0x0
-        add64 r0, 0x0
         udiv64 r1, r2
-        add64 r0, 0x0
+        mov64 r0, 0x0
         exit",
         [],
-        (),
-        TestContextObject::new(4),
+        TestContextObject::new(2),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
+
     test_interpreter_and_jit_asm!(
         "
         mov64 r1, 0x0
         mov64 r2, 0x0
-        add64 r0, 0x0
-        add64 r0, 0x0
-        syscall Unresolved
-        add64 r0, 0x0
+        callx r2
+        mov64 r0, 0x0
         exit",
         [],
-        (),
-        TestContextObject::new(4),
+        TestContextObject::new(2),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
 }
@@ -2770,44 +2761,38 @@ fn test_err_capped_before_exception() {
 fn test_err_exit_capped() {
     test_interpreter_and_jit_asm!(
         "
-        mov64 r1, 0x1
-        lsh64 r1, 0x20
-        or64 r1, 0x28
-        callx r1
+        or64 r0, 0x18
+        callx r0
         exit
         function_foo:
         exit
         ",
         [],
-        (),
-        TestContextObject::new(5),
+        TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
     test_interpreter_and_jit_asm!(
         "
-        mov64 r1, 0x1
-        lsh64 r1, 0x20
-        or64 r1, 0x28
-        callx r1
+        or64 r0, 0x18
+        callx r0
         exit
         function_foo:
         mov r0, r0
         exit
         ",
         [],
-        (),
-        TestContextObject::new(6),
+        TestContextObject::new(4),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
     test_interpreter_and_jit_asm!(
         "
-        call 1
+        call function_foo
         exit
+        function_foo:
         mov r0, r0
         exit
         ",
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2825,13 +2810,11 @@ fn test_far_jumps() {
         .fill 1024, 0x0F
         exit
         function_c:
-        mov32 r1, 0x00000010
-        hor64 r1, 0x00000001
+        mov32 r1, 0x10
         callx r1
         exit",
         [],
-        (),
-        TestContextObject::new(7),
+        TestContextObject::new(6),
         ProgramResult::Ok(0),
     );
 }
@@ -2839,26 +2822,11 @@ fn test_far_jumps() {
 // Symbols and Relocation
 
 #[test]
-fn test_symbol_relocation() {
-    test_interpreter_and_jit_asm!(
-        "
-        mov64 r1, r10
-        add64 r1, -0x1
-        mov64 r2, 0x1
-        syscall bpf_syscall_string
-        mov64 r0, 0x0
-        exit",
-        [72, 101, 108, 108, 111],
-        (
-            "bpf_syscall_string" => syscalls::SyscallString::vm,
-        ),
-        TestContextObject::new(6),
-        ProgramResult::Ok(0),
-    );
-}
-
-#[test]
 fn test_err_call_unresolved() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
     test_interpreter_and_jit_asm!(
         "
         mov r1, 1
@@ -2869,17 +2837,40 @@ fn test_err_call_unresolved() {
         syscall Unresolved
         mov64 r0, 0x0
         exit",
+        config.clone(),
         [],
-        (),
         TestContextObject::new(6),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
 }
 
 #[test]
-fn test_syscall_reloc_64_32() {
+fn test_syscall_static() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
-        "tests/elfs/syscall_reloc_64_32.so",
+        "tests/elfs/syscall_static.so",
+        config,
+        [],
+        (
+            "log" => syscalls::SyscallString::vm,
+        ),
+        TestContextObject::new(6),
+        ProgramResult::Ok(0),
+    );
+}
+
+#[test]
+fn test_syscall_reloc_64_32() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/syscall_reloc_64_32_sbpfv0.so",
+        config,
         [],
         (
             "log" => syscalls::SyscallString::vm,
@@ -2890,169 +2881,140 @@ fn test_syscall_reloc_64_32() {
 }
 
 #[test]
-fn test_syscall_static() {
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/syscall_static.so",
-        [],
-        (
-            "log" => syscalls::SyscallString::vm,
-        ),
-        TestContextObject::new(6),
-        ProgramResult::Ok(0),
-    );
-}
-
-#[test]
-fn test_err_unresolved_syscall_reloc_64_32() {
-    let loader = BuiltinProgram::new_loader(
-        Config {
-            reject_broken_elfs: true,
-            ..Config::default()
-        },
-        FunctionRegistry::default(),
-    );
-    let mut file = File::open("tests/elfs/syscall_reloc_64_32.so").unwrap();
-    let mut elf = Vec::new();
-    file.read_to_end(&mut elf).unwrap();
-    assert_error!(
-        Executable::<TestContextObject>::from_elf(&elf, Arc::new(loader)),
-        "UnresolvedSymbol(\"log\", 39, 312)"
-    );
-}
-
-#[test]
-fn test_err_unresolved_syscall_static() {
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/syscall_static.so",
-        [],
-        (),
-        TestContextObject::new(4),
-        ProgramResult::Err(EbpfError::UnsupportedInstruction),
-    );
-}
-
-#[test]
-fn test_reloc_64_64_sbpfv1() {
+fn test_reloc_64_64_sbpfv0() {
     // Tests the correctness of R_BPF_64_64 relocations. The program returns the
     // address of the entrypoint.
     //   [ 1] .text             PROGBITS        0000000000000120 000120 000018 00  AX  0   0  8
     test_interpreter_and_jit_elf!(
-        "tests/elfs/reloc_64_64_sbpfv1.so",
+        "tests/elfs/reloc_64_64_sbpfv0.so",
         [],
         (),
         TestContextObject::new(2),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x120),
+        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x120),
     );
 }
 
 #[test]
 fn test_reloc_64_64() {
-    // Same as test_reloc_64_64, but with .text already alinged to
-    // MM_PROGRAM_START by the linker
-    //   [ 1] .text             PROGBITS        0000000100000000 001000 000018 00  AX  0   0  8
+    // Tests the correctness of link-time R_BPF_64_64 relocations. The program returns the
+    // address of the entrypoint.
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_64.so",
         [],
         (),
         TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START),
+        ProgramResult::Ok(ebpf::MM_BYTECODE_START),
     );
 }
 
 #[test]
-fn test_reloc_64_relative_sbpfv1() {
+fn test_reloc_64_relative_sbpfv0() {
     // Tests the correctness of R_BPF_64_RELATIVE relocations. The program
     // returns the address of the first .rodata byte.
     //   [ 1] .text             PROGBITS        0000000000000120 000120 000018 00  AX  0   0  8
     //   [ 2] .rodata           PROGBITS        0000000000000138 000138 00000a 01 AMS  0   0  1
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
-        "tests/elfs/reloc_64_relative_sbpfv1.so",
+        "tests/elfs/reloc_64_relative_sbpfv0.so",
+        config,
         [],
         (),
         TestContextObject::new(2),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x138),
+        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x138),
     );
 }
 
 #[test]
 fn test_reloc_64_relative() {
-    // Same as test_reloc_64_relative, but with .text placed already within
-    // MM_PROGRAM_START by the linker
-    // [ 1] .text             PROGBITS        0000000100000000 001000 000018 00  AX  0   0  8
-    // [ 2] .rodata           PROGBITS        0000000100000018 001018 00000b 01 AMS  0   0  1
+    // Tests the correctness of link-time R_BPF_64_RELATIVE relocations. The program
+    // returns the address of the first .rodata byte.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_relative.so",
+        config,
         [],
         (),
         TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x18),
-    );
-}
-
-#[test]
-fn test_reloc_64_relative_data_sbfv1() {
-    // Tests the correctness of R_BPF_64_RELATIVE relocations in sections other
-    // than .text. The program returns the address of the first .rodata byte.
-    // [ 1] .text             PROGBITS        00000000000000e8 0000e8 000020 00  AX  0   0  8
-    // [ 2] .rodata           PROGBITS        0000000000000108 000108 000019 01 AMS  0   0  1
-    //
-    // 00000000000001f8 <FILE>:
-    // 63:       08 01 00 00 00 00 00 00
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/reloc_64_relative_data_sbpfv1.so",
-        [],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x108),
+        ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
 
 #[test]
 fn test_reloc_64_relative_data() {
-    // Same as test_reloc_64_relative_data, but with rodata already placed
-    // within MM_PROGRAM_START by the linker
-    // [ 1] .text             PROGBITS        0000000100000000 001000 000020 00  AX  0   0  8
-    // [ 2] .rodata           PROGBITS        0000000100000020 001020 000019 01 AMS  0   0  1
+    //  Tests the correctness of link-time R_BPF_64_RELATIVE relocations in sections other
+    // than .text. The program returns the address of the first .rodata byte.
+    // [ 1] .text             PROGBITS        0000000000000000 000190 000020 00  AX  0   0  8
+    // [ 2] .rodata           PROGBITS        0000000100000000 0001b0 000030 00 WAMS 0   0  8
     //
-    // 0000000100000110 <FILE>:
-    // 536870946:      20 00 00 00 01 00 00 00
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_relative_data.so",
+        config,
         [],
         (),
         TestContextObject::new(4),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x20),
+        ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
 
 #[test]
-fn test_reloc_64_relative_data_sbpfv1() {
+fn test_reloc_64_relative_data_sbpfv0() {
     // Before https://github.com/solana-labs/llvm-project/pull/35, we used to
     // generate invalid R_BPF_64_RELATIVE relocations in sections other than
     // .text.
     //
     // This test checks that the old behaviour is maintained for backwards
-    // compatibility when dealing with non-sbfv2 files. See also Elf::relocate().
+    // compatibility when dealing with non-sbpfv3 files. See also Elf::relocate().
     //
     // The program returns the address of the first .rodata byte.
-    // [ 1] .text             PROGBITS        00000000000000e8 0000e8 000020 00  AX  0   0  8
-    // [ 2] .rodata           PROGBITS        0000000000000108 000108 000019 01 AMS  0   0  1
+    // [ 1] .text             PROGBITS        0000000000000120 000120 000020 00  AX  0   0  8
+    // [ 2] .rodata           PROGBITS        0000000000000140 000140 000019 01 AMS  0   0  1
     //
-    // 00000000000001f8 <FILE>:
-    // 63:       00 00 00 00 08 01 00 00
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
     test_interpreter_and_jit_elf!(
-        "tests/elfs/reloc_64_relative_data_sbpfv1.so",
+        "tests/elfs/reloc_64_relative_data_sbpfv0.so",
+        config,
         [],
         (),
         TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_PROGRAM_START + 0x108),
+        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x140),
+    );
+}
+
+#[test]
+fn test_load_elf_rodata_sbpfv0() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        optimize_rodata: false,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/rodata_section_sbpfv0.so",
+        config,
+        [],
+        (),
+        TestContextObject::new(3),
+        ProgramResult::Ok(42),
     );
 }
 
 #[test]
 fn test_load_elf_rodata() {
     let config = Config {
-        optimize_rodata: true,
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        optimize_rodata: false,
         ..Config::default()
     };
     test_interpreter_and_jit_elf!(
@@ -3066,18 +3028,51 @@ fn test_load_elf_rodata() {
 }
 
 #[test]
-fn test_load_elf_rodata_sbpfv1() {
+fn test_struct_func_pointer_sbpfv0() {
+    // This tests checks that a struct field adjacent to another field
+    // which is a relocatable function pointer is not overwritten when
+    // the function pointer is relocated at load time.
     let config = Config {
-        optimize_rodata: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
     test_interpreter_and_jit_elf!(
-        "tests/elfs/rodata_section_sbpfv1.so",
+        "tests/elfs/struct_func_pointer_sbpfv0.so",
+        config,
+        [],
+        (),
+        TestContextObject::new(2),
+        ProgramResult::Ok(0x102030405060708),
+    );
+}
+
+#[test]
+fn test_strict_header() {
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/strict_header.so",
+        [],
+        (),
+        TestContextObject::new(6),
+        ProgramResult::Ok(42),
+    );
+}
+
+#[test]
+fn test_struct_func_pointer() {
+    // This tests checks that a struct field adjacent to another field
+    // which is a relocatable function pointer is not overwritten when
+    // the function pointer is relocated at load time.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_elf!(
+        "tests/elfs/struct_func_pointer.so",
         config,
         [],
         (),
         TestContextObject::new(3),
-        ProgramResult::Ok(42),
+        ProgramResult::Ok(0x102030405060708),
     );
 }
 
@@ -3098,7 +3093,6 @@ fn test_lmul_loop() {
         jne r1, 0x0, -3
         exit",
         [],
-        (),
         TestContextObject::new(37),
         ProgramResult::Ok(0x75db9c97),
     );
@@ -3125,7 +3119,6 @@ fn test_prime() {
         jne r4, 0x0, -10
         exit",
         [],
-        (),
         TestContextObject::new(655),
         ProgramResult::Ok(0x1),
     );
@@ -3161,7 +3154,6 @@ fn test_subnet() {
             0x27, 0x24, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03, //
             0x03, 0x00, //
         ],
-        (),
         TestContextObject::new(11),
         ProgramResult::Ok(0x1),
     );
@@ -3186,7 +3178,6 @@ fn test_tcp_port80_match() {
             0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, //
             0x44, 0x44, 0x44, 0x44, //
         ],
-        (),
         TestContextObject::new(17),
         ProgramResult::Ok(0x1),
     );
@@ -3211,7 +3202,6 @@ fn test_tcp_port80_nomatch() {
             0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, //
             0x44, 0x44, 0x44, 0x44, //
         ],
-        (),
         TestContextObject::new(18),
         ProgramResult::Ok(0x0),
     );
@@ -3236,7 +3226,6 @@ fn test_tcp_port80_nomatch_ethertype() {
             0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, //
             0x44, 0x44, 0x44, 0x44, //
         ],
-        (),
         TestContextObject::new(7),
         ProgramResult::Ok(0x0),
     );
@@ -3261,7 +3250,6 @@ fn test_tcp_port80_nomatch_proto() {
             0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, //
             0x44, 0x44, 0x44, 0x44, //
         ],
-        (),
         TestContextObject::new(9),
         ProgramResult::Ok(0x0),
     );
@@ -3272,7 +3260,6 @@ fn test_tcp_sack_match() {
     test_interpreter_and_jit_asm!(
         TCP_SACK_ASM,
         TCP_SACK_MATCH,
-        (),
         TestContextObject::new(79),
         ProgramResult::Ok(0x1),
     );
@@ -3283,23 +3270,8 @@ fn test_tcp_sack_nomatch() {
     test_interpreter_and_jit_asm!(
         TCP_SACK_ASM,
         TCP_SACK_NOMATCH,
-        (),
         TestContextObject::new(55),
         ProgramResult::Ok(0x0),
-    );
-}
-
-#[test]
-fn test_struct_func_pointer() {
-    // This tests checks that a struct field adjacent to another field
-    // which is a relocatable function pointer is not overwritten when
-    // the function pointer is relocated at load time.
-    test_interpreter_and_jit_elf!(
-        "tests/elfs/struct_func_pointer.so",
-        [],
-        (),
-        TestContextObject::new(3),
-        ProgramResult::Ok(0x102030405060708),
     );
 }
 
@@ -3311,14 +3283,11 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     let mem_size = 1024 * 1024;
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
-        Arc::new(BuiltinProgram::new_loader(
-            Config {
-                enable_instruction_tracing: true,
-                ..Config::default()
-            },
-            FunctionRegistry::default(),
-        )),
-        SBPFVersion::V2,
+        Arc::new(BuiltinProgram::new_loader(Config {
+            enable_instruction_tracing: true,
+            ..Config::default()
+        })),
+        SBPFVersion::V3,
         FunctionRegistry::default(),
     );
     let mut executable = if let Ok(executable) = executable {
@@ -3369,7 +3338,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         || !TestContextObject::compare_trace_log(&tracer_interpreter, tracer_jit)
     {
         let analysis =
-            solana_rbpf::static_analysis::Analysis::from_executable(&executable).unwrap();
+            solana_sbpf::static_analysis::Analysis::from_executable(&executable).unwrap();
         println!("result_interpreter={result_interpreter:?}");
         println!("result_jit={result_jit:?}");
         let stdout = std::io::stdout();
@@ -3416,12 +3385,65 @@ fn test_total_chaos() {
     }
 }
 
-// SBPFv1 only [DEPRECATED]
+#[test]
+fn test_call_imm_does_not_dispatch_syscalls() {
+    test_syscall_asm!(
+        "
+        call function_foo
+        return
+        syscall bpf_syscall_string
+        return
+        function_foo:
+        mov r0, 42
+        return",
+        [],
+        (
+            "bpf_syscall_string" => syscalls::SyscallString::vm,
+        ),
+        TestContextObject::new(4),
+        ProgramResult::Ok(42),
+    );
+}
+
+#[test]
+fn test_callx_unsupported_instruction_and_exceeded_max_instructions() {
+    test_interpreter_and_jit_asm!(
+        "
+        sub32 r7, r1
+        sub64 r5, 8
+        sub64 r7, 0
+        callx r5
+        callx r5
+        return",
+        [],
+        TestContextObject::new(4),
+        ProgramResult::Err(EbpfError::UnsupportedInstruction),
+    );
+}
+
+#[test]
+fn test_capped_after_callx() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0x0
+        or64 r8, 0x20
+        callx r8
+        exit
+        function_foo:
+        mov64 r0, 0x2A
+        exit",
+        [],
+        TestContextObject::new(3),
+        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+    );
+}
+
+// SBPFv0 only [DEPRECATED]
 
 #[test]
 fn test_err_fixed_stack_out_of_bound() {
     let config = Config {
-        enable_sbpf_v2: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         max_call_depth: 3,
         ..Config::default()
     };
@@ -3431,7 +3453,6 @@ fn test_err_fixed_stack_out_of_bound() {
         exit",
         config,
         [],
-        (),
         TestContextObject::new(1),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Store,
@@ -3443,18 +3464,75 @@ fn test_err_fixed_stack_out_of_bound() {
 }
 
 #[test]
-fn test_lddw() {
+fn test_execution_overrun() {
     let config = Config {
-        enable_sbpf_v2: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
     test_interpreter_and_jit_asm!(
         "
-        lddw r0, 0x1122334455667788
+        add r1, 0",
+        config.clone(),
+        [],
+        TestContextObject::new(2),
+        ProgramResult::Err(EbpfError::ExecutionOverrun),
+    );
+    test_interpreter_and_jit_asm!(
+        "
+        add r1, 0",
+        config.clone(),
+        [],
+        TestContextObject::new(1),
+        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+    );
+    test_interpreter_and_jit_asm!(
+        "
+        add r1, 0",
+        config.clone(),
+        [],
+        TestContextObject::new(0),
+        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+    );
+}
+
+#[test]
+fn test_mov32_reg_truncating() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r1, -1
+        mov32 r0, r1
         exit",
         config,
         [],
-        (),
+        TestContextObject::new(3),
+        ProgramResult::Ok(0xffffffff),
+    );
+}
+
+#[test]
+fn test_lddw() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_asm!(
+        "
+        lddw r0, 0x1122334455667788",
+        config.clone(),
+        [],
+        TestContextObject::new(2),
+        ProgramResult::Err(EbpfError::ExecutionOverrun),
+    );
+    test_interpreter_and_jit_asm!(
+        "
+        lddw r0, 0x1122334455667788
+        exit",
+        config.clone(),
+        [],
         TestContextObject::new(2),
         ProgramResult::Ok(0x1122334455667788),
     );
@@ -3462,9 +3540,8 @@ fn test_lddw() {
         "
         lddw r0, 0x0000000080000000
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(2),
         ProgramResult::Ok(0x80000000),
     );
@@ -3481,9 +3558,8 @@ fn test_lddw() {
         add r0, r1
         exit
         ",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(9),
         ProgramResult::Ok(0x2),
     );
@@ -3495,9 +3571,8 @@ fn test_lddw() {
         callx r8
         lddw r0, 0x1122334455667788
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -3509,9 +3584,8 @@ fn test_lddw() {
         callx r8
         lddw r0, 0x1122334455667788
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(5),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
@@ -3526,9 +3600,8 @@ fn test_lddw() {
         lddw r0, 0x1122334455667788
         exit
         ",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(5),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
@@ -3542,9 +3615,8 @@ fn test_lddw() {
         lddw r0, 0x1122334455667788
         exit
         ",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
@@ -3557,7 +3629,6 @@ fn test_lddw() {
         ",
         config,
         [],
-        (),
         TestContextObject::new(2),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -3566,7 +3637,7 @@ fn test_lddw() {
 #[test]
 fn test_le() {
     let config = Config {
-        enable_sbpf_v2: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
     test_interpreter_and_jit_asm!(
@@ -3574,9 +3645,8 @@ fn test_le() {
         ldxh r0, [r1]
         le16 r0
         exit",
-        config,
+        config.clone(),
         [0x22, 0x11],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x1122),
     );
@@ -3585,9 +3655,8 @@ fn test_le() {
         ldxdw r0, [r1]
         le16 r0
         exit",
-        config,
+        config.clone(),
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x2211),
     );
@@ -3596,9 +3665,8 @@ fn test_le() {
         ldxw r0, [r1]
         le32 r0
         exit",
-        config,
+        config.clone(),
         [0x44, 0x33, 0x22, 0x11],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x11223344),
     );
@@ -3607,9 +3675,8 @@ fn test_le() {
         ldxdw r0, [r1]
         le32 r0
         exit",
-        config,
+        config.clone(),
         [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x44332211),
     );
@@ -3620,7 +3687,6 @@ fn test_le() {
         exit",
         config,
         [0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x1122334455667788),
     );
@@ -3629,7 +3695,7 @@ fn test_le() {
 #[test]
 fn test_neg() {
     let config = Config {
-        enable_sbpf_v2: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
     test_interpreter_and_jit_asm!(
@@ -3637,9 +3703,8 @@ fn test_neg() {
         mov32 r0, 2
         neg32 r0
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0xfffffffe),
     );
@@ -3648,9 +3713,8 @@ fn test_neg() {
         mov r0, 2
         neg r0
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0xfffffffffffffffe),
     );
@@ -3659,9 +3723,8 @@ fn test_neg() {
         mov32 r0, 3
         sub32 r0, 1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(2),
     );
@@ -3672,7 +3735,6 @@ fn test_neg() {
         exit",
         config,
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(2),
     );
@@ -3681,7 +3743,7 @@ fn test_neg() {
 #[test]
 fn test_callx_imm() {
     let config = Config {
-        enable_sbpf_v2: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
     test_interpreter_and_jit_asm!(
@@ -3697,7 +3759,6 @@ fn test_callx_imm() {
         exit",
         config,
         [],
-        (),
         TestContextObject::new(8),
         ProgramResult::Ok(42),
     );
@@ -3706,7 +3767,7 @@ fn test_callx_imm() {
 #[test]
 fn test_mul() {
     let config = Config {
-        enable_sbpf_v2: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
     test_interpreter_and_jit_asm!(
@@ -3714,9 +3775,8 @@ fn test_mul() {
         mov r0, 3
         mul32 r0, 4
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0xc),
     );
@@ -3726,9 +3786,8 @@ fn test_mul() {
         mov r1, 4
         mul32 r0, r1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0xc),
     );
@@ -3738,9 +3797,8 @@ fn test_mul() {
         mov r1, 4
         mul32 r0, r1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0x4),
     );
@@ -3749,9 +3807,8 @@ fn test_mul() {
         mov r0, 0x40000001
         mul r0, 4
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x100000004),
     );
@@ -3761,9 +3818,8 @@ fn test_mul() {
         mov r1, 4
         mul r0, r1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0x100000004),
     );
@@ -3774,7 +3830,6 @@ fn test_mul() {
         exit",
         config,
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0xFFFFFFFFFFFFFFFC),
     );
@@ -3783,7 +3838,7 @@ fn test_mul() {
 #[test]
 fn test_div() {
     let config = Config {
-        enable_sbpf_v2: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
     test_interpreter_and_jit_asm!(
@@ -3792,9 +3847,8 @@ fn test_div() {
         lddw r1, 0x100000004
         div32 r0, r1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0x3),
     );
@@ -3803,9 +3857,8 @@ fn test_div() {
         lddw r0, 0x10000000c
         div32 r0, 4
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x3),
     );
@@ -3815,9 +3868,8 @@ fn test_div() {
         mov r1, 4
         div32 r0, r1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0x3),
     );
@@ -3827,9 +3879,8 @@ fn test_div() {
         lsh r0, 32
         div r0, 4
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(4),
         ProgramResult::Ok(0x300000000),
     );
@@ -3840,9 +3891,8 @@ fn test_div() {
         mov r1, 4
         div r0, r1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(5),
         ProgramResult::Ok(0x300000000),
     );
@@ -3852,9 +3902,8 @@ fn test_div() {
         mov32 r1, 0
         div r0, r1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::DivideByZero),
     );
@@ -3866,7 +3915,6 @@ fn test_div() {
         exit",
         config,
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::DivideByZero),
     );
@@ -3875,7 +3923,7 @@ fn test_div() {
 #[test]
 fn test_mod() {
     let config = Config {
-        enable_sbpf_v2: false,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
     test_interpreter_and_jit_asm!(
@@ -3885,9 +3933,8 @@ fn test_mod() {
         mov32 r1, 13
         mod32 r0, r1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(5),
         ProgramResult::Ok(0x5),
     );
@@ -3896,9 +3943,8 @@ fn test_mod() {
         lddw r0, 0x100000003
         mod32 r0, 3
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Ok(0x0),
     );
@@ -3913,9 +3959,8 @@ fn test_mod() {
         mod r0, r1
         mod r0, 0x658f1778
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(9),
         ProgramResult::Ok(0x30ba5a04),
     );
@@ -3925,9 +3970,8 @@ fn test_mod() {
         mov32 r1, 0
         mod r0, r1
         exit",
-        config,
+        config.clone(),
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::DivideByZero),
     );
@@ -3939,8 +3983,27 @@ fn test_mod() {
         exit",
         config,
         [],
-        (),
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::DivideByZero),
+    );
+}
+
+#[test]
+fn test_symbol_relocation() {
+    // No relocation is necessary in SBFPv3
+    test_syscall_asm!(
+        "
+        mov64 r1, r10
+        add64 r1, -0x1
+        mov64 r2, 0x1
+        syscall bpf_syscall_string
+        mov64 r0, 0x0
+        exit",
+        [72, 101, 108, 108, 111],
+        (
+            "bpf_syscall_string" => syscalls::SyscallString::vm,
+        ),
+        TestContextObject::new(6),
+        ProgramResult::Ok(0),
     );
 }

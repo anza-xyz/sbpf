@@ -9,12 +9,9 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-//! Virtual machine and JIT compiler for eBPF programs.
+//! Virtual machine for SBPF programs.
 #![warn(missing_docs)]
-#![doc(
-    html_logo_url = "https://raw.githubusercontent.com/qmonnet/rbpf/master/misc/rbpf.png",
-    html_favicon_url = "https://raw.githubusercontent.com/qmonnet/rbpf/master/misc/rbpf.ico"
-)]
+#![allow(clippy::literal_string_with_formatting_args)]
 #![deny(clippy::arithmetic_side_effects)]
 #![deny(clippy::ptr_as_ptr)]
 
@@ -34,19 +31,16 @@ pub mod disassembler;
 pub mod ebpf;
 pub mod elf;
 pub mod elf_parser;
-pub mod elf_parser_glue;
 pub mod error;
-pub mod fuzz;
 pub mod insn_builder;
 pub mod interpreter;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-mod jit;
+pub mod jit;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 mod memory_management;
 pub mod memory_region;
 pub mod program;
 pub mod static_analysis;
-pub mod syscalls;
 pub mod verifier;
 pub mod vm;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]

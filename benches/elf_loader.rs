@@ -6,42 +6,26 @@
 
 #![feature(test)]
 
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 extern crate test;
 extern crate test_utils;
 
-use solana_rbpf::{
-    elf::Executable,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
-    syscalls,
-    vm::{Config, TestContextObject},
-};
+use solana_sbpf::{elf::Executable, program::BuiltinProgram, vm::Config};
 use std::{fs::File, io::Read, sync::Arc};
 use test::Bencher;
+use test_utils::{syscalls, TestContextObject};
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
-    let mut function_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-    function_registry
-        .register_function_hashed(*b"log", syscalls::SyscallString::vm)
+    let mut loader = BuiltinProgram::new_loader(Config::default());
+    loader
+        .register_function("log", syscalls::SyscallString::vm)
         .unwrap();
-    Arc::new(BuiltinProgram::new_loader(
-        Config::default(),
-        function_registry,
-    ))
+    Arc::new(loader)
 }
 
 #[bench]
-fn bench_load_sbpfv1(bencher: &mut Bencher) {
-    let mut file = File::open("tests/elfs/syscall_reloc_64_32.so").unwrap();
-    let mut elf = Vec::new();
-    file.read_to_end(&mut elf).unwrap();
-    let loader = loader();
-    bencher.iter(|| Executable::<TestContextObject>::from_elf(&elf, loader.clone()).unwrap());
-}
-
-#[bench]
-fn bench_load_sbpfv2(bencher: &mut Bencher) {
-    let mut file = File::open("tests/elfs/syscall_static.so").unwrap();
+fn bench_load_sbpfv0(bencher: &mut Bencher) {
+    let mut file = File::open("tests/elfs/syscall_reloc_64_32_sbpfv0.so").unwrap();
     let mut elf = Vec::new();
     file.read_to_end(&mut elf).unwrap();
     let loader = loader();

@@ -19,10 +19,21 @@ use crate::{
     interpreter::Interpreter,
     memory_region::MemoryMapping,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::{Analysis, TraceLogEntry},
+    static_analysis::Analysis,
 };
-use rand::Rng;
-use std::{collections::BTreeMap, fmt::Debug, sync::Arc};
+use std::{collections::BTreeMap, fmt::Debug};
+
+#[cfg(not(feature = "shuttle-test"))]
+use {
+    rand::{thread_rng, Rng},
+    std::sync::Arc,
+};
+
+#[cfg(feature = "shuttle-test")]
+use shuttle::{
+    rand::{thread_rng, Rng},
+    sync::Arc,
+};
 
 /// Shift the RUNTIME_ENVIRONMENT_KEY by this many bits to the LSB
 ///
@@ -33,11 +44,11 @@ static RUNTIME_ENVIRONMENT_KEY: std::sync::OnceLock<i32> = std::sync::OnceLock::
 /// Returns (and if not done before generates) the encryption key for the VM pointer
 pub fn get_runtime_environment_key() -> i32 {
     *RUNTIME_ENVIRONMENT_KEY
-        .get_or_init(|| rand::thread_rng().gen::<i32>() >> PROGRAM_ENVIRONMENT_KEY_SHIFT)
+        .get_or_init(|| thread_rng().gen::<i32>() >> PROGRAM_ENVIRONMENT_KEY_SHIFT)
 }
 
 /// VM configuration settings
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// Maximum call depth
     pub max_call_depth: usize,
@@ -61,20 +72,12 @@ pub struct Config {
     pub noop_instruction_rate: u32,
     /// Enable disinfection of immediate values and offsets provided by the user in JIT
     pub sanitize_user_provided_values: bool,
-    /// Throw ElfError::SymbolHashCollision when a BPF function collides with a registered syscall
-    pub external_internal_function_hash_collision: bool,
-    /// Have the verifier reject "callx r10"
-    pub reject_callx_r10: bool,
     /// Avoid copying read only sections when possible
     pub optimize_rodata: bool,
-    /// Use the new ELF parser
-    pub new_elf_parser: bool,
     /// Use aligned memory mapping
     pub aligned_memory_mapping: bool,
-    /// Allow ExecutableCapability::V1
-    pub enable_sbpf_v1: bool,
-    /// Allow ExecutableCapability::V2
-    pub enable_sbpf_v2: bool,
+    /// Allowed [SBPFVersion]s
+    pub enabled_sbpf_versions: std::ops::RangeInclusive<SBPFVersion>,
 }
 
 impl Config {
@@ -98,13 +101,9 @@ impl Default for Config {
             reject_broken_elfs: false,
             noop_instruction_rate: 256,
             sanitize_user_provided_values: true,
-            external_internal_function_hash_collision: true,
-            reject_callx_r10: true,
             optimize_rodata: true,
-            new_elf_parser: true,
             aligned_memory_mapping: true,
-            enable_sbpf_v1: true,
-            enable_sbpf_v2: true,
+            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V3,
         }
     }
 }
@@ -136,51 +135,6 @@ pub trait ContextObject {
     fn consume(&mut self, amount: u64);
     /// Get the number of remaining instructions allowed
     fn get_remaining(&self) -> u64;
-}
-
-/// Simple instruction meter for testing
-#[derive(Debug, Clone, Default)]
-pub struct TestContextObject {
-    /// Contains the register state at every instruction in order of execution
-    pub trace_log: Vec<TraceLogEntry>,
-    /// Maximal amount of instructions which still can be executed
-    pub remaining: u64,
-}
-
-impl ContextObject for TestContextObject {
-    fn trace(&mut self, state: [u64; 12]) {
-        self.trace_log.push(state);
-    }
-
-    fn consume(&mut self, amount: u64) {
-        self.remaining = self.remaining.saturating_sub(amount);
-    }
-
-    fn get_remaining(&self) -> u64 {
-        self.remaining
-    }
-}
-
-impl TestContextObject {
-    /// Initialize with instruction meter
-    pub fn new(remaining: u64) -> Self {
-        Self {
-            trace_log: Vec::new(),
-            remaining,
-        }
-    }
-
-    /// Compares an interpreter trace and a JIT trace.
-    ///
-    /// The log of the JIT can be longer because it only validates the instruction meter at branches.
-    pub fn compare_trace_log(interpreter: &Self, jit: &Self) -> bool {
-        let interpreter = interpreter.trace_log.as_slice();
-        let mut jit = jit.trace_log.as_slice();
-        if jit.len() > interpreter.len() {
-            jit = &jit[0..interpreter.len()];
-        }
-        interpreter == jit
-    }
 }
 
 /// Statistic of taken branches (from a recorded trace)
@@ -228,23 +182,48 @@ pub struct CallFrame {
     pub target_pc: u64,
 }
 
+/// Indices of slots inside [EbpfVm]
+pub enum RuntimeEnvironmentSlot {
+    /// [EbpfVm::host_stack_pointer]
+    HostStackPointer = 0,
+    /// [EbpfVm::call_depth]
+    CallDepth = 1,
+    /// [EbpfVm::context_object_pointer]
+    ContextObjectPointer = 2,
+    /// [EbpfVm::previous_instruction_meter]
+    PreviousInstructionMeter = 3,
+    /// [EbpfVm::due_insn_count]
+    DueInsnCount = 4,
+    /// [EbpfVm::stopwatch_numerator]
+    StopwatchNumerator = 5,
+    /// [EbpfVm::stopwatch_denominator]
+    StopwatchDenominator = 6,
+    /// [EbpfVm::registers]
+    Registers = 7,
+    /// [EbpfVm::program_result]
+    ProgramResult = 19,
+    /// [EbpfVm::memory_mapping]
+    MemoryMapping = 27,
+}
+
 /// A virtual machine to run eBPF programs.
 ///
 /// # Examples
 ///
 /// ```
-/// use solana_rbpf::{
+/// use solana_sbpf::{
 ///     aligned_memory::AlignedMemory,
 ///     ebpf,
 ///     elf::Executable,
 ///     memory_region::{MemoryMapping, MemoryRegion},
 ///     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
 ///     verifier::RequisiteVerifier,
-///     vm::{Config, EbpfVm, TestContextObject},
+///     vm::{Config, EbpfVm},
 /// };
+/// use test_utils::TestContextObject;
 ///
 /// let prog = &[
-///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
+///     0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
 /// ];
 /// let mem = &mut [
 ///     0xaa, 0xbb, 0x11, 0x22, 0xcc, 0xdd
@@ -252,7 +231,7 @@ pub struct CallFrame {
 ///
 /// let loader = std::sync::Arc::new(BuiltinProgram::new_mock());
 /// let function_registry = FunctionRegistry::default();
-/// let mut executable = Executable::<TestContextObject>::from_text_bytes(prog, loader.clone(), SBPFVersion::V2, function_registry).unwrap();
+/// let mut executable = Executable::<TestContextObject>::from_text_bytes(prog, loader.clone(), SBPFVersion::V3, function_registry).unwrap();
 /// executable.verify::<RequisiteVerifier>().unwrap();
 /// let mut context_object = TestContextObject::new(1);
 /// let sbpf_version = executable.get_sbpf_version();
@@ -288,13 +267,6 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// Incremented on calls and decremented on exits. It's used to enforce
     /// config.max_call_depth and to know when to terminate execution.
     pub call_depth: u64,
-    /// Guest stack pointer (r11).
-    ///
-    /// The stack pointer isn't exposed as an actual register. Only sub and add
-    /// instructions (typically generated by the LLVM backend) are allowed to
-    /// access it when sbpf_version.dynamic_stack_frames()=true. Its value is only
-    /// stored here and therefore the register is not tracked in REGISTER_MAP.
-    pub stack_pointer: u64,
     /// Pointer to ContextObject
     pub context_object_pointer: &'a mut C,
     /// Last return value of instruction_meter.get_remaining()
@@ -324,13 +296,14 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
     /// Creates a new virtual machine instance.
     pub fn new(
         loader: Arc<BuiltinProgram<C>>,
-        sbpf_version: &SBPFVersion,
+        sbpf_version: SBPFVersion,
         context_object: &'a mut C,
         mut memory_mapping: MemoryMapping<'a>,
         stack_len: usize,
     ) -> Self {
         let config = loader.get_config();
-        let stack_pointer =
+        let mut registers = [0u64; 12];
+        registers[ebpf::FRAME_PTR_REG] =
             ebpf::MM_STACK_START.saturating_add(if sbpf_version.dynamic_stack_frames() {
                 // the stack is fully descending, frames start as empty and change size anytime r11 is modified
                 stack_len
@@ -344,13 +317,12 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         EbpfVm {
             host_stack_pointer: std::ptr::null_mut(),
             call_depth: 0,
-            stack_pointer,
             context_object_pointer: context_object,
             previous_instruction_meter: 0,
             due_insn_count: 0,
             stopwatch_numerator: 0,
             stopwatch_denominator: 0,
-            registers: [0u64; 12],
+            registers,
             program_result: ProgramResult::Ok(0),
             memory_mapping,
             call_frames: vec![CallFrame::default(); config.max_call_depth],
@@ -369,16 +341,10 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         interpreted: bool,
     ) -> (u64, ProgramResult) {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
-        // R1 points to beginning of input memory, R10 to the stack of the first frame, R11 is the pc (hidden)
         self.registers[1] = ebpf::MM_INPUT_START;
-        self.registers[ebpf::FRAME_PTR_REG] = self.stack_pointer;
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
-        let initial_insn_count = if config.enable_instruction_meter {
-            self.context_object_pointer.get_remaining()
-        } else {
-            0
-        };
+        let initial_insn_count = self.context_object_pointer.get_remaining();
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);

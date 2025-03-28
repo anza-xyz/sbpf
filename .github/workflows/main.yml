@@ -1,4 +1,4 @@
-name: rbpf
+name: sbpf
 
 on:
   push:
@@ -31,12 +31,13 @@ jobs:
       run: |
         cargo fmt --all -- --check
         cargo clippy --all --tests -- --deny=warnings
-      if: matrix.rust == 'nightly'
+      if: matrix.rust == 'beta'
       shell: bash
     - name: Build and test
       run: |
         export RUSTFLAGS="-D warnings"
         cargo build --verbose
+        cargo build --features="shuttle-test"
         cargo test --verbose
         cargo test --test exercise_instructions --verbose
       shell: bash
@@ -44,7 +45,7 @@ jobs:
       run: |
         cargo fmt --all --manifest-path cli/Cargo.toml -- --check
         cargo clippy --all --tests --manifest-path cli/Cargo.toml -- --deny=warnings
-      if: matrix.rust == 'nightly'
+      if: matrix.rust == 'beta'
       shell: bash
     - name: CLI - Build and test
       run: |

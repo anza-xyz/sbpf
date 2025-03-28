@@ -3,7 +3,7 @@
 
 use std::num::NonZeroI32;
 
-use solana_rbpf::insn_builder::{Arch, BpfCode, Cond, Endian, Instruction, MemSize, Move, Source};
+use solana_sbpf::insn_builder::{Arch, BpfCode, Cond, Endian, Instruction, MemSize, Move, Source};
 
 #[derive(arbitrary::Arbitrary, Debug, Eq, PartialEq, Copy, Clone)]
 pub struct Register(u8);

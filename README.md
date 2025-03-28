@@ -1,15 +1,13 @@
-# solana_rbpf
+# solana-sbpf
 
-![](misc/rbpf_256.png)
+SBPF virtual machine
 
-Rust (user-space) virtual machine for eBPF
-
-[![Build Status](https://github.com/solana-labs/rbpf/actions/workflows/main.yml/badge.svg)](https://github.com/solana-labs/rbpf/actions/workflows/main.yml)
-[![Crates.io](https://img.shields.io/crates/v/solana_rbpf.svg)](https://crates.io/crates/solana_rbpf)
+[![Build Status](https://github.com/anza-xyz/sbpf/actions/workflows/main.yml/badge.svg)](https://github.com/anza-xyz/sbpf/actions/workflows/main.yml)
+[![Crates.io](https://img.shields.io/crates/v/solana-sbpf.svg)](https://crates.io/crates/solana-sbpf)
 
 ## Description
 
-This is a fork of [RBPF](https://github.com/qmonnet/rbpf) by Quentin Monnet.
+This is a fork of [RBPF](https://github.com/solana-labs/rbpf) which in turn is a fork of [RBPF](https://github.com/qmonnet/rbpf) by Quentin Monnet.
 
 This crate contains a virtual machine for eBPF program execution. BPF, as in
 _Berkeley Packet Filter_, is an assembly-like language initially developed for
@@ -26,13 +24,13 @@ although the JIT-compiler does not work with Windows at this time.
 
 ## Link to the crate
 
-This crate is available from [crates.io](https://crates.io/crates/solana_rbpf),
+This crate is available from [crates.io](https://crates.io/crates/solana-sbpf),
 so it should work out of the box by adding it as a dependency in your
 `Cargo.toml` file:
 
 ```toml
 [dependencies]
-solana_rbpf = "0.8.1"
+solana-sbpf = "0.10.0"
 ```
 
 You can also use the development version from this GitHub repository. This
@@ -40,7 +38,7 @@ should be as simple as putting this inside your `Cargo.toml`:
 
 ```toml
 [dependencies]
-solana_rbpf = { git = "https://github.com/solana-labs/rbpf", branch = "main" }
+solana-sbpf = { git = "https://github.com/anza-xyz/sbpf", branch = "main" }
 ```
 
 Of course, if you prefer, you can clone it locally, possibly hack the crate,
@@ -48,26 +46,26 @@ and then indicate the path of your local version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-solana_rbpf = { path = "path/to/solana_rbpf" }
+solana-sbpf = { path = "path/to/sbpf" }
 ```
 
 Then indicate in your source code that you want to use the crate:
 
 ```rust,ignore
-extern crate solana_rbpf;
+extern crate solana_sbpf;
 ```
 
 ## API
 
 The API is pretty well documented inside the source code. You should also be
 able to access [an online version of the documentation from
-here](https://docs.rs/solana_rbpf/), automatically generated from the
-[crates.io](https://crates.io/crates/solana_rbpf)
+here](https://docs.rs/solana-sbpf/), automatically generated from the
+[crates.io](https://crates.io/crates/solana-sbpf)
 version (may not be up-to-date with master branch).
 [Examples](examples), [unit tests](tests) and [performance benchmarks](benches)
 should also prove helpful.
 
-Here are the steps to follow to run an eBPF program with rbpf:
+Here are the steps to follow to run an SBPF:
 
 1. Create the config and a loader built-in program, add some functions.
 2. Create an executable, either from the bytecode or an ELF.
@@ -81,7 +79,7 @@ Here are the steps to follow to run an eBPF program with rbpf:
 ## Developer
 
 ### Dependencies
-- rustc version 1.72 or higher
+- rustc version 1.83 or higher
 
 ### Build and test instructions
 - To build run `cargo build`
@@ -90,7 +88,7 @@ Here are the steps to follow to run an eBPF program with rbpf:
 ## License
 
 Following the effort of the Rust language project itself in order to ease
-integration with other projects, the rbpf crate is distributed under the terms
+integration with other projects, the sbpf crate is distributed under the terms
 of both the MIT license and the Apache License (Version 2.0).
 
 See [LICENSE-APACHE](LICENSE-APACHE) and [LICENSE-MIT](LICENSE-MIT) for details.

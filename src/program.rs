@@ -9,67 +9,93 @@ use {
 };
 
 /// Defines a set of sbpf_version of an executable
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]
 pub enum SBPFVersion {
     /// The legacy format
+    V0,
+    /// SIMD-0166
     V1,
-    /// The current format
+    /// SIMD-0174, SIMD-0173
     V2,
-    /// The future format with BTF support
+    /// SIMD-0178, SIMD-0179, SIMD-0189
     V3,
+    /// Used for future versions
+    Reserved,
 }
 
 impl SBPFVersion {
-    /// Enable the little-endian byte swap instructions
-    pub fn enable_le(&self) -> bool {
-        self == &SBPFVersion::V1
+    /// Enable SIMD-0166: SBPF dynamic stack frames
+    pub fn dynamic_stack_frames(self) -> bool {
+        self >= SBPFVersion::V1
     }
 
-    /// Enable the negation instruction
-    pub fn enable_neg(&self) -> bool {
-        self == &SBPFVersion::V1
+    /// Enable SIMD-0174: SBPF arithmetics improvements
+    pub fn enable_pqr(self) -> bool {
+        self >= SBPFVersion::V2
+    }
+    /// ... SIMD-0174
+    pub fn explicit_sign_extension_of_results(self) -> bool {
+        self >= SBPFVersion::V2
+    }
+    /// ... SIMD-0174
+    pub fn swap_sub_reg_imm_operands(self) -> bool {
+        self >= SBPFVersion::V2
+    }
+    /// ... SIMD-0174
+    pub fn disable_neg(self) -> bool {
+        self >= SBPFVersion::V2
     }
 
-    /// Swaps the reg and imm operands of the subtraction instruction
-    pub fn swap_sub_reg_imm_operands(&self) -> bool {
-        self != &SBPFVersion::V1
+    /// Enable SIMD-0173: SBPF instruction encoding improvements
+    pub fn callx_uses_src_reg(self) -> bool {
+        self >= SBPFVersion::V2
+    }
+    /// ... SIMD-0173
+    pub fn disable_lddw(self) -> bool {
+        self >= SBPFVersion::V2
+    }
+    /// ... SIMD-0173
+    pub fn disable_le(self) -> bool {
+        self >= SBPFVersion::V2
+    }
+    /// ... SIMD-0173
+    pub fn move_memory_instruction_classes(self) -> bool {
+        self >= SBPFVersion::V2
     }
 
-    /// Enable the only two slots long instruction: LD_DW_IMM
-    pub fn enable_lddw(&self) -> bool {
-        self == &SBPFVersion::V1
+    /// Enable SIMD-0178: SBPF Static Syscalls
+    /// Enable SIMD-0179: SBPF stricter verification constraints
+    pub fn static_syscalls(self) -> bool {
+        self >= SBPFVersion::V3
     }
-
-    /// Enable the BPF_PQR instruction class
-    pub fn enable_pqr(&self) -> bool {
-        self != &SBPFVersion::V1
+    /// Enable SIMD-0189: SBPF stricter ELF headers
+    pub fn enable_stricter_elf_headers(self) -> bool {
+        self >= SBPFVersion::V3
     }
-
-    /// Use src reg instead of imm in callx
-    pub fn callx_uses_src_reg(&self) -> bool {
-        self != &SBPFVersion::V1
+    /// ... SIMD-0189
+    pub fn enable_lower_bytecode_vaddr(self) -> bool {
+        self >= SBPFVersion::V3
     }
 
     /// Ensure that rodata sections don't exceed their maximum allowed size and
     /// overlap with the stack
-    pub fn reject_rodata_stack_overlap(&self) -> bool {
-        self != &SBPFVersion::V1
+    pub fn reject_rodata_stack_overlap(self) -> bool {
+        self != SBPFVersion::V0
     }
 
-    /// Allow sh_addr != sh_offset in elf sections. Used in V2 to align
-    /// section vaddrs to MM_PROGRAM_START.
-    pub fn enable_elf_vaddr(&self) -> bool {
-        self != &SBPFVersion::V1
+    /// Allow sh_addr != sh_offset in elf sections.
+    pub fn enable_elf_vaddr(self) -> bool {
+        self != SBPFVersion::V0
     }
 
-    /// Use dynamic stack frame sizes
-    pub fn dynamic_stack_frames(&self) -> bool {
-        self != &SBPFVersion::V1
-    }
-
-    /// Support syscalls via pseudo calls (insn.src = 0)
-    pub fn static_syscalls(&self) -> bool {
-        self != &SBPFVersion::V1
+    /// Calculate the target program counter for a CALL_IMM instruction depending on
+    /// the SBPF version.
+    pub fn calculate_call_imm_target_pc(self, pc: usize, imm: i64) -> u32 {
+        if self.static_syscalls() {
+            (pc as i64).saturating_add(imm).saturating_add(1) as u32
+        } else {
+            imm as u32
+        }
     }
 }
 
@@ -108,19 +134,7 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
         Ok(())
     }
 
-    /// Register a symbol with an implicit key
-    pub fn register_function_hashed(
-        &mut self,
-        name: impl Into<Vec<u8>>,
-        value: T,
-    ) -> Result<u32, ElfError> {
-        let name = name.into();
-        let key = ebpf::hash_symbol_name(name.as_slice());
-        self.register_function(key, name, value)?;
-        Ok(key)
-    }
-
-    /// Used for transitioning from SBPFv1 to SBPFv2
+    /// Used for transitioning from SBPFv0 to SBPFv3
     pub(crate) fn register_function_hashed_legacy<C: ContextObject>(
         &mut self,
         loader: &BuiltinProgram<C>,
@@ -139,9 +153,7 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
             } else {
                 ebpf::hash_symbol_name(&usize::from(value).to_le_bytes())
             };
-            if config.external_internal_function_hash_collision
-                && loader.get_function_registry().lookup_by_key(hash).is_some()
-            {
+            if loader.get_function_registry().lookup_by_key(hash).is_some() {
                 return Err(ElfError::SymbolHashCollision(hash));
             }
             hash
@@ -216,30 +228,30 @@ pub type BuiltinFunction<C> = fn(*mut EbpfVm<C>, u64, u64, u64, u64, u64);
 pub struct BuiltinProgram<C: ContextObject> {
     /// Holds the Config if this is a loader program
     config: Option<Box<Config>>,
-    /// Function pointers by symbol
-    functions: FunctionRegistry<BuiltinFunction<C>>,
+    /// Function pointers by symbol with sparse indexing
+    sparse_registry: FunctionRegistry<BuiltinFunction<C>>,
 }
 
 impl<C: ContextObject> PartialEq for BuiltinProgram<C> {
     fn eq(&self, other: &Self) -> bool {
-        self.config.eq(&other.config) && self.functions.eq(&other.functions)
+        self.config.eq(&other.config) && self.sparse_registry.eq(&other.sparse_registry)
     }
 }
 
 impl<C: ContextObject> BuiltinProgram<C> {
     /// Constructs a loader built-in program
-    pub fn new_loader(config: Config, functions: FunctionRegistry<BuiltinFunction<C>>) -> Self {
+    pub fn new_loader(config: Config) -> Self {
         Self {
             config: Some(Box::new(config)),
-            functions,
+            sparse_registry: FunctionRegistry::default(),
         }
     }
 
     /// Constructs a built-in program
-    pub fn new_builtin(functions: FunctionRegistry<BuiltinFunction<C>>) -> Self {
+    pub fn new_builtin() -> Self {
         Self {
             config: None,
-            functions,
+            sparse_registry: FunctionRegistry::default(),
         }
     }
 
@@ -247,7 +259,7 @@ impl<C: ContextObject> BuiltinProgram<C> {
     pub fn new_mock() -> Self {
         Self {
             config: Some(Box::default()),
-            functions: FunctionRegistry::default(),
+            sparse_registry: FunctionRegistry::default(),
         }
     }
 
@@ -256,9 +268,9 @@ impl<C: ContextObject> BuiltinProgram<C> {
         self.config.as_ref().unwrap()
     }
 
-    /// Get the function registry
+    /// Get the function registry depending on the SBPF version
     pub fn get_function_registry(&self) -> &FunctionRegistry<BuiltinFunction<C>> {
-        &self.functions
+        &self.sparse_registry
     }
 
     /// Calculate memory size
@@ -269,18 +281,35 @@ impl<C: ContextObject> BuiltinProgram<C> {
             } else {
                 0
             })
-            .saturating_add(self.functions.mem_size())
+            .saturating_add(self.sparse_registry.mem_size())
+    }
+
+    /// Register a function both in the sparse and dense registries
+    pub fn register_function(
+        &mut self,
+        name: &str,
+        value: BuiltinFunction<C>,
+    ) -> Result<(), ElfError> {
+        let key = ebpf::hash_symbol_name(name.as_bytes());
+        self.sparse_registry
+            .register_function(key, name, value)
+            .map(|_| ())
     }
 }
 
 impl<C: ContextObject> std::fmt::Debug for BuiltinProgram<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        writeln!(f, "{:?}", unsafe {
-            // `derive(Debug)` does not know that `C: ContextObject` does not need to implement `Debug`
-            std::mem::transmute::<&FunctionRegistry<BuiltinFunction<C>>, &FunctionRegistry<usize>>(
-                &self.functions,
-            )
-        })?;
+        unsafe {
+            writeln!(
+                f,
+                "registry: {:?}",
+                // `derive(Debug)` does not know that `C: ContextObject` does not need to implement `Debug`
+                std::mem::transmute::<
+                    &FunctionRegistry<BuiltinFunction<C>>,
+                    &FunctionRegistry<usize>,
+                >(&self.sparse_registry),
+            )?;
+        }
         Ok(())
     }
 }
@@ -340,40 +369,4 @@ macro_rules! declare_builtin_function {
             }
         }
     };
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{syscalls, vm::TestContextObject};
-
-    #[test]
-    fn test_builtin_program_eq() {
-        let mut function_registry_a =
-            FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-        function_registry_a
-            .register_function_hashed(*b"log", syscalls::SyscallString::vm)
-            .unwrap();
-        function_registry_a
-            .register_function_hashed(*b"log_64", syscalls::SyscallU64::vm)
-            .unwrap();
-        let mut function_registry_b =
-            FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-        function_registry_b
-            .register_function_hashed(*b"log_64", syscalls::SyscallU64::vm)
-            .unwrap();
-        function_registry_b
-            .register_function_hashed(*b"log", syscalls::SyscallString::vm)
-            .unwrap();
-        let mut function_registry_c =
-            FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
-        function_registry_c
-            .register_function_hashed(*b"log_64", syscalls::SyscallU64::vm)
-            .unwrap();
-        let builtin_program_a = BuiltinProgram::new_loader(Config::default(), function_registry_a);
-        let builtin_program_b = BuiltinProgram::new_loader(Config::default(), function_registry_b);
-        assert_eq!(builtin_program_a, builtin_program_b);
-        let builtin_program_c = BuiltinProgram::new_loader(Config::default(), function_registry_c);
-        assert_ne!(builtin_program_a, builtin_program_c);
-    }
 }
