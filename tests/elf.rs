@@ -9,7 +9,7 @@ use solana_sbpf::{
         types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr, Elf64Sym},
         Elf64, ElfParserError, SECTION_NAME_LENGTH_MAXIMUM,
     },
-    error::ProgramResult,
+    memory_region::{AccessType, MemoryMapping},
     program::{BuiltinProgram, SBPFVersion},
     vm::Config,
 };
@@ -478,23 +478,32 @@ fn test_owned_ro_region_no_initial_gap() {
     let ro_section =
         ElfExecutable::parse_ro_sections(&config, &SBPFVersion::V0, sections, &elf_bytes).unwrap();
     let ro_region = get_ro_region(&ro_section, &elf_bytes);
+    let memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
     let owned_section = match &ro_section {
         Section::Owned(_offset, data) => data.as_slice(),
         _ => panic!(),
     };
 
     // [0..s3.sh_addr + s3.sh_size] is the valid ro memory area
-    assert!(matches!(
-        ro_region.vm_to_host(ebpf::MM_RODATA_START, s3.sh_addr + s3.sh_size),
-        ProgramResult::Ok(ptr) if ptr == owned_section.as_ptr() as u64,
-    ));
+    assert_eq!(
+        memory_mapping
+            .map(
+                AccessType::Load,
+                ebpf::MM_RODATA_START,
+                s3.sh_addr + s3.sh_size
+            )
+            .unwrap(),
+        owned_section.as_ptr() as u64,
+    );
 
     // one byte past the ro section is not mappable
-    assert_error!(
-        ro_region.vm_to_host(ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size, 1),
-        "InvalidVirtualAddress({})",
-        ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size
-    );
+    memory_mapping
+        .map(
+            AccessType::Load,
+            ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size,
+            1,
+        )
+        .unwrap_err();
 }
 
 #[test]
@@ -519,6 +528,7 @@ fn test_owned_ro_region_initial_gap_mappable() {
     let ro_section =
         ElfExecutable::parse_ro_sections(&config, &SBPFVersion::V0, sections, &elf_bytes).unwrap();
     let ro_region = get_ro_region(&ro_section, &elf_bytes);
+    let memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
     let owned_section = match &ro_section {
         Section::Owned(_offset, data) => data.as_slice(),
         _ => panic!(),
@@ -527,17 +537,25 @@ fn test_owned_ro_region_initial_gap_mappable() {
     // [s1.sh_addr..s3.sh_addr + s3.sh_size] is where the readonly data is.
     // But for backwards compatibility (config.optimize_rodata=false)
     // [0..s1.sh_addr] is mappable too (and zeroed).
-    assert!(matches!(
-        ro_region.vm_to_host(ebpf::MM_RODATA_START, s3.sh_addr + s3.sh_size),
-        ProgramResult::Ok(ptr) if ptr == owned_section.as_ptr() as u64,
-    ));
+    assert_eq!(
+        memory_mapping
+            .map(
+                AccessType::Load,
+                ebpf::MM_RODATA_START,
+                s3.sh_addr + s3.sh_size
+            )
+            .unwrap(),
+        owned_section.as_ptr() as u64,
+    );
 
     // one byte past the ro section is not mappable
-    assert_error!(
-        ro_region.vm_to_host(ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size, 1),
-        "InvalidVirtualAddress({})",
-        ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size
-    );
+    memory_mapping
+        .map(
+            AccessType::Load,
+            ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size,
+            1,
+        )
+        .unwrap_err();
 }
 
 #[test]
@@ -562,38 +580,40 @@ fn test_owned_ro_region_initial_gap_map_error() {
         _ => panic!(),
     };
     let ro_region = get_ro_region(&ro_section, &elf_bytes);
+    let memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
 
     // s1 starts at sh_addr=10 so [MM_RODATA_START..MM_RODATA_START + 10] is not mappable
 
     // the low bound of the initial gap is not mappable
-    assert_error!(
-        ro_region.vm_to_host(ebpf::MM_RODATA_START, 1),
-        "InvalidVirtualAddress({})",
-        ebpf::MM_RODATA_START
-    );
+    memory_mapping
+        .map(AccessType::Load, ebpf::MM_RODATA_START, 1)
+        .unwrap_err();
 
     // the hi bound of the initial gap is not mappable
-    assert_error!(
-        ro_region.vm_to_host(ebpf::MM_RODATA_START + s1.sh_addr - 1, 1),
-        "InvalidVirtualAddress({})",
-        ebpf::MM_RODATA_START + 9
-    );
+    memory_mapping
+        .map(AccessType::Load, ebpf::MM_RODATA_START + s1.sh_addr - 1, 1)
+        .unwrap_err();
 
     // [s1.sh_addr..s3.sh_addr + s3.sh_size] is the valid ro memory area
-    assert!(matches!(
-        ro_region.vm_to_host(
-            ebpf::MM_RODATA_START + s1.sh_addr,
-            s3.sh_addr + s3.sh_size - s1.sh_addr
-        ),
-        ProgramResult::Ok(ptr) if ptr == owned_section.as_ptr() as u64,
-    ));
+    assert_eq!(
+        memory_mapping
+            .map(
+                AccessType::Load,
+                ebpf::MM_RODATA_START + s1.sh_addr,
+                s3.sh_addr + s3.sh_size - s1.sh_addr
+            )
+            .unwrap(),
+        owned_section.as_ptr() as u64,
+    );
 
     // one byte past the ro section is not mappable
-    assert_error!(
-        ro_region.vm_to_host(ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size, 1),
-        "InvalidVirtualAddress({})",
-        ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size
-    );
+    memory_mapping
+        .map(
+            AccessType::Load,
+            ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size,
+            1,
+        )
+        .unwrap_err();
 }
 
 #[test]
@@ -669,20 +689,25 @@ fn test_borrowed_ro_region_no_initial_gap() {
         let ro_section =
             ElfExecutable::parse_ro_sections(&config, &sbpf_version, sections, &elf_bytes).unwrap();
         let ro_region = get_ro_region(&ro_section, &elf_bytes);
+        let memory_mapping = MemoryMapping::new(vec![ro_region], &config, sbpf_version).unwrap();
 
         // s1 starts at sh_offset=0 so [0..s2.sh_offset + s2.sh_size]
         // is the valid ro memory area
-        assert!(matches!(
-            ro_region.vm_to_host(ebpf::MM_RODATA_START + s1.sh_offset, s2.sh_offset + s2.sh_size),
-            ProgramResult::Ok(ptr) if ptr == elf_bytes.as_ptr() as u64,
-        ));
+        assert_eq!(
+            memory_mapping
+                .map(
+                    AccessType::Load,
+                    ebpf::MM_RODATA_START + s1.sh_offset,
+                    s2.sh_offset + s2.sh_size
+                )
+                .unwrap(),
+            elf_bytes.as_ptr() as u64,
+        );
 
         // one byte past the ro section is not mappable
-        assert_error!(
-            ro_region.vm_to_host(ebpf::MM_RODATA_START + s3.sh_offset, 1),
-            "InvalidVirtualAddress({})",
-            ebpf::MM_RODATA_START + s3.sh_offset
-        );
+        memory_mapping
+            .map(AccessType::Load, ebpf::MM_RODATA_START + s3.sh_offset, 1)
+            .unwrap_err();
     }
 }
 
@@ -705,38 +730,44 @@ fn test_borrowed_ro_region_initial_gap() {
         let ro_section =
             ElfExecutable::parse_ro_sections(&config, &sbpf_version, sections, &elf_bytes).unwrap();
         let ro_region = get_ro_region(&ro_section, &elf_bytes);
+        let memory_mapping = MemoryMapping::new(vec![ro_region], &config, sbpf_version).unwrap();
 
         // s2 starts at sh_addr=10 so [0..10] is not mappable
 
         // the low bound of the initial gap is not mappable
-        assert_error!(
-            ro_region.vm_to_host(ebpf::MM_RODATA_START + s1.sh_offset, 1),
-            "InvalidVirtualAddress({})",
-            ebpf::MM_RODATA_START + s1.sh_offset
-        );
+        memory_mapping
+            .map(AccessType::Load, ebpf::MM_RODATA_START + s1.sh_offset, 1)
+            .unwrap_err();
 
         // the hi bound of the initial gap is not mappable
-        assert_error!(
-            ro_region.vm_to_host(ebpf::MM_RODATA_START + s2.sh_offset - 1, 1),
-            "InvalidVirtualAddress({})",
-            ebpf::MM_RODATA_START + s2.sh_offset - 1
-        );
+        memory_mapping
+            .map(
+                AccessType::Load,
+                ebpf::MM_RODATA_START + s2.sh_offset - 1,
+                1,
+            )
+            .unwrap_err();
 
         // [s2.sh_offset..s3.sh_offset + s3.sh_size] is the valid ro memory area
-        assert!(matches!(
-            ro_region.vm_to_host(
-                ebpf::MM_RODATA_START + s2.sh_offset,
-                s3.sh_offset + s3.sh_size - s2.sh_offset
-            ),
-            ProgramResult::Ok(ptr) if ptr == elf_bytes[s2.sh_offset as usize..].as_ptr() as u64,
-        ));
+        assert_eq!(
+            memory_mapping
+                .map(
+                    AccessType::Load,
+                    ebpf::MM_RODATA_START + s2.sh_offset,
+                    s3.sh_offset + s3.sh_size - s2.sh_offset
+                )
+                .unwrap(),
+            elf_bytes[s2.sh_offset as usize..].as_ptr() as u64,
+        );
 
         // one byte past the ro section is not mappable
-        assert_error!(
-            ro_region.vm_to_host(ebpf::MM_RODATA_START + s3.sh_offset + s3.sh_size, 1),
-            "InvalidVirtualAddress({})",
-            ebpf::MM_RODATA_START + s3.sh_offset + s3.sh_size
-        );
+        memory_mapping
+            .map(
+                AccessType::Load,
+                ebpf::MM_RODATA_START + s3.sh_offset + s3.sh_size,
+                1,
+            )
+            .unwrap_err();
     }
 }
 
