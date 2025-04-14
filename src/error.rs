@@ -45,9 +45,6 @@ pub enum EbpfError {
     /// Program has not been JIT-compiled
     #[error("program has not been JIT-compiled")]
     JitNotCompiled,
-    /// Invalid virtual address
-    #[error("invalid virtual address {0:x?}")]
-    InvalidVirtualAddress(u64),
     /// Memory region index or virtual address space is invalid
     #[error("Invalid memory region at index {0}")]
     InvalidMemoryRegion(usize),
