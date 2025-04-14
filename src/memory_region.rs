@@ -120,12 +120,12 @@ impl MemoryRegion {
     }
 
     /// Convert a virtual machine address into a host address
-    pub fn vm_to_host(&self, vm_addr: u64, len: u64) -> ProgramResult {
+    pub fn vm_to_host(&self, vm_addr: u64, len: u64) -> Option<u64> {
         // This can happen if a region starts at an offset from the base region
         // address, eg with rodata regions if config.optimize_rodata = true, see
         // Elf::get_ro_region.
         if vm_addr < self.vm_addr {
-            return ProgramResult::Err(EbpfError::InvalidVirtualAddress(vm_addr));
+            return None;
         }
 
         let begin_offset = vm_addr.saturating_sub(self.vm_addr);
@@ -139,10 +139,10 @@ impl MemoryRegion {
             (begin_offset & gap_mask).checked_shr(1).unwrap_or(0) | (begin_offset & !gap_mask);
         if let Some(end_offset) = gapped_offset.checked_add(len) {
             if end_offset <= self.len && !is_in_gap {
-                return ProgramResult::Ok(self.host_addr.get().saturating_add(gapped_offset));
+                return Some(self.host_addr.get().saturating_add(gapped_offset));
             }
         }
-        ProgramResult::Err(EbpfError::InvalidVirtualAddress(vm_addr))
+        None
     }
 }
 
@@ -341,7 +341,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         };
 
         if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
-            if let ProgramResult::Ok(host_addr) = region.vm_to_host(vm_addr, len) {
+            if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                 return ProgramResult::Ok(host_addr);
             }
         }
@@ -365,7 +365,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
 
         let mut region = match self.find_region(cache, vm_addr) {
             Some(region) => {
-                if let ProgramResult::Ok(host_addr) = region.vm_to_host(vm_addr, len) {
+                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     // fast path
                     return ProgramResult::Ok(unsafe {
                         ptr::read_unaligned::<T>(host_addr as *const _).into()
@@ -396,7 +396,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
             if load_len == 0 {
                 break;
             }
-            if let ProgramResult::Ok(host_addr) = region.vm_to_host(vm_addr, load_len) {
+            if let Some(host_addr) = region.vm_to_host(vm_addr, load_len) {
                 // Safety:
                 // we debug_assert!(len <= mem::size_of::<u64>()) so we never
                 // overflow &value
@@ -445,7 +445,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         let mut region = match self.find_region(cache, vm_addr) {
             Some(region) if ensure_writable_region(region, &self.cow_cb) => {
                 // fast path
-                if let ProgramResult::Ok(host_addr) = region.vm_to_host(vm_addr, len) {
+                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     // Safety:
                     // vm_to_host() succeeded so we know there's enough space to
                     // store `value`
@@ -478,7 +478,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
             if write_len == 0 {
                 break;
             }
-            if let ProgramResult::Ok(host_addr) = region.vm_to_host(vm_addr, write_len) {
+            if let Some(host_addr) = region.vm_to_host(vm_addr, write_len) {
                 // Safety:
                 // vm_to_host() succeeded so we have enough space for write_len
                 unsafe { copy_nonoverlapping(src, host_addr as *mut _, write_len as usize) };
@@ -632,7 +632,7 @@ impl<'a> AlignedMemoryMapping<'a> {
         if (1..self.regions.len()).contains(&index) {
             let region = &self.regions[index];
             if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
-                if let ProgramResult::Ok(host_addr) = region.vm_to_host(vm_addr, len) {
+                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     return ProgramResult::Ok(host_addr);
                 }
             }
