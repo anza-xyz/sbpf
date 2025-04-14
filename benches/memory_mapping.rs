@@ -12,9 +12,7 @@ extern crate test;
 
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use solana_sbpf::{
-    memory_region::{
-        AccessType, AlignedMemoryMapping, MemoryRegion, MemoryState, UnalignedMemoryMapping,
-    },
+    memory_region::{AccessType, AlignedMemoryMapping, MemoryRegion, UnalignedMemoryMapping},
     program::SBPFVersion,
     vm::Config,
 };
@@ -22,7 +20,7 @@ use test::Bencher;
 
 fn generate_memory_regions(
     entries: usize,
-    state: MemoryState,
+    writable: bool,
     mut prng: Option<&mut SmallRng>,
 ) -> (Vec<MemoryRegion>, u64) {
     let mut memory_regions = Vec::with_capacity(entries);
@@ -37,7 +35,7 @@ fn generate_memory_regions(
             &content[..],
             offset,
             0,
-            state,
+            writable,
         ));
         offset += 0x100000000;
     }
@@ -69,7 +67,7 @@ macro_rules! bench_gapped_randomized_access_with_1024_entries {
                         &content[..],
                         0x100000000,
                         frame_size,
-                        MemoryState::Readable,
+                        false,
                     )];
                     let config = Config::default();
                     let memory_mapping =
@@ -142,8 +140,7 @@ macro_rules! bench_randomized_access_with_n_entries {
         #[bench]
         fn $name(bencher: &mut Bencher) {
             let mut prng = new_prng!();
-            let (memory_regions, end_address) =
-                generate_memory_regions($n, MemoryState::Readable, Some(&mut prng));
+            let (memory_regions, end_address) = generate_memory_regions($n, false, Some(&mut prng));
             let config = Config::default();
             let memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             bencher.iter(|| {
@@ -192,7 +189,7 @@ macro_rules! bench_randomized_mapping_with_n_entries {
         fn $name(bencher: &mut Bencher) {
             let mut prng = new_prng!();
             let (memory_regions, _end_address) =
-                generate_memory_regions($n, MemoryState::Readable, Some(&mut prng));
+                generate_memory_regions($n, false, Some(&mut prng));
             let config = Config::default();
             let memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             bencher.iter(|| {
@@ -240,8 +237,7 @@ macro_rules! bench_mapping_with_n_entries {
     (do_bench, $name:ident, $mem:tt, $n:expr) => {
         #[bench]
         fn $name(bencher: &mut Bencher) {
-            let (memory_regions, _end_address) =
-                generate_memory_regions($n, MemoryState::Readable, None);
+            let (memory_regions, _end_address) = generate_memory_regions($n, false, None);
             let config = Config::default();
             let memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             bencher.iter(|| {
