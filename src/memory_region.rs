@@ -515,17 +515,17 @@ impl<'a> UnalignedMemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
-    ) -> Result<&MemoryRegion, EbpfError> {
+    ) -> Result<(usize, &MemoryRegion), EbpfError> {
         // Safety:
         // &mut references to the mapping cache are only created internally from methods that do not
         // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
         // guaranteed to be unique.
         let cache = unsafe { &mut *self.cache.get() };
-        if let Some((_region_index, region)) = self.find_region(cache, vm_addr) {
+        if let Some((region_index, region)) = self.find_region(cache, vm_addr) {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
                 && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
             {
-                return Ok(region);
+                return Ok((region_index, region));
             }
         }
         Err(
@@ -685,7 +685,7 @@ impl<'a> AlignedMemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
-    ) -> Result<&MemoryRegion, EbpfError> {
+    ) -> Result<(usize, &MemoryRegion), EbpfError> {
         let index = vm_addr
             .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
             .unwrap_or(0) as usize;
@@ -694,7 +694,7 @@ impl<'a> AlignedMemoryMapping<'a> {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
                 && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
             {
-                return Ok(region);
+                return Ok((index, region));
             }
         }
         Err(
@@ -825,7 +825,7 @@ impl<'a> MemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
-    ) -> Result<&MemoryRegion, EbpfError> {
+    ) -> Result<(usize, &MemoryRegion), EbpfError> {
         match self {
             MemoryMapping::Identity => Err(EbpfError::InvalidMemoryRegion(0)),
             MemoryMapping::Aligned(m) => m.region(access_type, vm_addr),
@@ -1205,6 +1205,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_INPUT_START)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
@@ -1212,6 +1213,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_INPUT_START + 3)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
@@ -1223,6 +1225,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_INPUT_START + 4)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
@@ -1230,6 +1233,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_INPUT_START + 7)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
@@ -1265,6 +1269,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_RODATA_START)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
@@ -1272,6 +1277,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_RODATA_START + 3)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
@@ -1288,6 +1294,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_STACK_START)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
@@ -1295,6 +1302,7 @@ mod test {
         assert_eq!(
             m.region(AccessType::Load, ebpf::MM_STACK_START + 3)
                 .unwrap()
+                .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
