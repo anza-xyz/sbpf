@@ -290,12 +290,16 @@ impl<'a> UnalignedMemoryMapping<'a> {
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn find_region(&self, cache: &mut MappingCache, vm_addr: u64) -> Option<&MemoryRegion> {
+    fn find_region(
+        &self,
+        cache: &mut MappingCache,
+        vm_addr: u64,
+    ) -> Option<(usize, &MemoryRegion)> {
         if let Some(index) = cache.find(vm_addr) {
             // Safety:
             // Cached index, we validated it before caching it. See the corresponding safety section
             // in the miss branch.
-            Some(unsafe { self.regions.get_unchecked(index - 1) })
+            Some((index - 1, unsafe { self.regions.get_unchecked(index - 1) }))
         } else {
             let mut index = 1;
             while index <= self.region_addresses.len() {
@@ -315,7 +319,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
             // must be contained in region
             let region = unsafe { self.regions.get_unchecked(index - 1) };
             cache.insert(region.vm_addr..region.vm_addr_end, index);
-            Some(region)
+            Some((index - 1, region))
         }
     }
 
@@ -328,7 +332,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         let cache = unsafe { &mut *self.cache.get() };
 
         let region = match self.find_region(cache, vm_addr) {
-            Some(res) => res,
+            Some((_region_index, region)) => region,
             None => {
                 return generate_access_violation(
                     self.config,
@@ -364,7 +368,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         let cache = unsafe { &mut *self.cache.get() };
 
         let mut region = match self.find_region(cache, vm_addr) {
-            Some(region) => {
+            Some((_region_index, region)) => {
                 if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     // fast path
                     return ProgramResult::Ok(unsafe {
@@ -410,7 +414,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
                 }
                 vm_addr = vm_addr.saturating_add(load_len);
                 region = match self.find_region(cache, vm_addr) {
-                    Some(region) => region,
+                    Some((_region_index, region)) => region,
                     None => break,
                 };
             } else {
@@ -443,7 +447,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         let mut src = std::ptr::addr_of!(value).cast::<u8>();
 
         let mut region = match self.find_region(cache, vm_addr) {
-            Some(region) if ensure_writable_region(region, &self.cow_cb) => {
+            Some((_region_index, region)) if ensure_writable_region(region, &self.cow_cb) => {
                 // fast path
                 if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     // Safety:
@@ -489,7 +493,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
                 src = unsafe { src.add(write_len as usize) };
                 vm_addr = vm_addr.saturating_add(write_len);
                 region = match self.find_region(cache, vm_addr) {
-                    Some(region) => region,
+                    Some((_region_index, region)) => region,
                     None => break,
                 };
             } else {
@@ -517,7 +521,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
         // guaranteed to be unique.
         let cache = unsafe { &mut *self.cache.get() };
-        if let Some(region) = self.find_region(cache, vm_addr) {
+        if let Some((_region_index, region)) = self.find_region(cache, vm_addr) {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
                 && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
             {
