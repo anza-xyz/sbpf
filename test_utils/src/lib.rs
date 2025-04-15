@@ -233,7 +233,7 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
     .collect();
 
     Ok(if let Some(cow_cb) = cow_cb {
-        MemoryMapping::new_with_cow(regions, cow_cb, config, sbpf_version)?
+        MemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)?
     } else {
         MemoryMapping::new(regions, config, sbpf_version)?
     })

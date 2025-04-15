@@ -192,7 +192,7 @@ pub struct UnalignedMemoryMapping<'a> {
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
     /// CoW callback
-    cow_cb: Option<MemoryCowCallback>,
+    cow_cb: MemoryCowCallback,
 }
 
 impl fmt::Debug for UnalignedMemoryMapping<'_> {
@@ -202,14 +202,6 @@ impl fmt::Debug for UnalignedMemoryMapping<'_> {
             .field("region_addresses", &self.region_addresses)
             .field("cache", &self.cache)
             .field("config", &self.config)
-            .field(
-                "cow_cb",
-                &self
-                    .cow_cb
-                    .as_ref()
-                    .map(|cb| format!("Some({:p})", &cb))
-                    .unwrap_or_else(|| "None".to_string()),
-            )
             .finish()
     }
 }
@@ -238,11 +230,12 @@ impl<'a> UnalignedMemoryMapping<'a> {
         )
     }
 
-    fn new_internal(
+    /// Creates a new MemoryMapping structure from the given regions
+    pub fn new_with_cow(
         mut regions: Vec<MemoryRegion>,
-        cow_cb: Option<MemoryCowCallback>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
+        cow_cb: MemoryCowCallback,
     ) -> Result<Self, EbpfError> {
         regions.sort();
         for index in 1..regions.len() {
@@ -268,25 +261,15 @@ impl<'a> UnalignedMemoryMapping<'a> {
         Ok(result)
     }
 
-    /// Creates a new UnalignedMemoryMapping structure from the given regions
+    /// Creates a new memory mapping for tests and benches.
+    ///
+    /// `cow_cb` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
-        Self::new_internal(regions, None, config, sbpf_version)
-    }
-
-    /// Creates a new UnalignedMemoryMapping from the given regions.
-    ///
-    /// `cow_cb` is used to copy CoW regions on the first write access.
-    pub fn new_with_cow(
-        regions: Vec<MemoryRegion>,
-        cow_cb: MemoryCowCallback,
-        config: &'a Config,
-        sbpf_version: SBPFVersion,
-    ) -> Result<Self, EbpfError> {
-        Self::new_internal(regions, Some(cow_cb), config, sbpf_version)
+        Self::new_with_cow(regions, config, sbpf_version, Box::new(|_| Err(())))
     }
 
     #[allow(clippy::arithmetic_side_effects)]
@@ -560,7 +543,7 @@ pub struct AlignedMemoryMapping<'a> {
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
     /// CoW callback
-    cow_cb: Option<MemoryCowCallback>,
+    cow_cb: MemoryCowCallback,
 }
 
 impl fmt::Debug for AlignedMemoryMapping<'_> {
@@ -568,24 +551,17 @@ impl fmt::Debug for AlignedMemoryMapping<'_> {
         f.debug_struct("AlignedMemoryMapping")
             .field("regions", &self.regions)
             .field("config", &self.config)
-            .field(
-                "cow_cb",
-                &self
-                    .cow_cb
-                    .as_ref()
-                    .map(|cb| format!("Some({:p})", &cb))
-                    .unwrap_or_else(|| "None".to_string()),
-            )
             .finish()
     }
 }
 
 impl<'a> AlignedMemoryMapping<'a> {
-    fn new_internal(
+    /// Creates a new MemoryMapping structure from the given regions
+    pub fn new_with_cow(
         mut regions: Vec<MemoryRegion>,
-        cow_cb: Option<MemoryCowCallback>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
+        cow_cb: MemoryCowCallback,
     ) -> Result<Self, EbpfError> {
         regions.insert(0, MemoryRegion::new_readonly(&[], 0));
         regions.sort();
@@ -607,25 +583,15 @@ impl<'a> AlignedMemoryMapping<'a> {
         })
     }
 
-    /// Creates a new MemoryMapping structure from the given regions
+    /// Creates a new memory mapping for tests and benches.
+    ///
+    /// `cow_cb` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
-        Self::new_internal(regions, None, config, sbpf_version)
-    }
-
-    /// Creates a new MemoryMapping structure from the given regions.
-    ///
-    /// `cow_cb` is used to copy CoW regions on the first write access.
-    pub fn new_with_cow(
-        regions: Vec<MemoryRegion>,
-        cow_cb: MemoryCowCallback,
-        config: &'a Config,
-        sbpf_version: SBPFVersion,
-    ) -> Result<Self, EbpfError> {
-        Self::new_internal(regions, Some(cow_cb), config, sbpf_version)
+        Self::new_with_cow(regions, config, sbpf_version, Box::new(|_| Err(())))
     }
 
     /// Given a list of regions translate from virtual machine to host address
@@ -751,35 +717,30 @@ impl<'a> MemoryMapping<'a> {
     ///
     /// Uses aligned or unaligned memory mapping depending on the value of
     /// `config.aligned_memory_mapping=true`.
+    pub fn new_with_cow(
+        regions: Vec<MemoryRegion>,
+        config: &'a Config,
+        sbpf_version: SBPFVersion,
+        cow_cb: MemoryCowCallback,
+    ) -> Result<Self, EbpfError> {
+        if config.aligned_memory_mapping {
+            AlignedMemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)
+                .map(MemoryMapping::Aligned)
+        } else {
+            UnalignedMemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)
+                .map(MemoryMapping::Unaligned)
+        }
+    }
+
+    /// Creates a new memory mapping for tests and benches.
+    ///
+    /// `cow_cb` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
-        if config.aligned_memory_mapping {
-            AlignedMemoryMapping::new(regions, config, sbpf_version).map(MemoryMapping::Aligned)
-        } else {
-            UnalignedMemoryMapping::new(regions, config, sbpf_version).map(MemoryMapping::Unaligned)
-        }
-    }
-
-    /// Creates a new memory mapping.
-    ///
-    /// Uses aligned or unaligned memory mapping depending on the value of
-    /// `config.aligned_memory_mapping=true`. `cow_cb` is used to copy CoW memory regions.
-    pub fn new_with_cow(
-        regions: Vec<MemoryRegion>,
-        cow_cb: MemoryCowCallback,
-        config: &'a Config,
-        sbpf_version: SBPFVersion,
-    ) -> Result<Self, EbpfError> {
-        if config.aligned_memory_mapping {
-            AlignedMemoryMapping::new_with_cow(regions, cow_cb, config, sbpf_version)
-                .map(MemoryMapping::Aligned)
-        } else {
-            UnalignedMemoryMapping::new_with_cow(regions, cow_cb, config, sbpf_version)
-                .map(MemoryMapping::Unaligned)
-        }
+        Self::new_with_cow(regions, config, sbpf_version, Box::new(|_| Err(())))
     }
 
     /// Map virtual memory to host memory.
@@ -855,10 +816,10 @@ impl<'a> MemoryMapping<'a> {
 // Ensure that the given region is writable.
 //
 // If the region is CoW, cow_cb is called to execute the CoW operation.
-fn ensure_writable_region(region: &MemoryRegion, cow_cb: &Option<MemoryCowCallback>) -> bool {
-    match (region.state.get(), cow_cb) {
-        (MemoryState::Writable, _) => true,
-        (MemoryState::Cow(cow_id), Some(cb)) => match cb(cow_id) {
+fn ensure_writable_region(region: &MemoryRegion, cow_cb: &MemoryCowCallback) -> bool {
+    match region.state.get() {
+        MemoryState::Writable => true,
+        MemoryState::Cow(cow_id) => match cow_cb(cow_id) {
             Ok(host_addr) => {
                 region.host_addr.replace(host_addr);
                 region.state.replace(MemoryState::Writable);
@@ -1695,12 +1656,12 @@ mod test {
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
                 vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
+                &config,
+                SBPFVersion::V3,
                 Box::new(move |_| {
                     c.borrow_mut().extend_from_slice(&original);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
                 }),
-                &config,
-                SBPFVersion::V3,
             )
             .unwrap();
 
@@ -1728,12 +1689,12 @@ mod test {
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
                 vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
+                &config,
+                SBPFVersion::V3,
                 Box::new(move |_| {
                     c.borrow_mut().extend_from_slice(&original);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
                 }),
-                &config,
-                SBPFVersion::V3,
             )
             .unwrap();
 
@@ -1770,6 +1731,8 @@ mod test {
                     MemoryRegion::new_cow(&original1, ebpf::MM_RODATA_START, 42),
                     MemoryRegion::new_cow(&original2, ebpf::MM_RODATA_START + 0x100000000, 24),
                 ],
+                &config,
+                SBPFVersion::V3,
                 Box::new(move |id| {
                     // check that the argument passed to MemoryRegion::new_cow is then passed to the
                     // callback
@@ -1777,8 +1740,6 @@ mod test {
                     c.borrow_mut().extend_from_slice(&original1);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
                 }),
-                &config,
-                SBPFVersion::V3,
             )
             .unwrap();
 
@@ -1796,9 +1757,9 @@ mod test {
 
         let m = MemoryMapping::new_with_cow(
             vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
-            Box::new(|_| Err(())),
             &config,
             SBPFVersion::V3,
+            Box::new(|_| Err(())),
         )
         .unwrap();
 
@@ -1813,9 +1774,9 @@ mod test {
 
         let m = MemoryMapping::new_with_cow(
             vec![MemoryRegion::new_cow(&original, ebpf::MM_RODATA_START, 42)],
-            Box::new(|_| Err(())),
             &config,
             SBPFVersion::V3,
+            Box::new(|_| Err(())),
         )
         .unwrap();
 
