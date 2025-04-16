@@ -261,11 +261,12 @@ impl<'a> UnalignedMemoryMapping<'a> {
     }
 
     #[allow(clippy::arithmetic_side_effects)]
-    fn find_region(
-        &self,
-        cache: &mut MappingCache,
-        vm_addr: u64,
-    ) -> Option<(usize, &MemoryRegion)> {
+    fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
+        // Safety:
+        // &mut references to the mapping cache are only created internally from methods that do not
+        // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
+        // guaranteed to be unique.
+        let cache = unsafe { &mut *self.cache.get() };
         if let Some(index) = cache.find(vm_addr) {
             // Safety:
             // Cached index, we validated it before caching it. See the corresponding safety section
@@ -296,13 +297,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
 
     /// Given a list of regions translate from virtual machine to host address
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
-        // Safety:
-        // &mut references to the mapping cache are only created internally from methods that do not
-        // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
-        // guaranteed to be unique.
-        let cache = unsafe { &mut *self.cache.get() };
-
-        let region = match self.find_region(cache, vm_addr) {
+        let region = match self.find_region(vm_addr) {
             Some((_region_index, region)) => region,
             None => {
                 return generate_access_violation(
@@ -330,12 +325,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         access_type: AccessType,
         vm_addr: u64,
     ) -> Result<(usize, &MemoryRegion), EbpfError> {
-        // Safety:
-        // &mut references to the mapping cache are only created internally from methods that do not
-        // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
-        // guaranteed to be unique.
-        let cache = unsafe { &mut *self.cache.get() };
-        if let Some((region_index, region)) = self.find_region(cache, vm_addr) {
+        if let Some((region_index, region)) = self.find_region(vm_addr) {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
                 && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
             {
