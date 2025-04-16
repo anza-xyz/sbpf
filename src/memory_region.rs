@@ -297,25 +297,13 @@ impl<'a> UnalignedMemoryMapping<'a> {
 
     /// Given a list of regions translate from virtual machine to host address
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
-        let region = match self.find_region(vm_addr) {
-            Some((_region_index, region)) => region,
-            None => {
-                return generate_access_violation(
-                    self.config,
-                    self.sbpf_version,
-                    access_type,
-                    vm_addr,
-                    len,
-                )
-            }
-        };
-
-        if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
-            if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
-                return ProgramResult::Ok(host_addr);
+        if let Some((_index, region)) = self.find_region(vm_addr) {
+            if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
+                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
+                    return ProgramResult::Ok(host_addr);
+                }
             }
         }
-
         generate_access_violation(self.config, self.sbpf_version, access_type, vm_addr, len)
     }
 
@@ -325,11 +313,11 @@ impl<'a> UnalignedMemoryMapping<'a> {
         access_type: AccessType,
         vm_addr: u64,
     ) -> Result<(usize, &MemoryRegion), EbpfError> {
-        if let Some((region_index, region)) = self.find_region(vm_addr) {
+        if let Some((index, region)) = self.find_region(vm_addr) {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
                 && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
             {
-                return Ok((region_index, region));
+                return Ok((index, region));
             }
         }
         Err(
@@ -422,11 +410,10 @@ impl<'a> AlignedMemoryMapping<'a> {
 
     /// Given a list of regions translate from virtual machine to host address
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
-        let index = vm_addr
-            .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
-            .unwrap_or(0) as usize;
+        let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
         if (1..self.regions.len()).contains(&index) {
-            let region = &self.regions[index];
+            // Safety: bounds check above
+            let region = unsafe { self.regions.get_unchecked(index) };
             if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
                 if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     return ProgramResult::Ok(host_addr);
@@ -442,11 +429,10 @@ impl<'a> AlignedMemoryMapping<'a> {
         access_type: AccessType,
         vm_addr: u64,
     ) -> Result<(usize, &MemoryRegion), EbpfError> {
-        let index = vm_addr
-            .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
-            .unwrap_or(0) as usize;
+        let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
         if (1..self.regions.len()).contains(&index) {
-            let region = &self.regions[index];
+            // Safety: bounds check above
+            let region = unsafe { self.regions.get_unchecked(index) };
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
                 && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
             {
