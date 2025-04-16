@@ -2,7 +2,7 @@
 name = "sbpf_cli"
 version = "0.11.0"
 description = "CLI to test and analyze eBPF programs"
-authors = ["Solana Maintainers <maintainers@solana.foundation>"]
+authors = ["Anza Maintainers <maintainers@anza.xyz>"]
 repository = "https://github.com/anza-xyz/sbpf"
 homepage = "https://solana.com/"
 keywords = ["BPF", "eBPF", "interpreter", "JIT"]
