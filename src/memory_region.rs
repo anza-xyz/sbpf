@@ -107,7 +107,11 @@ impl MemoryRegion {
     }
 
     /// Convert a virtual machine address into a host address
-    pub fn vm_to_host(&self, vm_addr: u64, len: u64) -> Option<u64> {
+    pub fn vm_to_host(&self, access_type: AccessType, vm_addr: u64, len: u64) -> Option<u64> {
+        if access_type == AccessType::Store && !self.writable.get() {
+            return None;
+        }
+
         // This can happen if a region starts at an offset from the base region
         // address, eg with rodata regions if config.optimize_rodata = true, see
         // Elf::get_ro_region.
@@ -453,7 +457,7 @@ impl<'a> MemoryMapping<'a> {
             if access_type == AccessType::Load
                 || ensure_writable_region(region, &common.access_violation_handler)
             {
-                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
+                if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
                     return ProgramResult::Ok(host_addr);
                 }
             }
