@@ -103,7 +103,11 @@ impl MemoryRegion {
     }
 
     /// Convert a virtual machine address into a host address
-    pub fn vm_to_host(&self, vm_addr: u64, len: u64) -> Option<u64> {
+    pub fn vm_to_host(&self, access_type: AccessType, vm_addr: u64, len: u64) -> Option<u64> {
+        if access_type == AccessType::Store && !self.writable.get() {
+            return None;
+        }
+
         // This can happen if a region starts at an offset from the base region
         // address, eg with rodata regions if config.optimize_rodata = true, see
         // Elf::get_ro_region.
@@ -299,7 +303,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
         if let Some((_index, region)) = self.find_region(vm_addr) {
             if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
-                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
+                if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
                     return ProgramResult::Ok(host_addr);
                 }
             }
@@ -424,7 +428,7 @@ impl<'a> AlignedMemoryMapping<'a> {
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
         if let Some((_index, region)) = self.find_region(vm_addr) {
             if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
-                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
+                if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
                     return ProgramResult::Ok(host_addr);
                 }
             }
