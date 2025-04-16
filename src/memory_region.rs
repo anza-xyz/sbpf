@@ -408,12 +408,20 @@ impl<'a> AlignedMemoryMapping<'a> {
         )
     }
 
-    /// Given a list of regions translate from virtual machine to host address
-    pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
+    #[inline]
+    fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
         if (1..self.regions.len()).contains(&index) {
             // Safety: bounds check above
             let region = unsafe { self.regions.get_unchecked(index) };
+            return Some((index, region));
+        }
+        None
+    }
+
+    /// Given a list of regions translate from virtual machine to host address
+    pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
+        if let Some((_index, region)) = self.find_region(vm_addr) {
             if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
                 if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     return ProgramResult::Ok(host_addr);
@@ -429,10 +437,7 @@ impl<'a> AlignedMemoryMapping<'a> {
         access_type: AccessType,
         vm_addr: u64,
     ) -> Result<(usize, &MemoryRegion), EbpfError> {
-        let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
-        if (1..self.regions.len()).contains(&index) {
-            // Safety: bounds check above
-            let region = unsafe { self.regions.get_unchecked(index) };
+        if let Some((index, region)) = self.find_region(vm_addr) {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
                 && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
             {
