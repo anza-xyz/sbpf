@@ -312,13 +312,13 @@ impl<'a> UnalignedMemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
-        _len: u64,
+        len: u64,
     ) -> Result<(usize, &MemoryRegion), EbpfError> {
         if let Some((index, region)) = self.find_region(vm_addr) {
-            if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
-                && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
-            {
-                return Ok((index, region));
+            if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
+                if let Some(_host_addr) = region.vm_to_host(access_type, vm_addr, len) {
+                    return Ok((index, region));
+                }
             }
         }
         Err(
@@ -437,13 +437,13 @@ impl<'a> AlignedMemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
-        _len: u64,
+        len: u64,
     ) -> Result<(usize, &MemoryRegion), EbpfError> {
         if let Some((index, region)) = self.find_region(vm_addr) {
-            if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
-                && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
-            {
-                return Ok((index, region));
+            if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
+                if let Some(_host_addr) = region.vm_to_host(access_type, vm_addr, len) {
+                    return Ok((index, region));
+                }
             }
         }
         Err(
