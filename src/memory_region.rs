@@ -312,6 +312,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
+        _len: u64,
     ) -> Result<(usize, &MemoryRegion), EbpfError> {
         if let Some((index, region)) = self.find_region(vm_addr) {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
@@ -436,6 +437,7 @@ impl<'a> AlignedMemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
+        _len: u64,
     ) -> Result<(usize, &MemoryRegion), EbpfError> {
         if let Some((index, region)) = self.find_region(vm_addr) {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
@@ -574,11 +576,12 @@ impl<'a> MemoryMapping<'a> {
         &self,
         access_type: AccessType,
         vm_addr: u64,
+        len: u64,
     ) -> Result<(usize, &MemoryRegion), EbpfError> {
         match self {
             MemoryMapping::Identity => Err(EbpfError::InvalidMemoryRegion(0)),
-            MemoryMapping::Aligned(m) => m.region(access_type, vm_addr),
-            MemoryMapping::Unaligned(m) => m.region(access_type, vm_addr),
+            MemoryMapping::Aligned(m) => m.region(access_type, vm_addr, len),
+            MemoryMapping::Unaligned(m) => m.region(access_type, vm_addr, len),
         }
     }
 
@@ -812,7 +815,7 @@ mod test {
             .unwrap();
             for frame in 0..4 {
                 let address = ebpf::MM_STACK_START + frame * 4;
-                assert!(m.region(AccessType::Load, address).is_ok());
+                assert!(m.region(AccessType::Load, address, 2).is_ok());
                 assert!(m.map(AccessType::Load, address, 2).is_ok());
                 assert_error!(m.map(AccessType::Load, address + 2, 2), "AccessViolation");
                 assert_eq!(m.load::<u16>(address).unwrap(), 0xFFFF);
@@ -949,11 +952,11 @@ mod test {
         )
         .unwrap();
         assert_error!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START - 1),
+            m.region(AccessType::Load, ebpf::MM_INPUT_START - 1, 1),
             "AccessViolation"
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START)
+            m.region(AccessType::Load, ebpf::MM_INPUT_START, 1)
                 .unwrap()
                 .1
                 .host_addr
@@ -961,7 +964,7 @@ mod test {
             mem1.as_ptr() as u64
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 3)
+            m.region(AccessType::Load, ebpf::MM_INPUT_START + 3, 1)
                 .unwrap()
                 .1
                 .host_addr
@@ -969,11 +972,11 @@ mod test {
             mem1.as_ptr() as u64
         );
         assert_error!(
-            m.region(AccessType::Store, ebpf::MM_INPUT_START + 4),
+            m.region(AccessType::Store, ebpf::MM_INPUT_START + 4, 1),
             "AccessViolation"
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 4)
+            m.region(AccessType::Load, ebpf::MM_INPUT_START + 4, 1)
                 .unwrap()
                 .1
                 .host_addr
@@ -981,7 +984,7 @@ mod test {
             mem2.as_ptr() as u64
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 7)
+            m.region(AccessType::Load, ebpf::MM_INPUT_START + 7, 1)
                 .unwrap()
                 .1
                 .host_addr
@@ -989,7 +992,7 @@ mod test {
             mem2.as_ptr() as u64
         );
         assert_error!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 8),
+            m.region(AccessType::Load, ebpf::MM_INPUT_START + 8, 1),
             "AccessViolation"
         );
     }
@@ -1013,11 +1016,11 @@ mod test {
         )
         .unwrap();
         assert_error!(
-            m.region(AccessType::Load, ebpf::MM_RODATA_START - 1),
+            m.region(AccessType::Load, ebpf::MM_RODATA_START - 1, 1),
             "AccessViolation"
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_RODATA_START)
+            m.region(AccessType::Load, ebpf::MM_RODATA_START, 1)
                 .unwrap()
                 .1
                 .host_addr
@@ -1025,7 +1028,7 @@ mod test {
             mem1.as_ptr() as u64
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_RODATA_START + 3)
+            m.region(AccessType::Load, ebpf::MM_RODATA_START + 3, 1)
                 .unwrap()
                 .1
                 .host_addr
@@ -1033,16 +1036,16 @@ mod test {
             mem1.as_ptr() as u64
         );
         assert_error!(
-            m.region(AccessType::Load, ebpf::MM_RODATA_START + 4),
+            m.region(AccessType::Load, ebpf::MM_RODATA_START + 4, 1),
             "AccessViolation"
         );
 
         assert_error!(
-            m.region(AccessType::Store, ebpf::MM_STACK_START),
+            m.region(AccessType::Store, ebpf::MM_STACK_START, 1),
             "AccessViolation"
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_STACK_START)
+            m.region(AccessType::Load, ebpf::MM_STACK_START, 1)
                 .unwrap()
                 .1
                 .host_addr
@@ -1050,7 +1053,7 @@ mod test {
             mem2.as_ptr() as u64
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_STACK_START + 3)
+            m.region(AccessType::Load, ebpf::MM_STACK_START + 3, 1)
                 .unwrap()
                 .1
                 .host_addr
@@ -1058,7 +1061,7 @@ mod test {
             mem2.as_ptr() as u64
         );
         assert_error!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 4),
+            m.region(AccessType::Load, ebpf::MM_INPUT_START + 4, 1),
             "AccessViolation"
         );
     }
