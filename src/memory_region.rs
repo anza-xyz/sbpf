@@ -39,6 +39,31 @@ pub type MemoryCowCallback = Box<dyn Fn(u32) -> Result<u64, ()>>;
 pub fn default_memory_cow_callback(_cow_callback_payload: u32) -> Result<u64, ()> {
     Err(())
 }
+macro_rules! access_violation_guard {
+    ($self:expr, $access_type:expr, $vm_addr:expr, $len:expr) => {{
+        if let Some((_index, region)) = $self.find_region($vm_addr) {
+            if let Some(host_addr) = region.vm_to_host($access_type, $vm_addr, $len) {
+                return ProgramResult::Ok(host_addr);
+            }
+            if region.cow_callback_payload != u32::MAX {
+                if let Ok(new_host_addr) = (&$self.cow_cb)(region.cow_callback_payload) {
+                    region.host_addr.replace(new_host_addr);
+                    region.writable.replace(true);
+                    if let Some(host_addr) = region.vm_to_host($access_type, $vm_addr, $len) {
+                        return ProgramResult::Ok(host_addr);
+                    }
+                }
+            }
+        }
+        generate_access_violation(
+            $self.config,
+            $self.sbpf_version,
+            $access_type,
+            $vm_addr,
+            $len,
+        )
+    }};
+}
 
 /// Memory region for bounds checking and address translation
 #[derive(Default, Eq, PartialEq)]
@@ -302,14 +327,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
 
     /// Given a list of regions translate from virtual machine to host address
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
-        if let Some((_index, region)) = self.find_region(vm_addr) {
-            if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
-                if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
-                    return ProgramResult::Ok(host_addr);
-                }
-            }
-        }
-        generate_access_violation(self.config, self.sbpf_version, access_type, vm_addr, len)
+        access_violation_guard!(self, access_type, vm_addr, len)
     }
 
     /// Returns the `MemoryRegion`s in this mapping
@@ -408,14 +426,7 @@ impl<'a> AlignedMemoryMapping<'a> {
 
     /// Given a list of regions translate from virtual machine to host address
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
-        if let Some((_index, region)) = self.find_region(vm_addr) {
-            if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
-                if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
-                    return ProgramResult::Ok(host_addr);
-                }
-            }
-        }
-        generate_access_violation(self.config, self.sbpf_version, access_type, vm_addr, len)
+        access_violation_guard!(self, access_type, vm_addr, len)
     }
 
     /// Returns the `MemoryRegion`s in this mapping
@@ -562,25 +573,6 @@ impl<'a> MemoryMapping<'a> {
             MemoryMapping::Aligned(m) => m.replace_region(index, region),
             MemoryMapping::Unaligned(m) => m.replace_region(index, region),
         }
-    }
-}
-
-// Ensure that the given region is writable.
-//
-// If the region is readonly, cow_cb is called.
-fn ensure_writable_region(region: &MemoryRegion, cow_cb: &MemoryCowCallback) -> bool {
-    if region.writable.get() {
-        return true;
-    }
-    if region.cow_callback_payload == u32::MAX {
-        return false;
-    }
-    if let Ok(host_addr) = cow_cb(region.cow_callback_payload) {
-        region.host_addr.replace(host_addr);
-        region.writable.replace(true);
-        true
-    } else {
-        false
     }
 }
 
