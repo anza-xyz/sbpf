@@ -35,27 +35,24 @@ use std::{
 /// Callback executed before generate_access_violation()
 ///
 /// Safety: Reentrancy and reading the MemoryMapping are forbidden.
-pub type MemoryCowCallback = Box<dyn Fn(u32) -> Result<u64, ()>>;
+pub type MemoryCowCallback = Box<dyn Fn(&mut MemoryRegion)>;
 /// Fail always
 #[allow(clippy::result_unit_err)]
-pub fn default_memory_cow_callback(_cow_callback_payload: u32) -> Result<u64, ()> {
-    Err(())
-}
+pub fn default_memory_cow_callback(_region: &mut MemoryRegion) {}
 macro_rules! access_violation_guard {
     ($self:expr, $access_type:expr, $vm_addr:expr, $len:expr) => {{
         if let Some((_index, region)) = $self.find_region($vm_addr) {
             if let Some(host_addr) = region.vm_to_host($access_type, $vm_addr, $len) {
                 return ProgramResult::Ok(host_addr);
             }
-            if region.cow_callback_payload != u32::MAX {
-                if let Ok(new_host_addr) = (&$self.cow_cb.borrow_mut())(region.cow_callback_payload)
-                {
-                    region.host_addr.replace(new_host_addr);
-                    region.writable.replace(true);
-                    if let Some(host_addr) = region.vm_to_host($access_type, $vm_addr, $len) {
-                        return ProgramResult::Ok(host_addr);
-                    }
-                }
+            // Safety: The RefCell prevents reentrancy in MemoryCowCallback,
+            // which in turn guarantees that no two mutable references to region exist simultaneously.
+            (&$self.cow_cb.borrow_mut())(unsafe {
+                // Same as: &mut *(&raw const *region).cast_mut()
+                &mut *(*(region as *const MemoryRegion).cast::<UnsafeCell<MemoryRegion>>()).get()
+            });
+            if let Some(host_addr) = region.vm_to_host($access_type, $vm_addr, $len) {
+                return ProgramResult::Ok(host_addr);
             }
         }
         generate_access_violation(
@@ -1272,17 +1269,16 @@ mod test {
             };
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
-            let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)];
-            regions[0].cow_callback_payload = 0;
 
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
-                regions,
+                vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
                 &config,
                 SBPFVersion::V3,
-                Box::new(move |_| {
+                Box::new(move |region| {
                     c.borrow_mut().extend_from_slice(&original);
-                    Ok(c.borrow().as_slice().as_ptr() as u64)
+                    region.host_addr.set(c.borrow().as_slice().as_ptr() as u64);
+                    region.writable.set(true);
                 }),
             )
             .unwrap();
@@ -1307,17 +1303,16 @@ mod test {
             };
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
-            let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)];
-            regions[0].cow_callback_payload = 0;
 
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_cow(
-                regions,
+                vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
                 &config,
                 SBPFVersion::V3,
-                Box::new(move |_| {
+                Box::new(move |region| {
                     c.borrow_mut().extend_from_slice(&original);
-                    Ok(c.borrow().as_slice().as_ptr() as u64)
+                    region.host_addr.set(c.borrow().as_slice().as_ptr() as u64);
+                    region.writable.set(true);
                 }),
             )
             .unwrap();
@@ -1360,12 +1355,13 @@ mod test {
                 regions,
                 &config,
                 SBPFVersion::V3,
-                Box::new(move |id| {
+                Box::new(move |region| {
                     // check that the argument passed to MemoryRegion::new_readonly is then passed to the
                     // callback
-                    assert_eq!(id, 42);
+                    assert_eq!(region.cow_callback_payload, 42);
                     c.borrow_mut().extend_from_slice(&original1);
-                    Ok(c.borrow().as_slice().as_ptr() as u64)
+                    region.host_addr.set(c.borrow().as_slice().as_ptr() as u64);
+                    region.writable.set(true);
                 }),
             )
             .unwrap();
@@ -1386,7 +1382,7 @@ mod test {
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V3,
-            Box::new(|_| Err(())),
+            Box::new(|_| ()),
         )
         .unwrap();
 
@@ -1403,7 +1399,7 @@ mod test {
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V3,
-            Box::new(|_| Err(())),
+            Box::new(|_| ()),
         )
         .unwrap();
 
