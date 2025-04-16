@@ -308,7 +308,7 @@ checksum = "6e3bad0ee36814ca07d7968269dd4b7ec89ec2da10c4bb613928d3077083c232"
 
 [[package]]
 name = "sbpf_cli"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "clap",
  "solana-sbpf",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "solana-sbpf"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "byteorder",
  "combine",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "test_utils"
-version = "0.10.0"
+version = "0.11.0"
 dependencies = [
  "libc",
  "solana-sbpf",
