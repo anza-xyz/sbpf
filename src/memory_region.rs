@@ -9,7 +9,7 @@ use crate::{
 };
 use std::{
     array,
-    cell::{Cell, RefCell, UnsafeCell},
+    cell::{RefCell, UnsafeCell},
     fmt, mem,
     ops::Range,
     ptr,
@@ -70,7 +70,7 @@ macro_rules! access_violation_guard {
 #[repr(C, align(32))]
 pub struct MemoryRegion {
     /// start host address
-    pub host_addr: Cell<u64>,
+    pub host_addr: u64,
     /// start virtual address
     pub vm_addr: u64,
     /// end virtual address
@@ -80,7 +80,7 @@ pub struct MemoryRegion {
     /// Size of regular gaps as bit shift (63 means this region is continuous)
     pub vm_gap_shift: u8,
     /// Is `AccessType::Store` allowed without triggering an access violation
-    pub writable: Cell<bool>,
+    pub writable: bool,
     /// User defined payload for the [MemoryCowCallback]
     pub cow_callback_payload: u32,
 }
@@ -97,12 +97,12 @@ impl MemoryRegion {
             debug_assert_eq!(Some(vm_gap_size), 1_u64.checked_shl(vm_gap_shift as u32));
         };
         MemoryRegion {
-            host_addr: Cell::new(slice.as_ptr() as u64),
+            host_addr: slice.as_ptr() as u64,
             vm_addr,
             vm_addr_end,
             len: slice.len() as u64,
             vm_gap_shift,
-            writable: Cell::new(writable),
+            writable,
             cow_callback_payload: u32::MAX,
         }
     }
@@ -129,7 +129,7 @@ impl MemoryRegion {
 
     /// Convert a virtual machine address into a host address
     pub fn vm_to_host(&self, access_type: AccessType, vm_addr: u64, len: u64) -> Option<u64> {
-        if access_type == AccessType::Store && !self.writable.get() {
+        if access_type == AccessType::Store && !self.writable {
             return None;
         }
 
@@ -151,7 +151,7 @@ impl MemoryRegion {
             (begin_offset & gap_mask).checked_shr(1).unwrap_or(0) | (begin_offset & !gap_mask);
         if let Some(end_offset) = gapped_offset.checked_add(len) {
             if end_offset <= self.len && !is_in_gap {
-                return Some(self.host_addr.get().saturating_add(gapped_offset));
+                return Some(self.host_addr.saturating_add(gapped_offset));
             }
         }
         None
@@ -164,11 +164,11 @@ impl fmt::Debug for MemoryRegion {
             f,
             "host_addr: {:#x?}-{:#x?}, vm_addr: {:#x?}-{:#x?}, len: {}, writable: {}",
             self.host_addr,
-            self.host_addr.get().saturating_add(self.len),
+            self.host_addr.saturating_add(self.len),
             self.vm_addr,
             self.vm_addr_end,
             self.len,
-            self.writable.get(),
+            self.writable,
         )
     }
 }
@@ -909,32 +909,28 @@ mod test {
             m.find_region(ebpf::MM_INPUT_START)
                 .unwrap()
                 .1
-                .host_addr
-                .get(),
+                .host_addr,
             mem1.as_ptr() as u64
         );
         assert_eq!(
             m.find_region(ebpf::MM_INPUT_START + 3)
                 .unwrap()
                 .1
-                .host_addr
-                .get(),
+                .host_addr,
             mem1.as_ptr() as u64
         );
         assert_eq!(
             m.find_region(ebpf::MM_INPUT_START + 4)
                 .unwrap()
                 .1
-                .host_addr
-                .get(),
+                .host_addr,
             mem2.as_ptr() as u64
         );
         assert_eq!(
             m.find_region(ebpf::MM_INPUT_START + 7)
                 .unwrap()
                 .1
-                .host_addr
-                .get(),
+                .host_addr,
             mem2.as_ptr() as u64
         );
         assert!(m.find_region(ebpf::MM_INPUT_START + 8).is_some());
@@ -963,16 +959,14 @@ mod test {
             m.find_region(ebpf::MM_RODATA_START)
                 .unwrap()
                 .1
-                .host_addr
-                .get(),
+                .host_addr,
             mem1.as_ptr() as u64
         );
         assert_eq!(
             m.find_region(ebpf::MM_RODATA_START + 3)
                 .unwrap()
                 .1
-                .host_addr
-                .get(),
+                .host_addr,
             mem1.as_ptr() as u64
         );
         assert!(m.find_region(ebpf::MM_RODATA_START + 4).is_some());
@@ -980,16 +974,14 @@ mod test {
             m.find_region(ebpf::MM_STACK_START)
                 .unwrap()
                 .1
-                .host_addr
-                .get(),
+                .host_addr,
             mem2.as_ptr() as u64
         );
         assert_eq!(
             m.find_region(ebpf::MM_STACK_START + 3)
                 .unwrap()
                 .1
-                .host_addr
-                .get(),
+                .host_addr,
             mem2.as_ptr() as u64
         );
         assert!(m.find_region(ebpf::MM_INPUT_START + 4).is_none());
@@ -1277,8 +1269,8 @@ mod test {
                 SBPFVersion::V3,
                 Box::new(move |region| {
                     c.borrow_mut().extend_from_slice(&original);
-                    region.host_addr.set(c.borrow().as_slice().as_ptr() as u64);
-                    region.writable.set(true);
+                    region.host_addr = c.borrow().as_slice().as_ptr() as u64;
+                    region.writable = true;
                 }),
             )
             .unwrap();
@@ -1311,8 +1303,8 @@ mod test {
                 SBPFVersion::V3,
                 Box::new(move |region| {
                     c.borrow_mut().extend_from_slice(&original);
-                    region.host_addr.set(c.borrow().as_slice().as_ptr() as u64);
-                    region.writable.set(true);
+                    region.host_addr = c.borrow().as_slice().as_ptr() as u64;
+                    region.writable = true;
                 }),
             )
             .unwrap();
@@ -1360,8 +1352,8 @@ mod test {
                     // callback
                     assert_eq!(region.cow_callback_payload, 42);
                     c.borrow_mut().extend_from_slice(&original1);
-                    region.host_addr.set(c.borrow().as_slice().as_ptr() as u64);
-                    region.writable.set(true);
+                    region.host_addr = c.borrow().as_slice().as_ptr() as u64;
+                    region.writable = true;
                 }),
             )
             .unwrap();
