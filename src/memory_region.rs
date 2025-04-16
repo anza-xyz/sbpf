@@ -12,7 +12,7 @@ use std::{
     cell::{Cell, UnsafeCell},
     fmt, mem,
     ops::Range,
-    ptr::{self, copy_nonoverlapping},
+    ptr,
 };
 
 /* Explanation of the Gapped Memory
@@ -328,163 +328,6 @@ impl<'a> UnalignedMemoryMapping<'a> {
         generate_access_violation(self.config, self.sbpf_version, access_type, vm_addr, len)
     }
 
-    /// Loads `size_of::<T>()` bytes from the given address.
-    ///
-    /// See [MemoryMapping::load].
-    #[inline(always)]
-    pub fn load<T: Pod + Into<u64>>(&self, mut vm_addr: u64) -> ProgramResult {
-        let mut len = mem::size_of::<T>() as u64;
-        debug_assert!(len <= mem::size_of::<u64>() as u64);
-
-        // Safety:
-        // &mut references to the mapping cache are only created internally from methods that do not
-        // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
-        // guaranteed to be unique.
-        let cache = unsafe { &mut *self.cache.get() };
-
-        let mut region = match self.find_region(cache, vm_addr) {
-            Some((_region_index, region)) => {
-                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
-                    // fast path
-                    return ProgramResult::Ok(unsafe {
-                        ptr::read_unaligned::<T>(host_addr as *const _).into()
-                    });
-                }
-
-                region
-            }
-            None => {
-                return generate_access_violation(
-                    self.config,
-                    self.sbpf_version,
-                    AccessType::Load,
-                    vm_addr,
-                    len,
-                )
-            }
-        };
-
-        // slow path
-        let initial_len = len;
-        let initial_vm_addr = vm_addr;
-        let mut value = 0u64;
-        let mut ptr = std::ptr::addr_of_mut!(value).cast::<u8>();
-
-        while len > 0 {
-            let load_len = len.min(region.vm_addr_end.saturating_sub(vm_addr));
-            if load_len == 0 {
-                break;
-            }
-            if let Some(host_addr) = region.vm_to_host(vm_addr, load_len) {
-                // Safety:
-                // we debug_assert!(len <= mem::size_of::<u64>()) so we never
-                // overflow &value
-                unsafe {
-                    copy_nonoverlapping(host_addr as *const _, ptr, load_len as usize);
-                    ptr = ptr.add(load_len as usize);
-                };
-                len = len.saturating_sub(load_len);
-                if len == 0 {
-                    return ProgramResult::Ok(value);
-                }
-                vm_addr = vm_addr.saturating_add(load_len);
-                region = match self.find_region(cache, vm_addr) {
-                    Some((_region_index, region)) => region,
-                    None => break,
-                };
-            } else {
-                break;
-            }
-        }
-
-        generate_access_violation(
-            self.config,
-            self.sbpf_version,
-            AccessType::Load,
-            initial_vm_addr,
-            initial_len,
-        )
-    }
-
-    /// Store `value` at the given address.
-    ///
-    /// See [MemoryMapping::store].
-    #[inline]
-    pub fn store<T: Pod>(&self, value: T, mut vm_addr: u64) -> ProgramResult {
-        let mut len = mem::size_of::<T>() as u64;
-
-        // Safety:
-        // &mut references to the mapping cache are only created internally from methods that do not
-        // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
-        // guaranteed to be unique.
-        let cache = unsafe { &mut *self.cache.get() };
-
-        let mut src = std::ptr::addr_of!(value).cast::<u8>();
-
-        let mut region = match self.find_region(cache, vm_addr) {
-            Some((_region_index, region)) if ensure_writable_region(region, &self.cow_cb) => {
-                // fast path
-                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
-                    // Safety:
-                    // vm_to_host() succeeded so we know there's enough space to
-                    // store `value`
-                    unsafe { ptr::write_unaligned(host_addr as *mut _, value) };
-                    return ProgramResult::Ok(host_addr);
-                }
-                region
-            }
-            _ => {
-                return generate_access_violation(
-                    self.config,
-                    self.sbpf_version,
-                    AccessType::Store,
-                    vm_addr,
-                    len,
-                )
-            }
-        };
-
-        // slow path
-        let initial_len = len;
-        let initial_vm_addr = vm_addr;
-
-        while len > 0 {
-            if !ensure_writable_region(region, &self.cow_cb) {
-                break;
-            }
-
-            let write_len = len.min(region.vm_addr_end.saturating_sub(vm_addr));
-            if write_len == 0 {
-                break;
-            }
-            if let Some(host_addr) = region.vm_to_host(vm_addr, write_len) {
-                // Safety:
-                // vm_to_host() succeeded so we have enough space for write_len
-                unsafe { copy_nonoverlapping(src, host_addr as *mut _, write_len as usize) };
-                len = len.saturating_sub(write_len);
-                if len == 0 {
-                    return ProgramResult::Ok(host_addr);
-                }
-                src = unsafe { src.add(write_len as usize) };
-                vm_addr = vm_addr.saturating_add(write_len);
-                region = match self.find_region(cache, vm_addr) {
-                    Some((_region_index, region)) => region,
-                    None => break,
-                };
-            } else {
-                break;
-            }
-        }
-
-        generate_access_violation(
-            self.config,
-            self.sbpf_version,
-            AccessType::Store,
-            initial_vm_addr,
-            initial_len,
-        )
-    }
-
     /// Returns the `MemoryRegion` corresponding to the given address.
     pub fn region(
         &self,
@@ -607,42 +450,6 @@ impl<'a> AlignedMemoryMapping<'a> {
         generate_access_violation(self.config, self.sbpf_version, access_type, vm_addr, len)
     }
 
-    /// Loads `size_of::<T>()` bytes from the given address.
-    ///
-    /// See [MemoryMapping::load].
-    #[inline]
-    pub fn load<T: Pod + Into<u64>>(&self, vm_addr: u64) -> ProgramResult {
-        let len = mem::size_of::<T>() as u64;
-        match self.map(AccessType::Load, vm_addr, len) {
-            ProgramResult::Ok(host_addr) => {
-                ProgramResult::Ok(unsafe { ptr::read_unaligned::<T>(host_addr as *const _) }.into())
-            }
-            err => err,
-        }
-    }
-
-    /// Store `value` at the given address.
-    ///
-    /// See [MemoryMapping::store].
-    #[inline]
-    pub fn store<T: Pod>(&self, value: T, vm_addr: u64) -> ProgramResult {
-        let len = mem::size_of::<T>() as u64;
-        debug_assert!(len <= mem::size_of::<u64>() as u64);
-
-        match self.map(AccessType::Store, vm_addr, len) {
-            ProgramResult::Ok(host_addr) => {
-                // Safety:
-                // map succeeded so we can write at least `len` bytes
-                unsafe {
-                    ptr::write_unaligned(host_addr as *mut T, value);
-                }
-                ProgramResult::Ok(host_addr)
-            }
-
-            err => err,
-        }
-    }
-
     /// Returns the `MemoryRegion` corresponding to the given address.
     pub fn region(
         &self,
@@ -755,31 +562,29 @@ impl<'a> MemoryMapping<'a> {
     }
 
     /// Loads `size_of::<T>()` bytes from the given address.
-    ///
-    /// Works across memory region boundaries.
     #[inline]
     pub fn load<T: Pod + Into<u64>>(&self, vm_addr: u64) -> ProgramResult {
-        match self {
-            MemoryMapping::Identity => unsafe {
-                ProgramResult::Ok(ptr::read_unaligned(vm_addr as *const T).into())
-            },
-            MemoryMapping::Aligned(m) => m.load::<T>(vm_addr),
-            MemoryMapping::Unaligned(m) => m.load::<T>(vm_addr),
+        let len = mem::size_of::<T>() as u64;
+        debug_assert!(len <= mem::size_of::<u64>() as u64);
+        match self.map(AccessType::Load, vm_addr, len) {
+            ProgramResult::Ok(host_addr) => {
+                ProgramResult::Ok(unsafe { ptr::read_unaligned::<T>(host_addr as *const T) }.into())
+            }
+            err => err,
         }
     }
 
     /// Store `value` at the given address.
-    ///
-    /// Works across memory region boundaries if `len` does not fit within a single region.
     #[inline]
     pub fn store<T: Pod>(&self, value: T, vm_addr: u64) -> ProgramResult {
-        match self {
-            MemoryMapping::Identity => unsafe {
-                ptr::write_unaligned(vm_addr as *mut T, value);
-                ProgramResult::Ok(0)
-            },
-            MemoryMapping::Aligned(m) => m.store(value, vm_addr),
-            MemoryMapping::Unaligned(m) => m.store(value, vm_addr),
+        let len = mem::size_of::<T>() as u64;
+        debug_assert!(len <= mem::size_of::<u64>() as u64);
+        match self.map(AccessType::Store, vm_addr, len) {
+            ProgramResult::Ok(host_addr) => {
+                unsafe { ptr::write_unaligned(host_addr as *mut T, value) };
+                ProgramResult::Ok(host_addr)
+            }
+            err => err,
         }
     }
 
@@ -1285,20 +1090,10 @@ mod test {
         };
         let mem1 = [0x11, 0x22];
         let mem2 = [0x33];
-        let mem3 = [0x44, 0x55, 0x66];
-        let mem4 = [0x77, 0x88, 0x99];
         let m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_readonly(&mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
-                MemoryRegion::new_readonly(
-                    &mem3,
-                    ebpf::MM_INPUT_START + (mem1.len() + mem2.len()) as u64,
-                ),
-                MemoryRegion::new_readonly(
-                    &mem4,
-                    ebpf::MM_INPUT_START + (mem1.len() + mem2.len() + mem3.len()) as u64,
-                ),
             ],
             &config,
             SBPFVersion::V3,
@@ -1306,17 +1101,8 @@ mod test {
         .unwrap();
 
         assert_eq!(m.load::<u16>(ebpf::MM_INPUT_START).unwrap(), 0x2211);
-        assert_eq!(m.load::<u32>(ebpf::MM_INPUT_START).unwrap(), 0x44332211);
-        assert_eq!(
-            m.load::<u64>(ebpf::MM_INPUT_START).unwrap(),
-            0x8877665544332211
-        );
-        assert_eq!(m.load::<u16>(ebpf::MM_INPUT_START + 1).unwrap(), 0x3322);
-        assert_eq!(m.load::<u32>(ebpf::MM_INPUT_START + 1).unwrap(), 0x55443322);
-        assert_eq!(
-            m.load::<u64>(ebpf::MM_INPUT_START + 1).unwrap(),
-            0x9988776655443322
-        );
+        assert_error!(m.load::<u32>(ebpf::MM_INPUT_START), "AccessViolation");
+        assert_error!(m.load::<u32>(ebpf::MM_INPUT_START + 4), "AccessViolation");
     }
 
     #[test]
@@ -1327,98 +1113,23 @@ mod test {
         };
         let mut mem1 = vec![0xff, 0xff];
         let mut mem2 = vec![0xff];
-        let mut mem3 = vec![0xff, 0xff, 0xff];
-        let mut mem4 = vec![0xff, 0xff];
         let m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_writable(&mut mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
-                MemoryRegion::new_writable(
-                    &mut mem3,
-                    ebpf::MM_INPUT_START + (mem1.len() + mem2.len()) as u64,
-                ),
-                MemoryRegion::new_writable(
-                    &mut mem4,
-                    ebpf::MM_INPUT_START + (mem1.len() + mem2.len() + mem3.len()) as u64,
-                ),
             ],
             &config,
             SBPFVersion::V3,
         )
         .unwrap();
+
         m.store(0x1122u16, ebpf::MM_INPUT_START).unwrap();
         assert_eq!(m.load::<u16>(ebpf::MM_INPUT_START).unwrap(), 0x1122);
 
-        m.store(0x33445566u32, ebpf::MM_INPUT_START).unwrap();
-        assert_eq!(m.load::<u32>(ebpf::MM_INPUT_START).unwrap(), 0x33445566);
-
-        m.store(0x778899AABBCCDDEEu64, ebpf::MM_INPUT_START)
-            .unwrap();
-        assert_eq!(
-            m.load::<u64>(ebpf::MM_INPUT_START).unwrap(),
-            0x778899AABBCCDDEE
+        assert_error!(
+            m.store(0x33445566u32, ebpf::MM_INPUT_START),
+            "AccessViolation"
         );
-    }
-
-    #[test]
-    fn test_unaligned_map_load_store_fast_paths() {
-        let config = Config {
-            aligned_memory_mapping: false,
-            ..Config::default()
-        };
-        let mut mem1 = vec![0xff; 8];
-        let m = MemoryMapping::new(
-            vec![MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START)],
-            &config,
-            SBPFVersion::V3,
-        )
-        .unwrap();
-
-        m.store(0x1122334455667788u64, ebpf::MM_INPUT_START)
-            .unwrap();
-        assert_eq!(
-            m.load::<u64>(ebpf::MM_INPUT_START).unwrap(),
-            0x1122334455667788
-        );
-        m.store(0x22334455u32, ebpf::MM_INPUT_START).unwrap();
-        assert_eq!(m.load::<u32>(ebpf::MM_INPUT_START).unwrap(), 0x22334455);
-
-        m.store(0x3344u16, ebpf::MM_INPUT_START).unwrap();
-        assert_eq!(m.load::<u16>(ebpf::MM_INPUT_START).unwrap(), 0x3344);
-
-        m.store(0x55u8, ebpf::MM_INPUT_START).unwrap();
-        assert_eq!(m.load::<u8>(ebpf::MM_INPUT_START).unwrap(), 0x55);
-    }
-
-    #[test]
-    fn test_unaligned_map_load_store_slow_paths() {
-        let config = Config {
-            aligned_memory_mapping: false,
-            ..Config::default()
-        };
-        let mut mem1 = vec![0xff; 7];
-        let mut mem2 = vec![0xff];
-        let m = MemoryMapping::new(
-            vec![
-                MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START),
-                MemoryRegion::new_writable(&mut mem2, ebpf::MM_INPUT_START + 7),
-            ],
-            &config,
-            SBPFVersion::V3,
-        )
-        .unwrap();
-
-        m.store(0x1122334455667788u64, ebpf::MM_INPUT_START)
-            .unwrap();
-        assert_eq!(
-            m.load::<u64>(ebpf::MM_INPUT_START).unwrap(),
-            0x1122334455667788
-        );
-        m.store(0xAABBCCDDu32, ebpf::MM_INPUT_START + 4).unwrap();
-        assert_eq!(m.load::<u32>(ebpf::MM_INPUT_START + 4).unwrap(), 0xAABBCCDD);
-
-        m.store(0xEEFFu16, ebpf::MM_INPUT_START + 6).unwrap();
-        assert_eq!(m.load::<u16>(ebpf::MM_INPUT_START + 6).unwrap(), 0xEEFF);
     }
 
     #[test]
@@ -1453,14 +1164,8 @@ mod test {
             SBPFVersion::V3,
         )
         .unwrap();
-        m.store(0x1122334455667788u64, ebpf::MM_INPUT_START)
-            .unwrap();
-        assert_eq!(
-            m.load::<u64>(ebpf::MM_INPUT_START).unwrap(),
-            0x1122334455667788u64
-        );
         assert_error!(
-            m.store(0x1122334455667788u64, ebpf::MM_INPUT_START + 1),
+            m.store(0x1122334455667788u64, ebpf::MM_INPUT_START),
             "AccessViolation"
         );
     }
@@ -1495,11 +1200,7 @@ mod test {
             SBPFVersion::V3,
         )
         .unwrap();
-        assert_eq!(
-            m.load::<u64>(ebpf::MM_INPUT_START).unwrap(),
-            0xDDDDDDDDFFFFFFFF
-        );
-        assert_error!(m.load::<u64>(ebpf::MM_INPUT_START + 1), "AccessViolation");
+        assert_error!(m.load::<u64>(ebpf::MM_INPUT_START), "AccessViolation");
     }
 
     #[test]
