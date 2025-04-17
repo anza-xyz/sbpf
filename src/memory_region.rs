@@ -75,8 +75,6 @@ pub struct MemoryRegion {
     pub host_addr: u64,
     /// start virtual address
     pub vm_addr: u64,
-    /// end virtual address
-    pub vm_addr_end: u64,
     /// Length in bytes
     pub len: u64,
     /// Size of regular gaps as bit shift (63 means this region is continuous)
@@ -89,19 +87,16 @@ pub struct MemoryRegion {
 
 impl MemoryRegion {
     fn new(slice: &[u8], vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
-        let mut vm_addr_end = vm_addr.saturating_add(slice.len() as u64);
         let mut vm_gap_shift = (std::mem::size_of::<u64>() as u8)
             .saturating_mul(8)
             .saturating_sub(1);
         if vm_gap_size > 0 {
-            vm_addr_end = vm_addr_end.saturating_add(slice.len() as u64);
             vm_gap_shift = vm_gap_shift.saturating_sub(vm_gap_size.leading_zeros() as u8);
             debug_assert_eq!(Some(vm_gap_size), 1_u64.checked_shl(vm_gap_shift as u32));
         };
         MemoryRegion {
             host_addr: slice.as_ptr() as u64,
             vm_addr,
-            vm_addr_end,
             len: slice.len() as u64,
             vm_gap_shift,
             writable,
@@ -127,6 +122,15 @@ impl MemoryRegion {
     /// Creates a new writable gapped MemoryRegion from a mutable slice
     pub fn new_writable_gapped(slice: &mut [u8], vm_addr: u64, vm_gap_size: u64) -> Self {
         Self::new(&*slice, vm_addr, vm_gap_size, true)
+    }
+
+    /// Returns the vm address space covered by this MemoryRegion
+    pub fn vm_addr_range(&self) -> Range<u64> {
+        if self.vm_gap_shift == 63 {
+            self.vm_addr..self.vm_addr.saturating_add(self.len)
+        } else {
+            self.vm_addr..self.vm_addr.saturating_add(self.len.saturating_mul(2))
+        }
     }
 
     /// Convert a virtual machine address into a host address
@@ -168,7 +172,7 @@ impl fmt::Debug for MemoryRegion {
             self.host_addr,
             self.host_addr.saturating_add(self.len),
             self.vm_addr,
-            self.vm_addr_end,
+            self.vm_addr_range().end,
             self.len,
             self.writable,
         )
@@ -256,7 +260,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
         for index in 1..regions.len() {
             let first = &regions[index.saturating_sub(1)];
             let second = &regions[index];
-            if first.vm_addr_end > second.vm_addr {
+            if first.vm_addr_range().end > second.vm_addr {
                 return Err(EbpfError::InvalidMemoryRegion(index));
             }
         }
@@ -321,7 +325,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
             // we check for index==0 above, and by construction if we get here index
             // must be contained in region
             let region = unsafe { self.regions.get_unchecked(index - 1) };
-            cache.insert(region.vm_addr..region.vm_addr_end, index);
+            cache.insert(region.vm_addr_range(), index);
             Some((index - 1, region))
         }
     }
