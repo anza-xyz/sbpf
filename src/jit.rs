@@ -1006,10 +1006,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.emit_ins(X86Instruction::push(*reg, None));
         }
 
-        // Push 16 bytes
-        self.emit_ins(X86Instruction::push(RSP, None));
-        self.emit_ins(X86Instruction::push(RSP, None));
-
         let stack_arguments = arguments.len().saturating_sub(ARGUMENT_REGISTERS.len()) as i64;
         if stack_arguments % 2 != 0 {
             // If we're going to pass an odd number of stack args we need to pad
@@ -1095,8 +1091,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Restore registers from stack
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP,
             if stack_arguments % 2 != 0 { stack_arguments + 1 } else { stack_arguments } * 8, None));
-        self.emit_ins(X86Instruction::pop(RSP));
-        self.emit_ins(X86Instruction::pop(RSP));
 
         for reg in saved_registers.iter().rev() {
             self.emit_ins(X86Instruction::pop(*reg));
@@ -1154,7 +1148,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
 
-        let stack_slot_of_value_to_store = X86IndirectAccess::OffsetIndexShift(-112, RSP, 0);
+        let stack_slot_of_value_to_store = X86IndirectAccess::OffsetIndexShift(-96, RSP, 0);
         match value {
             Some(Value::Register(reg)) => {
                 self.emit_ins(X86Instruction::store(OperandSize::S64, reg, RSP, stack_slot_of_value_to_store));
@@ -1611,7 +1605,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             } else { // AccessType::Store
                 if *anchor_base == 8 {
                     // Second half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
-                    self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(-96, RSP, 0))));
+                    self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(-80, RSP, 0))));
                 }
                 let store = match len {
                     1 => MemoryMapping::store::<u8> as *const u8 as i64,
