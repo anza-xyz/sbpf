@@ -176,20 +176,23 @@ impl<'a> Elf64<'a> {
             .filter(|section_header| section_header.sh_type == SHT_NULL)
             .ok_or(ElfParserError::InvalidSectionHeader)?;
 
-        let mut vaddr = 0usize;
+        let mut vaddr = 0;
         for program_header in program_header_table {
             if program_header.p_type != PT_LOAD {
                 continue;
             }
-            if (program_header.p_vaddr as usize) < vaddr {
+            // program headers must be ascending
+            if program_header.p_vaddr < vaddr {
                 return Err(ElfParserError::InvalidProgramHeader);
             }
-            vaddr = program_header
+            if program_header
                 .p_offset
-                .err_checked_add(program_header.p_filesz)? as usize;
-            if vaddr > elf_bytes.len() {
+                .err_checked_add(program_header.p_filesz)? as usize
+                > elf_bytes.len()
+            {
                 return Err(ElfParserError::OutOfBounds);
             }
+            vaddr = program_header.p_vaddr;
         }
 
         let mut offset = 0usize;
