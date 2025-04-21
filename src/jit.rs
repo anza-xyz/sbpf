@@ -1006,10 +1006,9 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.emit_ins(X86Instruction::push(*reg, None));
         }
 
-        // Align RSP to 16 bytes
+        // Push 16 bytes
         self.emit_ins(X86Instruction::push(RSP, None));
-        self.emit_ins(X86Instruction::push(RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0))));
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 4, RSP, -16, None));
+        self.emit_ins(X86Instruction::push(RSP, None));
 
         let stack_arguments = arguments.len().saturating_sub(ARGUMENT_REGISTERS.len()) as i64;
         if stack_arguments % 2 != 0 {
@@ -1096,7 +1095,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Restore registers from stack
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP,
             if stack_arguments % 2 != 0 { stack_arguments + 1 } else { stack_arguments } * 8, None));
-        self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, RSP, X86IndirectAccess::OffsetIndexShift(8, RSP, 0)));
+        self.emit_ins(X86Instruction::pop(RSP));
+        self.emit_ins(X86Instruction::pop(RSP));
 
         for reg in saved_registers.iter().rev() {
             self.emit_ins(X86Instruction::pop(*reg));
