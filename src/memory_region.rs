@@ -265,8 +265,9 @@ impl<'a> UnalignedMemoryMapping<'a> {
         )
     }
 
+    /// Returns the `MemoryRegion` which may contain the given address.
     #[allow(clippy::arithmetic_side_effects)]
-    fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
+    pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         // Safety:
         // &mut references to the mapping cache are only created internally from methods that do not
         // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
@@ -312,26 +313,6 @@ impl<'a> UnalignedMemoryMapping<'a> {
             }
         }
         generate_access_violation(self.config, self.sbpf_version, access_type, vm_addr, len)
-    }
-
-    /// Returns the `MemoryRegion` corresponding to the given address.
-    pub fn region(
-        &self,
-        access_type: AccessType,
-        vm_addr: u64,
-    ) -> Result<(usize, &MemoryRegion), EbpfError> {
-        if let Some((index, region)) = self.find_region(vm_addr) {
-            if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
-                && (access_type == AccessType::Load
-                    || ensure_writable_region(region, &self.access_violation_handler))
-            {
-                return Ok((index, region));
-            }
-        }
-        Err(
-            generate_access_violation(self.config, self.sbpf_version, access_type, vm_addr, 0)
-                .unwrap_err(),
-        )
     }
 
     /// Returns the `MemoryRegion`s in this mapping
@@ -416,8 +397,9 @@ impl<'a> AlignedMemoryMapping<'a> {
         )
     }
 
+    /// Returns the `MemoryRegion` which may contain the given address.
     #[inline]
-    fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
+    pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
         if (1..self.regions.len()).contains(&index) {
             // Safety: bounds check above
@@ -439,26 +421,6 @@ impl<'a> AlignedMemoryMapping<'a> {
             }
         }
         generate_access_violation(self.config, self.sbpf_version, access_type, vm_addr, len)
-    }
-
-    /// Returns the `MemoryRegion` corresponding to the given address.
-    pub fn region(
-        &self,
-        access_type: AccessType,
-        vm_addr: u64,
-    ) -> Result<(usize, &MemoryRegion), EbpfError> {
-        if let Some((index, region)) = self.find_region(vm_addr) {
-            if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
-                && (access_type == AccessType::Load
-                    || ensure_writable_region(region, &self.access_violation_handler))
-            {
-                return Ok((index, region));
-            }
-        }
-        Err(
-            generate_access_violation(self.config, self.sbpf_version, access_type, vm_addr, 0)
-                .unwrap_err(),
-        )
     }
 
     /// Returns the `MemoryRegion`s in this mapping
@@ -586,16 +548,12 @@ impl<'a> MemoryMapping<'a> {
         }
     }
 
-    /// Returns the `MemoryRegion` corresponding to the given address.
-    pub fn region(
-        &self,
-        access_type: AccessType,
-        vm_addr: u64,
-    ) -> Result<(usize, &MemoryRegion), EbpfError> {
+    /// Returns the `MemoryRegion` which may contain the given address.
+    pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         match self {
-            MemoryMapping::Identity => Err(EbpfError::InvalidMemoryRegion(0)),
-            MemoryMapping::Aligned(m) => m.region(access_type, vm_addr),
-            MemoryMapping::Unaligned(m) => m.region(access_type, vm_addr),
+            MemoryMapping::Identity => None,
+            MemoryMapping::Aligned(m) => m.find_region(vm_addr),
+            MemoryMapping::Unaligned(m) => m.find_region(vm_addr),
         }
     }
 
@@ -832,7 +790,7 @@ mod test {
             .unwrap();
             for frame in 0..4 {
                 let address = ebpf::MM_STACK_START + frame * 4;
-                assert!(m.region(AccessType::Load, address).is_ok());
+                assert!(m.find_region(address).is_some());
                 assert!(m.map(AccessType::Load, address, 2).is_ok());
                 assert_error!(m.map(AccessType::Load, address + 2, 2), "AccessViolation");
                 assert_eq!(m.load::<u16>(address).unwrap(), 0xFFFF);
@@ -968,12 +926,9 @@ mod test {
             SBPFVersion::V3,
         )
         .unwrap();
-        assert_error!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START - 1),
-            "AccessViolation"
-        );
+        assert!(m.find_region(ebpf::MM_INPUT_START - 1).is_none());
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START)
+            m.find_region(ebpf::MM_INPUT_START)
                 .unwrap()
                 .1
                 .host_addr
@@ -981,19 +936,15 @@ mod test {
             mem1.as_ptr() as u64
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 3)
+            m.find_region(ebpf::MM_INPUT_START + 3)
                 .unwrap()
                 .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
         );
-        assert_error!(
-            m.region(AccessType::Store, ebpf::MM_INPUT_START + 4),
-            "AccessViolation"
-        );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 4)
+            m.find_region(ebpf::MM_INPUT_START + 4)
                 .unwrap()
                 .1
                 .host_addr
@@ -1001,17 +952,14 @@ mod test {
             mem2.as_ptr() as u64
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 7)
+            m.find_region(ebpf::MM_INPUT_START + 7)
                 .unwrap()
                 .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
         );
-        assert_error!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 8),
-            "AccessViolation"
-        );
+        assert!(m.find_region(ebpf::MM_INPUT_START + 8).is_some());
     }
 
     #[test]
@@ -1032,12 +980,9 @@ mod test {
             SBPFVersion::V4,
         )
         .unwrap();
-        assert_error!(
-            m.region(AccessType::Load, ebpf::MM_RODATA_START - 1),
-            "AccessViolation"
-        );
+        assert!(m.find_region(ebpf::MM_RODATA_START - 1).is_none());
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_RODATA_START)
+            m.find_region(ebpf::MM_RODATA_START)
                 .unwrap()
                 .1
                 .host_addr
@@ -1045,24 +990,16 @@ mod test {
             mem1.as_ptr() as u64
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_RODATA_START + 3)
+            m.find_region(ebpf::MM_RODATA_START + 3)
                 .unwrap()
                 .1
                 .host_addr
                 .get(),
             mem1.as_ptr() as u64
         );
-        assert_error!(
-            m.region(AccessType::Load, ebpf::MM_RODATA_START + 4),
-            "AccessViolation"
-        );
-
-        assert_error!(
-            m.region(AccessType::Store, ebpf::MM_STACK_START),
-            "AccessViolation"
-        );
+        assert!(m.find_region(ebpf::MM_RODATA_START + 4).is_some());
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_STACK_START)
+            m.find_region(ebpf::MM_STACK_START)
                 .unwrap()
                 .1
                 .host_addr
@@ -1070,17 +1007,14 @@ mod test {
             mem2.as_ptr() as u64
         );
         assert_eq!(
-            m.region(AccessType::Load, ebpf::MM_STACK_START + 3)
+            m.find_region(ebpf::MM_STACK_START + 3)
                 .unwrap()
                 .1
                 .host_addr
                 .get(),
             mem2.as_ptr() as u64
         );
-        assert_error!(
-            m.region(AccessType::Load, ebpf::MM_INPUT_START + 4),
-            "AccessViolation"
-        );
+        assert!(m.find_region(ebpf::MM_INPUT_START + 4).is_none());
     }
 
     #[test]
