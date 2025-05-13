@@ -174,10 +174,7 @@ fn test_code_length_estimate() {
                 executable.get_loader(),
                 executable.get_sbpf_version(),
             );
-            println!(
-                "{:02X};{:>7.3};{}",
-                opcode, machine_code_length_per_instruction, assembly
-            );
+            println!("{opcode:02X};{machine_code_length_per_instruction:>7.3};{assembly}");
         }
     }
 }
