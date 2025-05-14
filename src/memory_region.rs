@@ -168,8 +168,10 @@ pub enum AccessType {
 pub struct UnalignedMemoryMapping<'a> {
     /// Mapped memory regions
     regions: Box<[MemoryRegion]>,
-    /// Copy of the regions vm_addr fields to improve cache density
+    /// Regions vm_addr fields in Eytzinger order
     region_addresses: Box<[u64]>,
+    /// Converts the Eytzinger order back to the original order
+    region_index_lookup: Box<[usize]>,
     /// Cache of the last `MappingCache::SIZE` vm_addr => region_index lookups
     cache: UnsafeCell<MappingCache>,
     /// VM configuration
@@ -184,7 +186,6 @@ impl fmt::Debug for UnalignedMemoryMapping<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnalignedMemoryMapping")
             .field("regions", &self.regions)
-            .field("region_addresses", &self.region_addresses)
             .field("cache", &self.cache)
             .field("config", &self.config)
             .finish()
@@ -192,24 +193,15 @@ impl fmt::Debug for UnalignedMemoryMapping<'_> {
 }
 
 impl<'a> UnalignedMemoryMapping<'a> {
-    fn construct_eytzinger_order(
-        &mut self,
-        ascending_regions: &mut [MemoryRegion],
-        mut in_index: usize,
-        out_index: usize,
-    ) -> usize {
+    fn construct_eytzinger_order(&mut self, mut in_index: usize, out_index: usize) -> usize {
         if out_index >= self.regions.len() {
             return in_index;
         }
-        in_index = self.construct_eytzinger_order(
-            ascending_regions,
-            in_index,
-            out_index.saturating_mul(2).saturating_add(1),
-        );
-        self.regions[out_index] = mem::take(&mut ascending_regions[in_index]);
-        self.region_addresses[out_index] = self.regions[out_index].vm_addr;
+        in_index =
+            self.construct_eytzinger_order(in_index, out_index.saturating_mul(2).saturating_add(1));
+        self.region_addresses[out_index] = self.regions[in_index].vm_addr;
+        self.region_index_lookup[out_index] = in_index;
         self.construct_eytzinger_order(
-            ascending_regions,
             in_index.saturating_add(1),
             out_index.saturating_mul(2).saturating_add(2),
         )
@@ -227,7 +219,8 @@ impl<'a> UnalignedMemoryMapping<'a> {
             "SBPFv4 and later versions do not support unaligned memory"
         );
         regions.sort();
-        for index in 1..regions.len() {
+        let number_of_regions = regions.len();
+        for index in 1..number_of_regions {
             let first = &regions[index.saturating_sub(1)];
             let second = &regions[index];
             if first.vm_addr_end > second.vm_addr {
@@ -235,17 +228,15 @@ impl<'a> UnalignedMemoryMapping<'a> {
             }
         }
         let mut result = Self {
-            regions: (0..regions.len())
-                .map(|_| MemoryRegion::default())
-                .collect::<Vec<_>>()
-                .into_boxed_slice(),
-            region_addresses: vec![0; regions.len()].into_boxed_slice(),
+            regions: regions.into_boxed_slice(),
+            region_addresses: vec![0; number_of_regions].into_boxed_slice(),
+            region_index_lookup: vec![0; number_of_regions].into_boxed_slice(),
             cache: UnsafeCell::new(MappingCache::new()),
             config,
             sbpf_version,
             access_violation_handler,
         };
-        result.construct_eytzinger_order(&mut regions, 0, 0);
+        result.construct_eytzinger_order(0, 0);
         Ok(result)
     }
 
@@ -277,7 +268,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
             // Safety:
             // Cached index, we validated it before caching it. See the corresponding safety section
             // in the miss branch.
-            Some((index - 1, unsafe { self.regions.get_unchecked(index - 1) }))
+            Some((index, unsafe { self.regions.get_unchecked(index) }))
         } else {
             let mut index = 1;
             while index <= self.region_addresses.len() {
@@ -295,9 +286,10 @@ impl<'a> UnalignedMemoryMapping<'a> {
             // Safety:
             // we check for index==0 above, and by construction if we get here index
             // must be contained in region
-            let region = unsafe { self.regions.get_unchecked(index - 1) };
+            index = unsafe { *self.region_index_lookup.get_unchecked(index - 1) };
+            let region = unsafe { self.regions.get_unchecked(index) };
             cache.insert(region.vm_addr..region.vm_addr_end, index);
-            Some((index - 1, region))
+            Some((index, region))
         }
     }
 
