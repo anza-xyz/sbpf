@@ -298,7 +298,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
     }
 
     /// Given a list of regions translate from virtual machine to host address
-    pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
+    pub fn map(&mut self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
         if let Some((_index, region)) = self.find_region(vm_addr) {
             if access_type == AccessType::Load
                 || ensure_writable_region(region, &self.access_violation_handler)
@@ -406,7 +406,7 @@ impl<'a> AlignedMemoryMapping<'a> {
     }
 
     /// Given a list of regions translate from virtual machine to host address
-    pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
+    pub fn map(&mut self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
         if let Some((_index, region)) = self.find_region(vm_addr) {
             if access_type == AccessType::Load
                 || ensure_writable_region(region, &self.access_violation_handler)
@@ -513,7 +513,7 @@ impl<'a> MemoryMapping<'a> {
     }
 
     /// Map virtual memory to host memory.
-    pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
+    pub fn map(&mut self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
         match self {
             MemoryMapping::Identity => ProgramResult::Ok(vm_addr),
             MemoryMapping::Aligned(m) => m.map(access_type, vm_addr, len),
@@ -523,7 +523,7 @@ impl<'a> MemoryMapping<'a> {
 
     /// Loads `size_of::<T>()` bytes from the given address.
     #[inline]
-    pub fn load<T: Pod + Into<u64>>(&self, vm_addr: u64) -> ProgramResult {
+    pub fn load<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> ProgramResult {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         match self.map(AccessType::Load, vm_addr, len) {
@@ -536,7 +536,7 @@ impl<'a> MemoryMapping<'a> {
 
     /// Store `value` at the given address.
     #[inline]
-    pub fn store<T: Pod>(&self, value: T, vm_addr: u64) -> ProgramResult {
+    pub fn store<T: Pod>(&mut self, value: T, vm_addr: u64) -> ProgramResult {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         match self.map(AccessType::Store, vm_addr, len) {
@@ -758,13 +758,13 @@ mod test {
     #[test]
     fn test_map_empty() {
         let config = Config::default();
-        let m = UnalignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
+        let mut m = UnalignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
         assert_error!(
             m.map(AccessType::Load, ebpf::MM_INPUT_START, 8),
             "AccessViolation"
         );
 
-        let m = AlignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
+        let mut m = AlignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
         assert_error!(
             m.map(AccessType::Load, ebpf::MM_INPUT_START, 8),
             "AccessViolation"
@@ -779,7 +779,7 @@ mod test {
                 ..Config::default()
             };
             let mut mem1 = vec![0xff; 8];
-            let m = MemoryMapping::new(
+            let mut m = MemoryMapping::new(
                 vec![
                     MemoryRegion::new_readonly(&[0; 8], ebpf::MM_RODATA_START),
                     MemoryRegion::new_writable_gapped(&mut mem1, ebpf::MM_STACK_START, 2),
@@ -835,7 +835,7 @@ mod test {
         let mem2 = [22, 22];
         let mem3 = [33];
         let mem4 = [44, 44];
-        let m = UnalignedMemoryMapping::new(
+        let mut m = UnalignedMemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
@@ -1025,7 +1025,7 @@ mod test {
         };
         let mem1 = [0x11, 0x22];
         let mem2 = [0x33];
-        let m = MemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_readonly(&mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
@@ -1048,7 +1048,7 @@ mod test {
         };
         let mut mem1 = vec![0xff, 0xff];
         let mut mem2 = vec![0xff];
-        let m = MemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_writable(&mut mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
@@ -1075,7 +1075,7 @@ mod test {
         };
 
         let mut mem1 = vec![0xFF];
-        let m = MemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START)],
             &config,
             SBPFVersion::V3,
@@ -1090,7 +1090,7 @@ mod test {
 
         let mut mem1 = vec![0xFF; 4];
         let mut mem2 = vec![0xDD; 4];
-        let m = MemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_writable(&mut mem2, ebpf::MM_INPUT_START + 4),
@@ -1113,7 +1113,7 @@ mod test {
         };
 
         let mem1 = vec![0xff];
-        let m = MemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![MemoryRegion::new_readonly(&mem1, ebpf::MM_INPUT_START)],
             &config,
             SBPFVersion::V3,
@@ -1126,7 +1126,7 @@ mod test {
 
         let mem1 = vec![0xFF; 4];
         let mem2 = vec![0xDD; 4];
-        let m = MemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_readonly(&mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + 4),
@@ -1147,7 +1147,7 @@ mod test {
         };
         let mut mem1 = vec![0xff, 0xff];
         let mem2 = vec![0xff, 0xff];
-        let m = MemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
@@ -1295,7 +1295,7 @@ mod test {
             regions[0].access_violation_handler_payload = Some(0);
 
             let c = Rc::clone(&copied);
-            let m = MemoryMapping::new_with_access_violation_handler(
+            let mut m = MemoryMapping::new_with_access_violation_handler(
                 regions,
                 &config,
                 SBPFVersion::V3,
@@ -1330,7 +1330,7 @@ mod test {
             regions[0].access_violation_handler_payload = Some(0);
 
             let c = Rc::clone(&copied);
-            let m = MemoryMapping::new_with_access_violation_handler(
+            let mut m = MemoryMapping::new_with_access_violation_handler(
                 regions,
                 &config,
                 SBPFVersion::V3,
@@ -1375,7 +1375,7 @@ mod test {
             regions[0].access_violation_handler_payload = Some(42);
 
             let c = Rc::clone(&copied);
-            let m = MemoryMapping::new_with_access_violation_handler(
+            let mut m = MemoryMapping::new_with_access_violation_handler(
                 regions,
                 &config,
                 SBPFVersion::V3,
@@ -1401,7 +1401,7 @@ mod test {
         let config = Config::default();
         let original = [11, 22];
 
-        let m = MemoryMapping::new_with_access_violation_handler(
+        let mut m = MemoryMapping::new_with_access_violation_handler(
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V4,
@@ -1418,7 +1418,7 @@ mod test {
         let config = Config::default();
         let original = [11, 22];
 
-        let m = MemoryMapping::new_with_access_violation_handler(
+        let mut m = MemoryMapping::new_with_access_violation_handler(
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V4,
