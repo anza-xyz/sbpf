@@ -443,7 +443,7 @@ fn test_owned_ro_region_no_initial_gap() {
     let ro_section =
         ElfExecutable::parse_ro_sections(&config, &SBPFVersion::V0, sections, &elf_bytes).unwrap();
     let ro_region = get_ro_region(&ro_section, &elf_bytes);
-    let memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
+    let mut memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
     let owned_section = match &ro_section {
         Section::Owned(_offset, data) => data.as_slice(),
         _ => panic!(),
@@ -493,7 +493,7 @@ fn test_owned_ro_region_initial_gap_mappable() {
     let ro_section =
         ElfExecutable::parse_ro_sections(&config, &SBPFVersion::V0, sections, &elf_bytes).unwrap();
     let ro_region = get_ro_region(&ro_section, &elf_bytes);
-    let memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
+    let mut memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
     let owned_section = match &ro_section {
         Section::Owned(_offset, data) => data.as_slice(),
         _ => panic!(),
@@ -545,7 +545,7 @@ fn test_owned_ro_region_initial_gap_map_error() {
         _ => panic!(),
     };
     let ro_region = get_ro_region(&ro_section, &elf_bytes);
-    let memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
+    let mut memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
 
     // s1 starts at sh_addr=10 so [MM_RODATA_START..MM_RODATA_START + 10] is not mappable
 
@@ -654,7 +654,8 @@ fn test_borrowed_ro_region_no_initial_gap() {
         let ro_section =
             ElfExecutable::parse_ro_sections(&config, &sbpf_version, sections, &elf_bytes).unwrap();
         let ro_region = get_ro_region(&ro_section, &elf_bytes);
-        let memory_mapping = MemoryMapping::new(vec![ro_region], &config, sbpf_version).unwrap();
+        let mut memory_mapping =
+            MemoryMapping::new(vec![ro_region], &config, sbpf_version).unwrap();
 
         // s1 starts at sh_offset=0 so [0..s2.sh_offset + s2.sh_size]
         // is the valid ro memory area
@@ -695,7 +696,8 @@ fn test_borrowed_ro_region_initial_gap() {
         let ro_section =
             ElfExecutable::parse_ro_sections(&config, &sbpf_version, sections, &elf_bytes).unwrap();
         let ro_region = get_ro_region(&ro_section, &elf_bytes);
-        let memory_mapping = MemoryMapping::new(vec![ro_region], &config, sbpf_version).unwrap();
+        let mut memory_mapping =
+            MemoryMapping::new(vec![ro_region], &config, sbpf_version).unwrap();
 
         // s2 starts at sh_addr=10 so [0..10] is not mappable
 
