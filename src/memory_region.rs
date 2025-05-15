@@ -33,10 +33,10 @@ use std::{
 */
 
 /// Callback executed before generate_access_violation()
-pub type AccessViolationHandler = Box<dyn Fn(u32) -> Result<u64, ()>>;
+pub type AccessViolationHandler = Box<dyn Fn(u16) -> Result<u64, ()>>;
 /// Fail always
 #[allow(clippy::result_unit_err)]
-pub fn default_access_violation_handler(_access_violation_handler_payload: u32) -> Result<u64, ()> {
+pub fn default_access_violation_handler(_access_violation_handler_payload: u16) -> Result<u64, ()> {
     Err(())
 }
 
@@ -57,7 +57,7 @@ pub struct MemoryRegion {
     /// Is `AccessType::Store` allowed without triggering an access violation
     pub writable: Cell<bool>,
     /// User defined payload for the [AccessViolationHandler]
-    pub access_violation_handler_payload: u32,
+    pub access_violation_handler_payload: Option<u16>,
 }
 
 impl MemoryRegion {
@@ -78,7 +78,7 @@ impl MemoryRegion {
             len: slice.len() as u64,
             vm_gap_shift,
             writable: Cell::new(writable),
-            access_violation_handler_payload: u32::MAX,
+            access_violation_handler_payload: None,
         }
     }
 
@@ -133,13 +133,14 @@ impl fmt::Debug for MemoryRegion {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "host_addr: {:#x?}-{:#x?}, vm_addr: {:#x?}-{:#x?}, len: {}, writable: {}",
+            "host_addr: {:#x?}-{:#x?}, vm_addr: {:#x?}-{:#x?}, len: {}, writable: {}, payload {:?}",
             self.host_addr,
             self.host_addr.get().saturating_add(self.len),
             self.vm_addr,
             self.vm_addr_end,
             self.len,
             self.writable.get(),
+            self.access_violation_handler_payload,
         )
     }
 }
@@ -646,10 +647,10 @@ fn ensure_writable_region(
     if region.writable.get() {
         return true;
     }
-    if region.access_violation_handler_payload == u32::MAX {
+    let Some(payload) = region.access_violation_handler_payload else {
         return false;
-    }
-    if let Ok(host_addr) = access_violation_handler(region.access_violation_handler_payload) {
+    };
+    if let Ok(host_addr) = access_violation_handler(payload) {
         region.host_addr.replace(host_addr);
         region.writable.replace(true);
         true
@@ -1376,7 +1377,7 @@ mod test {
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
             let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)];
-            regions[0].access_violation_handler_payload = 0;
+            regions[0].access_violation_handler_payload = Some(0);
 
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_access_violation_handler(
@@ -1411,7 +1412,7 @@ mod test {
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
             let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)];
-            regions[0].access_violation_handler_payload = 0;
+            regions[0].access_violation_handler_payload = Some(0);
 
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_access_violation_handler(
@@ -1456,7 +1457,7 @@ mod test {
                 MemoryRegion::new_readonly(&original1, ebpf::MM_RODATA_START),
                 MemoryRegion::new_readonly(&original2, ebpf::MM_RODATA_START + 0x100000000),
             ];
-            regions[0].access_violation_handler_payload = 42;
+            regions[0].access_violation_handler_payload = Some(42);
 
             let c = Rc::clone(&copied);
             let m = MemoryMapping::new_with_access_violation_handler(
