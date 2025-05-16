@@ -12,7 +12,9 @@ extern crate test;
 
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 use solana_sbpf::{
-    memory_region::{AccessType, AlignedMemoryMapping, MemoryRegion, UnalignedMemoryMapping},
+    memory_region::{
+        AccessType, AlignedMemoryMapping, MemoryMapping, MemoryRegion, UnalignedMemoryMapping,
+    },
     program::SBPFVersion,
     vm::Config,
 };
@@ -70,7 +72,7 @@ macro_rules! bench_gapped_randomized_access_with_1024_entries {
                         false,
                     )];
                     let config = Config::default();
-                    let memory_mapping =
+                    let mut memory_mapping =
                         $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
                     let mut prng = new_prng!();
                     bencher.iter(|| {
@@ -109,7 +111,7 @@ macro_rules! bench_randomized_access_with_0001_entry {
             let content = vec![0; 1024 * 2];
             let memory_regions = vec![MemoryRegion::new_readonly(&content[..], 0x100000000)];
             let config = Config::default();
-            let memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
+            let mut memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             let mut prng = new_prng!();
             bencher.iter(|| {
                 let _ = memory_mapping.map(
@@ -142,7 +144,7 @@ macro_rules! bench_randomized_access_with_n_entries {
             let mut prng = new_prng!();
             let (memory_regions, end_address) = generate_memory_regions($n, false, Some(&mut prng));
             let config = Config::default();
-            let memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
+            let mut memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             bencher.iter(|| {
                 let _ = memory_mapping.map(
                     AccessType::Load,
@@ -191,7 +193,7 @@ macro_rules! bench_randomized_mapping_with_n_entries {
             let (memory_regions, _end_address) =
                 generate_memory_regions($n, false, Some(&mut prng));
             let config = Config::default();
-            let memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
+            let mut memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             bencher.iter(|| {
                 let _ = memory_mapping.map(AccessType::Load, 0x100000000, 1);
             });
@@ -239,7 +241,7 @@ macro_rules! bench_mapping_with_n_entries {
         fn $name(bencher: &mut Bencher) {
             let (memory_regions, _end_address) = generate_memory_regions($n, false, None);
             let config = Config::default();
-            let memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
+            let mut memory_mapping = $mem::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             bencher.iter(|| {
                 let _ = memory_mapping.map(AccessType::Load, 0x100000000, 1);
             });
@@ -287,14 +289,18 @@ enum MemoryOperation {
     Store(u64),
 }
 
-fn do_bench_mapping_operation(bencher: &mut Bencher, op: MemoryOperation, vm_addr: u64) {
+fn do_bench_mapping_operation(bencher: &mut Bencher, op: MemoryOperation) {
+    let vm_addr = 0x100000000;
     let mut mem1 = vec![0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18];
     let mut mem2 = vec![0x22; 1];
-    let config = Config::default();
-    let memory_mapping = UnalignedMemoryMapping::new(
+    let config = Config {
+        aligned_memory_mapping: false,
+        ..Config::default()
+    };
+    let mut memory_mapping = MemoryMapping::new(
         vec![
-            MemoryRegion::new_writable(&mut mem1, 0x100000000),
-            MemoryRegion::new_writable(&mut mem2, 0x100000000 + 8),
+            MemoryRegion::new_writable(&mut mem1, vm_addr),
+            MemoryRegion::new_writable(&mut mem2, vm_addr + 8),
         ],
         &config,
         SBPFVersion::V3,
@@ -316,25 +322,15 @@ fn do_bench_mapping_operation(bencher: &mut Bencher, op: MemoryOperation, vm_add
 
 #[bench]
 fn bench_mapping_8_byte_map(bencher: &mut Bencher) {
-    do_bench_mapping_operation(bencher, MemoryOperation::Map, 0x100000000)
+    do_bench_mapping_operation(bencher, MemoryOperation::Map)
 }
 
 #[bench]
 fn bench_mapping_8_byte_load(bencher: &mut Bencher) {
-    do_bench_mapping_operation(bencher, MemoryOperation::Load, 0x100000000)
-}
-
-#[bench]
-fn bench_mapping_8_byte_load_non_contiguous(bencher: &mut Bencher) {
-    do_bench_mapping_operation(bencher, MemoryOperation::Load, 0x100000001)
+    do_bench_mapping_operation(bencher, MemoryOperation::Load)
 }
 
 #[bench]
 fn bench_mapping_8_byte_store(bencher: &mut Bencher) {
-    do_bench_mapping_operation(bencher, MemoryOperation::Store(42), 0x100000000)
-}
-
-#[bench]
-fn bench_mapping_8_byte_store_non_contiguous(bencher: &mut Bencher) {
-    do_bench_mapping_operation(bencher, MemoryOperation::Store(42), 0x100000001)
+    do_bench_mapping_operation(bencher, MemoryOperation::Store(42))
 }
