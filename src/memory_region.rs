@@ -251,22 +251,6 @@ impl<'a> UnalignedMemoryMapping<'a> {
         Ok(result)
     }
 
-    /// Creates a new memory mapping for tests and benches.
-    ///
-    /// `access_violation_handler` defaults to a function which always returns an error.
-    pub fn new(
-        regions: Vec<MemoryRegion>,
-        config: &'a Config,
-        sbpf_version: SBPFVersion,
-    ) -> Result<Self, EbpfError> {
-        Self::new_with_access_violation_handler(
-            regions,
-            config,
-            sbpf_version,
-            Box::new(default_access_violation_handler),
-        )
-    }
-
     /// Returns the `MemoryRegion` which may contain the given address.
     #[allow(clippy::arithmetic_side_effects)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
@@ -360,22 +344,6 @@ impl<'a> AlignedMemoryMapping<'a> {
                 sbpf_version,
             },
         })
-    }
-
-    /// Creates a new memory mapping for tests and benches.
-    ///
-    /// `access_violation_handler` defaults to a function which always returns an error.
-    pub fn new(
-        regions: Vec<MemoryRegion>,
-        config: &'a Config,
-        sbpf_version: SBPFVersion,
-    ) -> Result<Self, EbpfError> {
-        Self::new_with_access_violation_handler(
-            regions,
-            config,
-            sbpf_version,
-            Box::new(default_access_violation_handler),
-        )
     }
 
     /// Returns the `MemoryRegion` which may contain the given address.
