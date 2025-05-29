@@ -73,7 +73,7 @@ macro_rules! bench_gapped_randomized_access_with_1024_entries {
                         frame_size,
                         false,
                     )];
-                    let mut memory_mapping =
+                    let memory_mapping =
                         MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
                     let mut prng = new_prng!();
                     bencher.iter(|| {
@@ -115,7 +115,7 @@ macro_rules! bench_randomized_access_with_0001_entry {
                 aligned_memory_mapping: $aligned_memory_mapping,
                 ..Config::default()
             };
-            let mut memory_mapping =
+            let memory_mapping =
                 MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             let mut prng = new_prng!();
             bencher.iter(|| {
@@ -152,7 +152,7 @@ macro_rules! bench_randomized_access_with_n_entries {
                 aligned_memory_mapping: $aligned_memory_mapping,
                 ..Config::default()
             };
-            let mut memory_mapping =
+            let memory_mapping =
                 MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             bencher.iter(|| {
                 let _ = memory_mapping.map(
@@ -202,7 +202,7 @@ macro_rules! bench_randomized_mapping_with_n_entries {
             let (memory_regions, _end_address) =
                 generate_memory_regions($n, false, Some(&mut prng));
             let config = Config::default();
-            let mut memory_mapping =
+            let memory_mapping =
                 MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             bencher.iter(|| {
                 let _ = memory_mapping.map(AccessType::Load, 0x100000000, 1);
@@ -254,7 +254,7 @@ macro_rules! bench_mapping_with_n_entries {
                 aligned_memory_mapping: $aligned_memory_mapping,
                 ..Config::default()
             };
-            let mut memory_mapping =
+            let memory_mapping =
                 MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
             bencher.iter(|| {
                 let _ = memory_mapping.map(AccessType::Load, 0x100000000, 1);
