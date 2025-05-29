@@ -304,20 +304,6 @@ impl<'a> UnalignedMemoryMapping<'a> {
         }
     }
 
-    /// Given a list of regions translate from virtual machine to host address
-    pub fn map(&mut self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
-        if let Some((_index, region)) = self.find_region(vm_addr) {
-            if access_type == AccessType::Load
-                || ensure_writable_region(region, &self.common.access_violation_handler)
-            {
-                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
-                    return ProgramResult::Ok(host_addr);
-                }
-            }
-        }
-        generate_access_violation(&self.common, access_type, vm_addr, len)
-    }
-
     /// Replaces the `MemoryRegion` at the given index
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
         if index >= self.common.regions.len()
@@ -402,20 +388,6 @@ impl<'a> AlignedMemoryMapping<'a> {
             return Some((index, region));
         }
         None
-    }
-
-    /// Given a list of regions translate from virtual machine to host address
-    pub fn map(&mut self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
-        if let Some((_index, region)) = self.find_region(vm_addr) {
-            if access_type == AccessType::Load
-                || ensure_writable_region(region, &self.common.access_violation_handler)
-            {
-                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
-                    return ProgramResult::Ok(host_addr);
-                }
-            }
-        }
-        generate_access_violation(&self.common, access_type, vm_addr, len)
     }
 
     /// Replaces the `MemoryRegion` at the given index
@@ -504,11 +476,21 @@ impl<'a> MemoryMapping<'a> {
 
     /// Map virtual memory to host memory.
     pub fn map(&mut self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
-        match self {
-            MemoryMapping::Identity => ProgramResult::Ok(vm_addr),
-            MemoryMapping::Aligned(m) => m.map(access_type, vm_addr, len),
-            MemoryMapping::Unaligned(m) => m.map(access_type, vm_addr, len),
+        let common = match &self {
+            MemoryMapping::Identity => return ProgramResult::Ok(vm_addr),
+            MemoryMapping::Aligned(m) => &m.common,
+            MemoryMapping::Unaligned(m) => &m.common,
+        };
+        if let Some((_index, region)) = self.find_region(vm_addr) {
+            if access_type == AccessType::Load
+                || ensure_writable_region(region, &common.access_violation_handler)
+            {
+                if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
+                    return ProgramResult::Ok(host_addr);
+                }
+            }
         }
+        generate_access_violation(common, access_type, vm_addr, len)
     }
 
     /// Loads `size_of::<T>()` bytes from the given address.
@@ -746,18 +728,17 @@ mod test {
 
     #[test]
     fn test_map_empty() {
-        let config = Config::default();
-        let mut m = UnalignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
-        assert_error!(
-            m.map(AccessType::Load, ebpf::MM_INPUT_START, 8),
-            "AccessViolation"
-        );
-
-        let mut m = AlignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
-        assert_error!(
-            m.map(AccessType::Load, ebpf::MM_INPUT_START, 8),
-            "AccessViolation"
-        );
+        for aligned_memory_mapping in [false, true] {
+            let config = Config {
+                aligned_memory_mapping,
+                ..Config::default()
+            };
+            let mut m = MemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
+            assert_error!(
+                m.map(AccessType::Load, ebpf::MM_INPUT_START, 8),
+                "AccessViolation"
+            );
+        }
     }
 
     #[test]
@@ -792,11 +773,14 @@ mod test {
 
     #[test]
     fn test_unaligned_map_overlap() {
-        let config = Config::default();
+        let config = Config {
+            aligned_memory_mapping: false,
+            ..Config::default()
+        };
         let mem1 = [1, 2, 3, 4];
         let mem2 = [5, 6];
         assert_error!(
-            UnalignedMemoryMapping::new(
+            MemoryMapping::new(
                 vec![
                     MemoryRegion::new_readonly(&mem1, ebpf::MM_INPUT_START),
                     MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64 - 1),
@@ -806,7 +790,7 @@ mod test {
             ),
             "InvalidMemoryRegion(1)"
         );
-        assert!(UnalignedMemoryMapping::new(
+        assert!(MemoryMapping::new(
             vec![
                 MemoryRegion::new_readonly(&mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
@@ -819,12 +803,15 @@ mod test {
 
     #[test]
     fn test_unaligned_map() {
-        let config = Config::default();
+        let config = Config {
+            aligned_memory_mapping: false,
+            ..Config::default()
+        };
         let mut mem1 = [11];
         let mem2 = [22, 22];
         let mem3 = [33];
         let mem4 = [44, 44];
-        let mut m = UnalignedMemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
@@ -1150,11 +1137,14 @@ mod test {
 
     #[test]
     fn test_unaligned_map_replace_region() {
-        let config = Config::default();
+        let config = Config {
+            aligned_memory_mapping: false,
+            ..Config::default()
+        };
         let mem1 = [11];
         let mem2 = [22, 22];
         let mem3 = [33];
-        let mut m = UnalignedMemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_readonly(&mem1, ebpf::MM_INPUT_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
@@ -1222,11 +1212,14 @@ mod test {
 
     #[test]
     fn test_aligned_map_replace_region() {
-        let config = Config::default();
+        let config = Config {
+            aligned_memory_mapping: true,
+            ..Config::default()
+        };
         let mem1 = [11];
         let mem2 = [22, 22];
         let mem3 = [33, 33];
-        let mut m = AlignedMemoryMapping::new(
+        let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_readonly(&mem1, ebpf::MM_RODATA_START),
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_STACK_START),
