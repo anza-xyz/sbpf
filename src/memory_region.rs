@@ -716,7 +716,11 @@ impl<'a> MemoryMapping<'a> {
         sbpf_version: SBPFVersion,
         cow_cb: MemoryCowCallback,
     ) -> Result<Self, EbpfError> {
-        if config.aligned_memory_mapping {
+        debug_assert!(
+            sbpf_version != SBPFVersion::V4 || config.aligned_memory_mapping,
+            "SBPFv4 only supports aligned memory"
+        );
+        if sbpf_version == SBPFVersion::V4 || config.aligned_memory_mapping {
             AlignedMemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)
                 .map(MemoryMapping::Aligned)
         } else {
@@ -1017,7 +1021,7 @@ mod test {
                     MemoryRegion::new_writable_gapped(&mut mem1, ebpf::MM_STACK_START, 2),
                 ],
                 &config,
-                SBPFVersion::V4,
+                SBPFVersion::V3,
             )
             .unwrap();
             for frame in 0..4 {
@@ -1155,7 +1159,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + 4),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
         assert_error!(
@@ -1297,7 +1301,7 @@ mod test {
                 ),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1339,7 +1343,7 @@ mod test {
                 ),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
         m.store(0x1122u16, ebpf::MM_INPUT_START).unwrap();
@@ -1366,7 +1370,7 @@ mod test {
         let m = MemoryMapping::new(
             vec![MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START)],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1400,7 +1404,7 @@ mod test {
                 MemoryRegion::new_writable(&mut mem2, ebpf::MM_INPUT_START + 7),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1428,7 +1432,7 @@ mod test {
         let m = MemoryMapping::new(
             vec![MemoryRegion::new_writable(&mut mem1, ebpf::MM_INPUT_START)],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
         m.store(0x11u8, ebpf::MM_INPUT_START).unwrap();
@@ -1446,7 +1450,7 @@ mod test {
                 MemoryRegion::new_writable(&mut mem2, ebpf::MM_INPUT_START + 4),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
         m.store(0x1122334455667788u64, ebpf::MM_INPUT_START)
@@ -1472,7 +1476,7 @@ mod test {
         let m = MemoryMapping::new(
             vec![MemoryRegion::new_readonly(&mem1, ebpf::MM_INPUT_START)],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
         assert_eq!(m.load::<u8>(ebpf::MM_INPUT_START).unwrap(), 0xff);
@@ -1488,7 +1492,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + 4),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
         assert_eq!(
@@ -1513,7 +1517,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
         m.store(0x11223344, ebpf::MM_INPUT_START).unwrap();
@@ -1531,7 +1535,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1658,7 +1662,7 @@ mod test {
             let m = MemoryMapping::new_with_cow(
                 regions,
                 &config,
-                SBPFVersion::V4,
+                SBPFVersion::V3,
                 Box::new(move |_| {
                     c.borrow_mut().extend_from_slice(&original);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
@@ -1693,7 +1697,7 @@ mod test {
             let m = MemoryMapping::new_with_cow(
                 regions,
                 &config,
-                SBPFVersion::V4,
+                SBPFVersion::V3,
                 Box::new(move |_| {
                     c.borrow_mut().extend_from_slice(&original);
                     Ok(c.borrow().as_slice().as_ptr() as u64)
@@ -1738,7 +1742,7 @@ mod test {
             let m = MemoryMapping::new_with_cow(
                 regions,
                 &config,
-                SBPFVersion::V4,
+                SBPFVersion::V3,
                 Box::new(move |id| {
                     // check that the argument passed to MemoryRegion::new_readonly is then passed to the
                     // callback
@@ -1787,5 +1791,24 @@ mod test {
         .unwrap();
 
         m.store(33u8, ebpf::MM_RODATA_START).unwrap();
+    }
+
+    #[test]
+    #[should_panic(expected = "SBPFv4 only supports aligned memory")]
+    fn v4_aligned_mapping() {
+        let config = Config {
+            aligned_memory_mapping: false,
+            ..Config::default()
+        };
+
+        let mapping = MemoryMapping::new_with_cow(
+            vec![MemoryRegion::new_readonly(&[11, 12], ebpf::MM_RODATA_START)],
+            &config,
+            SBPFVersion::V4,
+            Box::new(|_| Err(())),
+        )
+        .unwrap();
+
+        assert!(matches!(mapping, MemoryMapping::Aligned(_)));
     }
 }
