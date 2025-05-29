@@ -33,10 +33,10 @@ use std::{
 */
 
 /// Callback executed before generate_access_violation()
-pub type MemoryCowCallback = Box<dyn Fn(u32) -> Result<u64, ()>>;
+pub type AccessViolationHandler = Box<dyn Fn(u32) -> Result<u64, ()>>;
 /// Fail always
 #[allow(clippy::result_unit_err)]
-pub fn default_memory_cow_callback(_cow_callback_payload: u32) -> Result<u64, ()> {
+pub fn default_access_violation_handler(_access_violation_handler_payload: u32) -> Result<u64, ()> {
     Err(())
 }
 
@@ -56,8 +56,8 @@ pub struct MemoryRegion {
     pub vm_gap_shift: u8,
     /// Is `AccessType::Store` allowed without triggering an access violation
     pub writable: Cell<bool>,
-    /// User defined payload for the [MemoryCowCallback]
-    pub cow_callback_payload: u32,
+    /// User defined payload for the [AccessViolationHandler]
+    pub access_violation_handler_payload: u32,
 }
 
 impl MemoryRegion {
@@ -78,7 +78,7 @@ impl MemoryRegion {
             len: slice.len() as u64,
             vm_gap_shift,
             writable: Cell::new(writable),
-            cow_callback_payload: u32::MAX,
+            access_violation_handler_payload: u32::MAX,
         }
     }
 
@@ -176,7 +176,7 @@ pub struct UnalignedMemoryMapping<'a> {
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
     /// Access violation handler
-    cow_cb: MemoryCowCallback,
+    access_violation_handler: AccessViolationHandler,
 }
 
 impl fmt::Debug for UnalignedMemoryMapping<'_> {
@@ -215,11 +215,11 @@ impl<'a> UnalignedMemoryMapping<'a> {
     }
 
     /// Creates a new MemoryMapping structure from the given regions
-    pub fn new_with_cow(
+    pub fn new_with_access_violation_handler(
         mut regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
-        cow_cb: MemoryCowCallback,
+        access_violation_handler: AccessViolationHandler,
     ) -> Result<Self, EbpfError> {
         debug_assert!(
             sbpf_version <= SBPFVersion::V3,
@@ -242,7 +242,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
             cache: UnsafeCell::new(MappingCache::new()),
             config,
             sbpf_version,
-            cow_cb,
+            access_violation_handler,
         };
         result.construct_eytzinger_order(&mut regions, 0, 0);
         Ok(result)
@@ -250,17 +250,17 @@ impl<'a> UnalignedMemoryMapping<'a> {
 
     /// Creates a new memory mapping for tests and benches.
     ///
-    /// `cow_cb` defaults to a function which always returns an error.
+    /// `access_violation_handler` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
-        Self::new_with_cow(
+        Self::new_with_access_violation_handler(
             regions,
             config,
             sbpf_version,
-            Box::new(default_memory_cow_callback),
+            Box::new(default_access_violation_handler),
         )
     }
 
@@ -319,7 +319,9 @@ impl<'a> UnalignedMemoryMapping<'a> {
             }
         };
 
-        if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
+        if access_type == AccessType::Load
+            || ensure_writable_region(region, &self.access_violation_handler)
+        {
             if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                 return ProgramResult::Ok(host_addr);
             }
@@ -341,7 +343,8 @@ impl<'a> UnalignedMemoryMapping<'a> {
         let cache = unsafe { &mut *self.cache.get() };
         if let Some((region_index, region)) = self.find_region(cache, vm_addr) {
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
-                && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
+                && (access_type == AccessType::Load
+                    || ensure_writable_region(region, &self.access_violation_handler))
             {
                 return Ok((region_index, region));
             }
@@ -378,7 +381,7 @@ pub struct AlignedMemoryMapping<'a> {
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
     /// Access violation handler
-    cow_cb: MemoryCowCallback,
+    access_violation_handler: AccessViolationHandler,
 }
 
 impl fmt::Debug for AlignedMemoryMapping<'_> {
@@ -392,11 +395,11 @@ impl fmt::Debug for AlignedMemoryMapping<'_> {
 
 impl<'a> AlignedMemoryMapping<'a> {
     /// Creates a new MemoryMapping structure from the given regions
-    pub fn new_with_cow(
+    pub fn new_with_access_violation_handler(
         mut regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
-        cow_cb: MemoryCowCallback,
+        access_violation_handler: AccessViolationHandler,
     ) -> Result<Self, EbpfError> {
         regions.insert(0, MemoryRegion::new_readonly(&[], 0));
         regions.sort();
@@ -414,23 +417,23 @@ impl<'a> AlignedMemoryMapping<'a> {
             regions: regions.into_boxed_slice(),
             config,
             sbpf_version,
-            cow_cb,
+            access_violation_handler,
         })
     }
 
     /// Creates a new memory mapping for tests and benches.
     ///
-    /// `cow_cb` defaults to a function which always returns an error.
+    /// `access_violation_handler` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
-        Self::new_with_cow(
+        Self::new_with_access_violation_handler(
             regions,
             config,
             sbpf_version,
-            Box::new(default_memory_cow_callback),
+            Box::new(default_access_violation_handler),
         )
     }
 
@@ -441,7 +444,9 @@ impl<'a> AlignedMemoryMapping<'a> {
             .unwrap_or(0) as usize;
         if (1..self.regions.len()).contains(&index) {
             let region = &self.regions[index];
-            if access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb) {
+            if access_type == AccessType::Load
+                || ensure_writable_region(region, &self.access_violation_handler)
+            {
                 if let Some(host_addr) = region.vm_to_host(vm_addr, len) {
                     return ProgramResult::Ok(host_addr);
                 }
@@ -462,7 +467,8 @@ impl<'a> AlignedMemoryMapping<'a> {
         if (1..self.regions.len()).contains(&index) {
             let region = &self.regions[index];
             if (region.vm_addr..region.vm_addr_end).contains(&vm_addr)
-                && (access_type == AccessType::Load || ensure_writable_region(region, &self.cow_cb))
+                && (access_type == AccessType::Load
+                    || ensure_writable_region(region, &self.access_violation_handler))
             {
                 return Ok((index, region));
             }
@@ -521,34 +527,44 @@ impl<'a> MemoryMapping<'a> {
     ///
     /// Uses aligned or unaligned memory mapping depending on the value of
     /// `config.aligned_memory_mapping=true`.
-    pub fn new_with_cow(
+    pub fn new_with_access_violation_handler(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
-        cow_cb: MemoryCowCallback,
+        access_violation_handler: AccessViolationHandler,
     ) -> Result<Self, EbpfError> {
         if sbpf_version == SBPFVersion::V4 || config.aligned_memory_mapping {
-            AlignedMemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)
-                .map(MemoryMapping::Aligned)
+            AlignedMemoryMapping::new_with_access_violation_handler(
+                regions,
+                config,
+                sbpf_version,
+                access_violation_handler,
+            )
+            .map(MemoryMapping::Aligned)
         } else {
-            UnalignedMemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)
-                .map(MemoryMapping::Unaligned)
+            UnalignedMemoryMapping::new_with_access_violation_handler(
+                regions,
+                config,
+                sbpf_version,
+                access_violation_handler,
+            )
+            .map(MemoryMapping::Unaligned)
         }
     }
 
     /// Creates a new memory mapping for tests and benches.
     ///
-    /// `cow_cb` defaults to a function which always returns an error.
+    /// `access_violation_handler` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
         config: &'a Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
-        Self::new_with_cow(
+        Self::new_with_access_violation_handler(
             regions,
             config,
             sbpf_version,
-            Box::new(default_memory_cow_callback),
+            Box::new(default_access_violation_handler),
         )
     }
 
@@ -622,15 +638,18 @@ impl<'a> MemoryMapping<'a> {
 
 // Ensure that the given region is writable.
 //
-// If the region is readonly, cow_cb is called.
-fn ensure_writable_region(region: &MemoryRegion, cow_cb: &MemoryCowCallback) -> bool {
+// If the region is readonly, access_violation_handler is called.
+fn ensure_writable_region(
+    region: &MemoryRegion,
+    access_violation_handler: &AccessViolationHandler,
+) -> bool {
     if region.writable.get() {
         return true;
     }
-    if region.cow_callback_payload == u32::MAX {
+    if region.access_violation_handler_payload == u32::MAX {
         return false;
     }
-    if let Ok(host_addr) = cow_cb(region.cow_callback_payload) {
+    if let Ok(host_addr) = access_violation_handler(region.access_violation_handler_payload) {
         region.host_addr.replace(host_addr);
         region.writable.replace(true);
         true
@@ -1348,7 +1367,7 @@ mod test {
     }
 
     #[test]
-    fn test_cow_map() {
+    fn test_access_violation_handler_map() {
         for aligned_memory_mapping in [true, false] {
             let config = Config {
                 aligned_memory_mapping,
@@ -1357,10 +1376,10 @@ mod test {
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
             let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)];
-            regions[0].cow_callback_payload = 0;
+            regions[0].access_violation_handler_payload = 0;
 
             let c = Rc::clone(&copied);
-            let m = MemoryMapping::new_with_cow(
+            let m = MemoryMapping::new_with_access_violation_handler(
                 regions,
                 &config,
                 SBPFVersion::V3,
@@ -1383,7 +1402,7 @@ mod test {
     }
 
     #[test]
-    fn test_cow_load_store() {
+    fn test_access_violation_handler_load_store() {
         for aligned_memory_mapping in [true, false] {
             let config = Config {
                 aligned_memory_mapping,
@@ -1392,10 +1411,10 @@ mod test {
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
             let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)];
-            regions[0].cow_callback_payload = 0;
+            regions[0].access_violation_handler_payload = 0;
 
             let c = Rc::clone(&copied);
-            let m = MemoryMapping::new_with_cow(
+            let m = MemoryMapping::new_with_access_violation_handler(
                 regions,
                 &config,
                 SBPFVersion::V3,
@@ -1423,7 +1442,7 @@ mod test {
     }
 
     #[test]
-    fn test_cow_region_id() {
+    fn test_access_violation_handler_region_id() {
         for aligned_memory_mapping in [true, false] {
             let config = Config {
                 aligned_memory_mapping,
@@ -1437,10 +1456,10 @@ mod test {
                 MemoryRegion::new_readonly(&original1, ebpf::MM_RODATA_START),
                 MemoryRegion::new_readonly(&original2, ebpf::MM_RODATA_START + 0x100000000),
             ];
-            regions[0].cow_callback_payload = 42;
+            regions[0].access_violation_handler_payload = 42;
 
             let c = Rc::clone(&copied);
-            let m = MemoryMapping::new_with_cow(
+            let m = MemoryMapping::new_with_access_violation_handler(
                 regions,
                 &config,
                 SBPFVersion::V3,
@@ -1462,11 +1481,11 @@ mod test {
 
     #[test]
     #[should_panic(expected = "AccessViolation")]
-    fn test_map_cow_error() {
+    fn test_map_access_violation_handler_error() {
         let config = Config::default();
         let original = [11, 22];
 
-        let m = MemoryMapping::new_with_cow(
+        let m = MemoryMapping::new_with_access_violation_handler(
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V4,
@@ -1479,11 +1498,11 @@ mod test {
 
     #[test]
     #[should_panic(expected = "AccessViolation")]
-    fn test_store_cow_error() {
+    fn test_store_access_violation_handler_error() {
         let config = Config::default();
         let original = [11, 22];
 
-        let m = MemoryMapping::new_with_cow(
+        let m = MemoryMapping::new_with_access_violation_handler(
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V4,
@@ -1501,7 +1520,7 @@ mod test {
             ..Config::default()
         };
 
-        let mapping = MemoryMapping::new_with_cow(
+        let mapping = MemoryMapping::new_with_access_violation_handler(
             vec![MemoryRegion::new_readonly(&[11, 12], ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V4,

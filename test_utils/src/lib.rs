@@ -13,7 +13,7 @@ use solana_sbpf::{
     ebpf::{self, HOST_ALIGN},
     elf::Executable,
     error::EbpfError,
-    memory_region::{MemoryCowCallback, MemoryMapping, MemoryRegion},
+    memory_region::{AccessViolationHandler, MemoryMapping, MemoryRegion},
     static_analysis::TraceLogEntry,
     vm::ContextObject,
 };
@@ -214,7 +214,7 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
     stack: &'a mut AlignedMemory<{ HOST_ALIGN }>,
     heap: &'a mut AlignedMemory<{ HOST_ALIGN }>,
     additional_regions: Vec<MemoryRegion>,
-    cow_cb: Option<MemoryCowCallback>,
+    access_violation_handler: Option<AccessViolationHandler>,
 ) -> Result<MemoryMapping<'a>, EbpfError> {
     let config = executable.get_config();
     let sbpf_version = executable.get_sbpf_version();
@@ -235,16 +235,23 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
     .chain(additional_regions.into_iter())
     .collect();
 
-    Ok(if let Some(cow_cb) = cow_cb {
-        MemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)?
-    } else {
-        MemoryMapping::new(regions, config, sbpf_version)?
-    })
+    Ok(
+        if let Some(access_violation_handler) = access_violation_handler {
+            MemoryMapping::new_with_access_violation_handler(
+                regions,
+                config,
+                sbpf_version,
+                access_violation_handler,
+            )?
+        } else {
+            MemoryMapping::new(regions, config, sbpf_version)?
+        },
+    )
 }
 
 #[macro_export]
 macro_rules! create_vm {
-    ($vm_name:ident, $verified_executable:expr, $context_object:expr, $stack:ident, $heap:ident, $additional_regions:expr, $cow_cb:expr) => {
+    ($vm_name:ident, $verified_executable:expr, $context_object:expr, $stack:ident, $heap:ident, $additional_regions:expr, $access_violation_handler:expr) => {
         let mut $stack = solana_sbpf::aligned_memory::AlignedMemory::zero_filled(
             $verified_executable.get_config().stack_size(),
         );
@@ -255,7 +262,7 @@ macro_rules! create_vm {
             &mut $stack,
             &mut $heap,
             $additional_regions,
-            $cow_cb,
+            $access_violation_handler,
         )
         .unwrap();
         let mut $vm_name = solana_sbpf::vm::EbpfVm::new(
