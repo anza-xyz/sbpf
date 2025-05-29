@@ -33,15 +33,20 @@ use std::{
 */
 
 /// Callback executed before generate_access_violation()
-pub type AccessViolationHandler = Box<dyn Fn(u16) -> Result<u64, ()>>;
+pub type AccessViolationHandler = Box<dyn Fn(&mut MemoryRegion, u64, AccessType, u64, u64)>;
 /// Fail always
 #[allow(clippy::result_unit_err)]
-pub fn default_access_violation_handler(_access_violation_handler_payload: u16) -> Result<u64, ()> {
-    Err(())
+pub fn default_access_violation_handler(
+    _region: &mut MemoryRegion,
+    _region_max_len: u64,
+    _access_type: AccessType,
+    _vm_addr: u64,
+    _len: u64,
+) {
 }
 
 /// Memory region for bounds checking and address translation
-#[derive(Default, Eq, PartialEq)]
+#[derive(Default, Eq, PartialEq, Clone)]
 #[repr(C, align(32))]
 pub struct MemoryRegion {
     /// start host address
@@ -453,15 +458,31 @@ impl<'a> MemoryMapping<'a> {
             MemoryMapping::Aligned(m) => &m.common,
             MemoryMapping::Unaligned(m) => &m.common,
         };
-        if let Some((_index, region)) = self.find_region(vm_addr) {
-            if access_type == AccessType::Load
-                || ensure_writable_region(region, &common.access_violation_handler)
-            {
-                if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
-                    return ProgramResult::Ok(host_addr);
-                }
+        if let Some((index, region)) = self.find_region(vm_addr) {
+            if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
+                return ProgramResult::Ok(host_addr);
+            }
+            let mut region = (*region).clone();
+            let max_len = self
+                .get_regions()
+                .get(index.saturating_add(1))
+                .map_or(u64::MAX, |next_region| next_region.vm_addr)
+                .saturating_sub(region.vm_addr);
+            (common.access_violation_handler)(&mut region, max_len, access_type, vm_addr, len);
+            if let Err(err) = self.replace_region(index, region) {
+                return ProgramResult::Err(err);
             }
         }
+        if let Some((_index, region)) = self.find_region(vm_addr) {
+            if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
+                return ProgramResult::Ok(host_addr);
+            }
+        }
+        let common = match &self {
+            MemoryMapping::Identity => return ProgramResult::Ok(vm_addr),
+            MemoryMapping::Aligned(m) => &m.common,
+            MemoryMapping::Unaligned(m) => &m.common,
+        };
         generate_access_violation(common, access_type, vm_addr, len)
     }
 
@@ -517,28 +538,6 @@ impl<'a> MemoryMapping<'a> {
             MemoryMapping::Aligned(m) => m.replace_region(index, region),
             MemoryMapping::Unaligned(m) => m.replace_region(index, region),
         }
-    }
-}
-
-// Ensure that the given region is writable.
-//
-// If the region is readonly, access_violation_handler is called.
-fn ensure_writable_region(
-    region: &MemoryRegion,
-    access_violation_handler: &AccessViolationHandler,
-) -> bool {
-    if region.writable.get() {
-        return true;
-    }
-    let Some(payload) = region.access_violation_handler_payload else {
-        return false;
-    };
-    if let Ok(host_addr) = access_violation_handler(payload) {
-        region.host_addr.replace(host_addr);
-        region.writable.replace(true);
-        true
-    } else {
-        false
     }
 }
 
@@ -1253,9 +1252,10 @@ mod test {
                 regions,
                 &config,
                 SBPFVersion::V3,
-                Box::new(move |_| {
+                Box::new(move |region, _, _, _, _| {
                     c.borrow_mut().extend_from_slice(&original);
-                    Ok(c.borrow().as_slice().as_ptr() as u64)
+                    region.writable.set(true);
+                    region.host_addr.set(c.borrow().as_slice().as_ptr() as u64);
                 }),
             )
             .unwrap();
@@ -1288,9 +1288,10 @@ mod test {
                 regions,
                 &config,
                 SBPFVersion::V3,
-                Box::new(move |_| {
+                Box::new(move |region, _, _, _, _| {
                     c.borrow_mut().extend_from_slice(&original);
-                    Ok(c.borrow().as_slice().as_ptr() as u64)
+                    region.writable.set(true);
+                    region.host_addr.set(c.borrow().as_slice().as_ptr() as u64);
                 }),
             )
             .unwrap();
@@ -1333,12 +1334,13 @@ mod test {
                 regions,
                 &config,
                 SBPFVersion::V3,
-                Box::new(move |id| {
+                Box::new(move |region, _, _, _, _| {
                     // check that the argument passed to MemoryRegion::new_readonly is then passed to the
                     // callback
-                    assert_eq!(id, 42);
+                    assert_eq!(region.access_violation_handler_payload, Some(42));
                     c.borrow_mut().extend_from_slice(&original1);
-                    Ok(c.borrow().as_slice().as_ptr() as u64)
+                    region.writable.set(true);
+                    region.host_addr.set(c.borrow().as_slice().as_ptr() as u64);
                 }),
             )
             .unwrap();
@@ -1359,7 +1361,7 @@ mod test {
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V4,
-            Box::new(|_| Err(())),
+            Box::new(default_access_violation_handler),
         )
         .unwrap();
 
@@ -1376,7 +1378,7 @@ mod test {
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V4,
-            Box::new(|_| Err(())),
+            Box::new(default_access_violation_handler),
         )
         .unwrap();
 
@@ -1394,7 +1396,7 @@ mod test {
             vec![MemoryRegion::new_readonly(&[11, 12], ebpf::MM_RODATA_START)],
             &config,
             SBPFVersion::V4,
-            Box::new(|_| Err(())),
+            Box::new(default_access_violation_handler),
         )
         .unwrap();
 
