@@ -221,6 +221,10 @@ impl<'a> UnalignedMemoryMapping<'a> {
         sbpf_version: SBPFVersion,
         cow_cb: MemoryCowCallback,
     ) -> Result<Self, EbpfError> {
+        debug_assert!(
+            sbpf_version <= SBPFVersion::V3,
+            "SBPFv4 and later versions do not support unaligned memory"
+        );
         regions.sort();
         for index in 1..regions.len() {
             let first = &regions[index.saturating_sub(1)];
@@ -994,13 +998,13 @@ mod test {
     #[test]
     fn test_map_empty() {
         let config = Config::default();
-        let m = UnalignedMemoryMapping::new(vec![], &config, SBPFVersion::V4).unwrap();
+        let m = UnalignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
         assert_error!(
             m.map(AccessType::Load, ebpf::MM_INPUT_START, 8),
             "AccessViolation"
         );
 
-        let m = AlignedMemoryMapping::new(vec![], &config, SBPFVersion::V4).unwrap();
+        let m = AlignedMemoryMapping::new(vec![], &config, SBPFVersion::V3).unwrap();
         assert_error!(
             m.map(AccessType::Load, ebpf::MM_INPUT_START, 8),
             "AccessViolation"
@@ -1049,7 +1053,7 @@ mod test {
                     MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64 - 1),
                 ],
                 &config,
-                SBPFVersion::V4,
+                SBPFVersion::V3,
             ),
             "InvalidMemoryRegion(1)"
         );
@@ -1059,7 +1063,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_INPUT_START + mem1.len() as u64),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .is_ok());
     }
@@ -1085,7 +1089,7 @@ mod test {
                 ),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
 
