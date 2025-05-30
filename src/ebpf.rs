@@ -49,8 +49,10 @@ pub const MM_RODATA_START: u64 = MM_REGION_SIZE;
 pub const MM_STACK_START: u64 = MM_REGION_SIZE * 2;
 /// Virtual address of the heap region
 pub const MM_HEAP_START: u64 = MM_REGION_SIZE * 3;
-/// Virtual address of the input region
+/// Virtual address of the input region. In ABIv2, this region contains the transaction data.
 pub const MM_INPUT_START: u64 = MM_REGION_SIZE * 4;
+/// Virtual address of the instruction data area (for ABIv2)
+pub const MM_INSTRUCTION_START: u64 = MM_REGION_SIZE * 6;
 
 // eBPF op codes.
 // See also https://www.kernel.org/doc/Documentation/networking/filter.txt

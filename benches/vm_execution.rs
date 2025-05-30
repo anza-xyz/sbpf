@@ -144,14 +144,14 @@ fn bench_jit_vs_interpreter_address_translation(bencher: &mut Bencher) {
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 static ADDRESS_TRANSLATION_STACK_CODE: &str = "
-    mov r1, r2
+    mov r1, r5
     and r1, 4095
     mov r3, r10
     sub r3, r1
     add r3, -1
     ldxb r4, [r3]
-    add r2, 1
-    jlt r2, 0x10000, -8
+    add r5, 1
+    jlt r5, 0x10000, -8
     exit";
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
@@ -187,10 +187,10 @@ fn bench_jit_vs_interpreter_empty_for_loop(bencher: &mut Bencher) {
     bench_jit_vs_interpreter(
         bencher,
         "
-    mov r1, r2
+    mov r1, r3
     and r1, 1023
-    add r2, 1
-    jlt r2, 0x10000, -4
+    add r3, 1
+    jlt r3, 0x10000, -4
     exit",
         Config::default(),
         262145,
