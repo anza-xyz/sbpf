@@ -861,7 +861,9 @@ fn generate_access_violation(
         ))
     } else {
         let region_name = match vm_addr & (!ebpf::MM_RODATA_START.saturating_sub(1)) {
-            ebpf::MM_RODATA_START => "program",
+            ebpf::MM_BYTECODE_START if sbpf_version >= SBPFVersion::V3 => "program",
+            ebpf::MM_RODATA_START if sbpf_version < SBPFVersion::V3 => "program",
+            ebpf::MM_RODATA_START if sbpf_version >= SBPFVersion::V3 => "rodata",
             ebpf::MM_STACK_START => "stack",
             ebpf::MM_HEAP_START => "heap",
             ebpf::MM_INPUT_START => "input",
