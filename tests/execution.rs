@@ -3438,6 +3438,39 @@ fn test_capped_after_callx() {
     );
 }
 
+#[test]
+fn test_input_registers() {
+    // Ensure we've set the input registers with the correct values.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V4..=SBPFVersion::V4,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0
+        mov64 r3, r1
+        and32 r3, -1
+        jne r3, 0, +10
+        mov64 r3, r1
+        arsh64 r3, 32
+        jne r3, 0x4, +7
+        mov64 r3, r2
+        and32 r3, -1
+        jne r3, 0, +4
+        mov64 r3, r2
+        arsh64 r3, 32
+        jne r3, 0x6, +1
+        return
+        mov64 r0, 2
+        return
+        exit",
+        config,
+        [],
+        TestContextObject::new(14),
+        ProgramResult::Ok(0),
+    );
+}
+
 // SBPFv0 only [DEPRECATED]
 
 #[test]
