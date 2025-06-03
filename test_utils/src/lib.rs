@@ -431,7 +431,7 @@ macro_rules! test_syscall_asm {
             enable_instruction_tracing: true,
             ..Config::default()
         };
-        for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
             config.enabled_sbpf_versions = sbpf_version..=sbpf_version;
             let mut loader = BuiltinProgram::new_loader(config.clone());
             $(test_syscall_asm!(register, loader, $syscall_name => $syscall_function);)*

@@ -1887,7 +1887,7 @@ fn test_err_dynamic_stack_out_of_bound() {
             AccessType::Store,
             ebpf::MM_STACK_START - 1,
             1,
-            "program"
+            "rodata"
         )),
     );
 
@@ -1931,7 +1931,7 @@ fn test_err_dynamic_stack_ptr_overflow() {
             AccessType::Store,
             u64::MAX - 63,
             1,
-            "unknown"
+            "accounts"
         )),
     );
 }
@@ -2096,7 +2096,12 @@ fn test_err_mem_access_out_of_bound() {
     prog[16] = ebpf::ST_1B_IMM;
     prog[24] = ebpf::RETURN;
     let loader = Arc::new(BuiltinProgram::new_mock());
-    for address in [0x2u64, 0x8002u64, 0x80000002u64, 0x8000000000000002u64] {
+    for (address, area) in [
+        (0x2u64, "program"),
+        (0x8002u64, "program"),
+        (0x80000002u64, "program"),
+        (0x8000000000000002u64, "accounts"),
+    ] {
         LittleEndian::write_u32(&mut prog[4..], address as u32);
         LittleEndian::write_u32(&mut prog[12..], (address >> 32) as u32);
         #[allow(unused_mut)]
@@ -2115,7 +2120,7 @@ fn test_err_mem_access_out_of_bound() {
                 AccessType::Store,
                 address,
                 1,
-                "unknown"
+                area
             )),
         );
     }
@@ -2440,7 +2445,9 @@ fn test_call_save() {
 fn test_err_syscall_string() {
     test_syscall_asm!(
         "
-        mov64 r1, 0x0
+        mov64 r1, 0x3
+        lsh64 r1, 32
+        add64 r1, 0xffff
         syscall bpf_syscall_string
         mov64 r0, 0x0
         exit",
@@ -2448,8 +2455,8 @@ fn test_err_syscall_string() {
         (
             "bpf_syscall_string" => syscalls::SyscallString::vm,
         ),
-        TestContextObject::new(2),
-        ProgramResult::Err(EbpfError::SyscallError(Box::new(EbpfError::AccessViolation(AccessType::Load, 0, 0, "unknown")))),
+        TestContextObject::new(4),
+        ProgramResult::Err(EbpfError::SyscallError(Box::new(EbpfError::AccessViolation(AccessType::Load, 0x30000FFFF, 0, "heap")))),
     );
 }
 
