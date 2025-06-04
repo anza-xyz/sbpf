@@ -720,10 +720,14 @@ impl<'a> MemoryMapping<'a> {
         sbpf_version: SBPFVersion,
         cow_cb: MemoryCowCallback,
     ) -> Result<Self, EbpfError> {
-        debug_assert!(
-            sbpf_version != SBPFVersion::V4 || config.aligned_memory_mapping,
-            "SBPFv4 only supports aligned memory"
-        );
+        #[cfg(test)]
+        {
+            debug_assert!(
+                sbpf_version != SBPFVersion::V4 || config.aligned_memory_mapping,
+                "SBPFv4 only supports aligned memory"
+            );
+        }
+
         if sbpf_version == SBPFVersion::V4 || config.aligned_memory_mapping {
             AlignedMemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)
                 .map(MemoryMapping::Aligned)
