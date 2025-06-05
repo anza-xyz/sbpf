@@ -857,10 +857,18 @@ fn generate_access_violation(
         ))
     } else {
         let region_name = match vm_addr & (!ebpf::MM_RODATA_START.saturating_sub(1)) {
-            ebpf::MM_RODATA_START => "program",
+            ebpf::MM_BYTECODE_START if sbpf_version >= SBPFVersion::V3 => "program",
+            ebpf::MM_RODATA_START if sbpf_version < SBPFVersion::V3 => "program",
+            ebpf::MM_RODATA_START if sbpf_version >= SBPFVersion::V3 => "rodata",
             ebpf::MM_STACK_START => "stack",
             ebpf::MM_HEAP_START => "heap",
             ebpf::MM_INPUT_START => "input",
+            ebpf::MM_SCRATCHPAD_AREA if sbpf_version >= SBPFVersion::V4 => "scratchpad",
+            ebpf::MM_TX_INSTRUCTION_AREA if sbpf_version >= SBPFVersion::V4 => "tx instruction",
+            ebpf::MM_TX_INSTRUCTION_INPUT if sbpf_version >= SBPFVersion::V4 => {
+                "tx instruction input"
+            }
+            addr if addr >= ebpf::MM_ACCOUNTS_AREA && sbpf_version >= SBPFVersion::V4 => "accounts",
             _ => "unknown",
         };
         ProgramResult::Err(EbpfError::AccessViolation(
