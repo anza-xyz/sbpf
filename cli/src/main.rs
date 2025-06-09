@@ -162,7 +162,7 @@ fn main() {
             },
         ),
         MemoryRegion::new_writable(heap.as_slice_mut(), ebpf::MM_HEAP_START),
-        MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START),
+        MemoryRegion::new_writable(&mut mem, ebpf::MM_TX_AREA),
     ];
 
     let memory_mapping = MemoryMapping::new(regions, config, sbpf_version).unwrap();

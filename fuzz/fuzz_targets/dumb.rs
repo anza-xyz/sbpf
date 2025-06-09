@@ -44,7 +44,7 @@ fuzz_target!(|data: DumbFuzzData| {
         function_registry,
     )
     .unwrap();
-    let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
+    let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_TX_AREA);
     let mut context_object = TestContextObject::new(29);
     create_vm!(
         interp_vm,
