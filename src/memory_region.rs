@@ -183,6 +183,44 @@ pub struct CommonMemoryMapping<'a> {
     sbpf_version: SBPFVersion,
 }
 
+impl CommonMemoryMapping<'_> {
+    fn generate_access_violation(
+        &self,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+    ) -> ProgramResult {
+        let stack_frame = (vm_addr as i64)
+            .saturating_sub(ebpf::MM_STACK_START as i64)
+            .checked_div(self.config.stack_frame_size as i64)
+            .unwrap_or(0);
+        if !self.sbpf_version.dynamic_stack_frames()
+            && (-1..(self.config.max_call_depth as i64).saturating_add(1)).contains(&stack_frame)
+        {
+            ProgramResult::Err(EbpfError::StackAccessViolation(
+                access_type,
+                vm_addr,
+                len,
+                stack_frame,
+            ))
+        } else {
+            let region_name = match vm_addr & (!ebpf::MM_RODATA_START.saturating_sub(1)) {
+                ebpf::MM_RODATA_START => "program",
+                ebpf::MM_STACK_START => "stack",
+                ebpf::MM_HEAP_START => "heap",
+                ebpf::MM_INPUT_START => "input",
+                _ => "unknown",
+            };
+            ProgramResult::Err(EbpfError::AccessViolation(
+                access_type,
+                vm_addr,
+                len,
+                region_name,
+            ))
+        }
+    }
+}
+
 /// Memory mapping based on eytzinger search.
 pub struct UnalignedMemoryMapping<'a> {
     /// Common parts
@@ -457,7 +495,7 @@ impl<'a> MemoryMapping<'a> {
             MemoryMapping::Aligned(m) => &m.common,
             MemoryMapping::Unaligned(m) => &m.common,
         };
-        generate_access_violation(common, access_type, vm_addr, len)
+        common.generate_access_violation(access_type, vm_addr, len)
     }
 
     /// Map virtual memory to host memory and potentially call the [AccessViolationHandler].
@@ -499,7 +537,7 @@ impl<'a> MemoryMapping<'a> {
             MemoryMapping::Aligned(m) => &m.common,
             MemoryMapping::Unaligned(m) => &m.common,
         };
-        generate_access_violation(common, access_type, vm_addr, len)
+        common.generate_access_violation(access_type, vm_addr, len)
     }
 
     /// Loads `size_of::<T>()` bytes from the given address.
@@ -554,43 +592,6 @@ impl<'a> MemoryMapping<'a> {
             MemoryMapping::Aligned(m) => m.replace_region(index, region),
             MemoryMapping::Unaligned(m) => m.replace_region(index, region),
         }
-    }
-}
-
-/// Helper for map to generate errors
-fn generate_access_violation(
-    common: &CommonMemoryMapping,
-    access_type: AccessType,
-    vm_addr: u64,
-    len: u64,
-) -> ProgramResult {
-    let stack_frame = (vm_addr as i64)
-        .saturating_sub(ebpf::MM_STACK_START as i64)
-        .checked_div(common.config.stack_frame_size as i64)
-        .unwrap_or(0);
-    if !common.sbpf_version.dynamic_stack_frames()
-        && (-1..(common.config.max_call_depth as i64).saturating_add(1)).contains(&stack_frame)
-    {
-        ProgramResult::Err(EbpfError::StackAccessViolation(
-            access_type,
-            vm_addr,
-            len,
-            stack_frame,
-        ))
-    } else {
-        let region_name = match vm_addr & (!ebpf::MM_RODATA_START.saturating_sub(1)) {
-            ebpf::MM_RODATA_START => "program",
-            ebpf::MM_STACK_START => "stack",
-            ebpf::MM_HEAP_START => "heap",
-            ebpf::MM_INPUT_START => "input",
-            _ => "unknown",
-        };
-        ProgramResult::Err(EbpfError::AccessViolation(
-            access_type,
-            vm_addr,
-            len,
-            region_name,
-        ))
     }
 }
 
