@@ -516,6 +516,7 @@ impl<C: ContextObject> Executable<C> {
                 )?;
                 if section_name == b".dynstr" {
                     symbol_names_section_header = Some(section_header);
+                    break;
                 }
             }
             symbol_names_section_header
