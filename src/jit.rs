@@ -767,20 +767,21 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::JSLE_REG   => self.emit_conditional_branch_reg(0x8e, false, src, dst, target_pc),
                 ebpf::CALL_IMM => {
                     // For JIT, external functions MUST be registered at compile time.
-                    if let (false, Some((_, function))) =
-                            (self.executable.get_sbpf_version().static_syscalls(),
-                                self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32)) {
+                    let key = self
+                        .executable
+                        .get_sbpf_version()
+                        .calculate_call_imm_target_pc(self.pc, insn.imm);
+                    if self.executable.get_sbpf_version().static_syscalls() {
+                        // BPF to BPF call
+                        self.emit_internal_call(Value::Constant64(key as i64, true));
+                    } else if let Some((_, function)) =
+                            self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
                         // SBPFv0 syscall
                         self.emit_syscall_dispatch(function);
                     } else if let Some((_function_name, target_pc)) =
                             self.executable
                                 .get_function_registry()
-                                .lookup_by_key(
-                                    self
-                                        .executable
-                                        .get_sbpf_version()
-                                        .calculate_call_imm_target_pc(self.pc, insn.imm)
-                            ) {
+                                .lookup_by_key(key) {
                         // BPF to BPF call
                         self.emit_internal_call(Value::Constant64(target_pc as i64, true));
                     } else {

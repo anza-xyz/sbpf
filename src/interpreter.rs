@@ -519,23 +519,26 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
             // Do not delegate the check to the verifier, since self.registered functions can be
             // changed after the program has been verified.
             ebpf::CALL_IMM => {
-                if let (false, Some((_, function))) =
-                        (self.executable.get_sbpf_version().static_syscalls(),
-                            self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32)) {
+                let key = self
+                    .executable
+                    .get_sbpf_version()
+                    .calculate_call_imm_target_pc(self.reg[11] as usize, insn.imm);
+                if self.executable.get_sbpf_version().static_syscalls() {
+                    // make BPF to BPF call
+                    if !self.push_frame(config) {
+                        return false;
+                    }
+                    check_pc!(self, next_pc, key as u64);
+                } else if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
                     // SBPFv0 syscall
                     self.reg[0] = match self.dispatch_syscall(function) {
                         ProgramResult::Ok(value) => *value,
                         ProgramResult::Err(_err) => return false,
                     };
                 } else if let Some((_, target_pc)) =
-                        self.executable
-                            .get_function_registry()
-                            .lookup_by_key(
-                                self
-                                    .executable
-                                    .get_sbpf_version()
-                                    .calculate_call_imm_target_pc(self.reg[11] as usize, insn.imm)
-                        ) {
+                    self.executable
+                    .get_function_registry()
+                    .lookup_by_key(key) {
                     // make BPF to BPF call
                     if !self.push_frame(config) {
                         return false;
