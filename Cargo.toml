@@ -25,7 +25,7 @@ combine = "3.8.1"
 gdbstub = { version = "0.6.2", optional = true }
 hash32 = "0.3.1"
 log = "0.4.2"
-rand = { version = "0.8.5", features = ["small_rng"]}
+rand = { version = "0.8.5", features = ["small_rng"], optional = true }
 rustc-demangle = "0.1"
 shuttle = { version = "0.7.1", optional = true }
 thiserror = "2.0.9"
@@ -38,10 +38,10 @@ libc = { version = "0.2", optional = true }
 
 [features]
 default = ["jit"]
-jit = ["libc", "winapi"]
+jit = ["dep:libc", "dep:winapi", "dep:rand"]
 jit-enable-host-stack-frames = ["jit"]
 fuzzer-not-safe-for-production = ["arbitrary"]
-debugger = ["gdbstub"]
+debugger = ["dep:gdbstub"]
 shuttle-test = ["dep:shuttle"]
 
 [dev-dependencies]

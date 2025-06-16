@@ -19,6 +19,7 @@ extern crate byteorder;
 extern crate combine;
 extern crate hash32;
 extern crate log;
+#[cfg(feature = "jit")]
 extern crate rand;
 extern crate thiserror;
 

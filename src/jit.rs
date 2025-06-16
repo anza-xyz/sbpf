@@ -15,7 +15,6 @@
 
 #[cfg(not(feature = "shuttle-test"))]
 use rand::{thread_rng, Rng};
-
 #[cfg(feature = "shuttle-test")]
 use shuttle::rand::{thread_rng, Rng};
 

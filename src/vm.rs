@@ -23,28 +23,33 @@ use crate::{
 };
 use std::{collections::BTreeMap, fmt::Debug};
 
-#[cfg(not(feature = "shuttle-test"))]
-use {
-    rand::{thread_rng, Rng},
-    std::sync::Arc,
-};
-
 #[cfg(feature = "shuttle-test")]
-use shuttle::{
-    rand::{thread_rng, Rng},
-    sync::Arc,
-};
+use shuttle::sync::Arc;
+#[cfg(not(feature = "shuttle-test"))]
+use std::sync::Arc;
+
+#[cfg(all(feature = "jit", not(feature = "shuttle-test")))]
+use rand::{thread_rng, Rng};
+#[cfg(all(feature = "jit", feature = "shuttle-test"))]
+use shuttle::rand::{thread_rng, Rng};
 
 /// Shift the RUNTIME_ENVIRONMENT_KEY by this many bits to the LSB
 ///
 /// 3 bits for 8 Byte alignment, and 1 bit to have encoding space for the RuntimeEnvironment.
+#[cfg(feature = "jit")]
 const PROGRAM_ENVIRONMENT_KEY_SHIFT: u32 = 4;
+#[cfg(feature = "jit")]
 static RUNTIME_ENVIRONMENT_KEY: std::sync::OnceLock<i32> = std::sync::OnceLock::<i32>::new();
 
 /// Returns (and if not done before generates) the encryption key for the VM pointer
 pub fn get_runtime_environment_key() -> i32 {
-    *RUNTIME_ENVIRONMENT_KEY
-        .get_or_init(|| thread_rng().gen::<i32>() >> PROGRAM_ENVIRONMENT_KEY_SHIFT)
+    #[cfg(feature = "jit")]
+    {
+        *RUNTIME_ENVIRONMENT_KEY
+            .get_or_init(|| thread_rng().gen::<i32>() >> PROGRAM_ENVIRONMENT_KEY_SHIFT)
+    }
+    #[cfg(not(feature = "jit"))]
+    0
 }
 
 /// VM configuration settings
@@ -68,8 +73,10 @@ pub struct Config {
     pub enable_symbol_and_section_labels: bool,
     /// Reject ELF files containing issues that the verifier did not catch before (up to v0.2.21)
     pub reject_broken_elfs: bool,
+    #[cfg(feature = "jit")]
     /// Ratio of native host instructions per random no-op in JIT (0 = OFF)
     pub noop_instruction_rate: u32,
+    #[cfg(feature = "jit")]
     /// Enable disinfection of immediate values and offsets provided by the user in JIT
     pub sanitize_user_provided_values: bool,
     /// Avoid copying read only sections when possible
@@ -99,7 +106,9 @@ impl Default for Config {
             enable_instruction_tracing: false,
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
+            #[cfg(feature = "jit")]
             noop_instruction_rate: 256,
+            #[cfg(feature = "jit")]
             sanitize_user_provided_values: true,
             optimize_rodata: true,
             aligned_memory_mapping: true,
