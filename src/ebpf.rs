@@ -50,7 +50,17 @@ pub const MM_STACK_START: u64 = MM_REGION_SIZE * 2;
 /// Virtual address of the heap region
 pub const MM_HEAP_START: u64 = MM_REGION_SIZE * 3;
 /// Virtual address of the input region
-pub const MM_INPUT_START: u64 = MM_REGION_SIZE * 4;
+pub const MM_TX_AREA: u64 = MM_REGION_SIZE * 4;
+/// Virtual address of the scratch pad area
+pub const MM_RETURN_DATA_AREA: u64 = MM_REGION_SIZE * 5;
+/// Virtual address of the instruction area
+pub const MM_TX_INSTRUCTION_AREA: u64 = MM_REGION_SIZE * 6;
+/// Virtual address of the instruction accounts area
+pub const MM_TX_INSTRUCTION_ACCOUNTS_AREA: u64 = MM_REGION_SIZE * 7;
+/// Virtual address of the accounts payload area
+pub const MM_ACCOUNTS_AREA: u64 = MM_REGION_SIZE * 8;
+/// Virtual address of the instruction payload area
+pub const MM_TX_INSTRUCTION_DATA_AREA: u64 = MM_ACCOUNTS_AREA + MM_REGION_SIZE * 256;
 
 // eBPF op codes.
 // See also https://www.kernel.org/doc/Documentation/networking/filter.txt
