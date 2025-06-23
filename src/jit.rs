@@ -426,19 +426,15 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
         self.emit_subroutines();
 
-        let mut function_iter = self.executable.get_function_registry().keys().map(|insn_ptr| insn_ptr as usize).peekable();
         while self.pc * ebpf::INSN_SIZE < self.program.len() {
             if self.offset_in_text_section + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION * 2 >= self.result.text_section.len() {
                 return Err(EbpfError::ExhaustedTextSegment(self.pc));
             }
             let mut insn = ebpf::get_insn_unchecked(self.program, self.pc);
             self.result.pc_section[self.pc] = self.offset_in_text_section as u32;
-            if self.executable.get_sbpf_version().static_syscalls() {
-                if function_iter.peek() == Some(&self.pc) {
-                    function_iter.next();
-                } else {
-                    self.result.pc_section[self.pc] |= 1 << 31;
-                }
+            if self.executable.get_sbpf_version().enable_stricter_verification() &&
+               !insn.is_function_start_marker() {
+                self.result.pc_section[self.pc] |= 1 << 31;
             }
 
             // Regular instruction meter checkpoints to prevent long linear runs from exceeding their budget
