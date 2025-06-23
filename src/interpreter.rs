@@ -511,7 +511,8 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                     return false;
                 }
                 check_pc!(self, next_pc, target_pc.wrapping_sub(self.program_vm_addr) / ebpf::INSN_SIZE as u64);
-                if self.executable.get_sbpf_version().static_syscalls() && self.executable.get_function_registry().lookup_by_key(next_pc as u32).is_none() {
+                if self.executable.get_sbpf_version().enable_stricter_verification() &&
+                    !ebpf::get_insn_unchecked(self.program, next_pc as usize).is_function_start_marker() {
                     throw_error!(self, EbpfError::UnsupportedInstruction);
                 }
             },
