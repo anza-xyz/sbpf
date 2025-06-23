@@ -2209,10 +2209,11 @@ fn test_callx() {
         callx r8
         exit
         function_foo:
+        add64 r10, 0
         mov64 r0, 0x2A
         exit",
         [],
-        TestContextObject::new(6),
+        TestContextObject::new(7),
         ProgramResult::Ok(42),
     );
 }
@@ -2399,11 +2400,12 @@ fn test_err_reg_stack_depth() {
         };
         test_interpreter_and_jit_asm!(
             "
+            add64 r10, 0
             callx r0
             exit",
             config,
             [],
-            TestContextObject::new(max_call_depth as u64),
+            TestContextObject::new(2 * max_call_depth as u64),
             ProgramResult::Err(EbpfError::CallDepthExceeded),
         );
     }
@@ -2653,7 +2655,7 @@ fn test_tight_infinite_recursion_callx() {
         call function_foo
         exit
         function_foo:
-        mov64 r3, 0x41414141
+        add64 r10, 0
         callx r8
         exit",
         [],
@@ -2765,10 +2767,11 @@ fn test_err_exit_capped() {
         callx r0
         exit
         function_foo:
+        add64 r10, 0
         exit
         ",
         [],
-        TestContextObject::new(3),
+        TestContextObject::new(4),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
     test_interpreter_and_jit_asm!(
@@ -2777,11 +2780,12 @@ fn test_err_exit_capped() {
         callx r0
         exit
         function_foo:
+        add64 r10, 0
         mov r0, r0
         exit
         ",
         [],
-        TestContextObject::new(4),
+        TestContextObject::new(5),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
     test_interpreter_and_jit_asm!(
@@ -2805,6 +2809,7 @@ fn test_far_jumps() {
         call function_c
         exit
         function_a:
+        add64 r10, 0
         exit
         function_b:
         .fill 1024, 0x0F
@@ -2814,7 +2819,7 @@ fn test_far_jumps() {
         callx r1
         exit",
         [],
-        TestContextObject::new(6),
+        TestContextObject::new(7),
         ProgramResult::Ok(0),
     );
 }
@@ -3413,7 +3418,6 @@ fn test_callx_unsupported_instruction_and_exceeded_max_instructions() {
         sub64 r5, 8
         sub64 r7, 0
         callx r5
-        callx r5
         return",
         [],
         TestContextObject::new(4),
@@ -3430,6 +3434,7 @@ fn test_capped_after_callx() {
         callx r8
         exit
         function_foo:
+        add64 r10, 0
         mov64 r0, 0x2A
         exit",
         [],
