@@ -582,6 +582,11 @@ impl Insn {
     pub fn to_vec(&self) -> Vec<u8> {
         self.to_array().to_vec()
     }
+
+    /// Checks if this instruction marks the start of a function (in SBPFv3)
+    pub fn is_function_start_marker(&self) -> bool {
+        self.opc == ADD64_IMM && self.dst == FRAME_PTR_REG as u8
+    }
 }
 
 /// Get the instruction at `idx` of an eBPF program. `idx` is the index (number) of the
