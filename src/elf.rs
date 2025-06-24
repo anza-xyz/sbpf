@@ -392,7 +392,6 @@ impl<C: ContextObject> Executable<C> {
                 1 => SBPFVersion::V1,
                 2 => SBPFVersion::V2,
                 3 => SBPFVersion::V3,
-                4 => SBPFVersion::V4,
                 _ => SBPFVersion::Reserved,
             }
         };

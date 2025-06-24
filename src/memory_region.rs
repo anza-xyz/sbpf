@@ -221,10 +221,6 @@ impl<'a> UnalignedMemoryMapping<'a> {
         sbpf_version: SBPFVersion,
         cow_cb: MemoryCowCallback,
     ) -> Result<Self, EbpfError> {
-        debug_assert!(
-            sbpf_version <= SBPFVersion::V3,
-            "SBPFv4 and later versions do not support unaligned memory"
-        );
         regions.sort();
         for index in 1..regions.len() {
             let first = &regions[index.saturating_sub(1)];
@@ -720,11 +716,7 @@ impl<'a> MemoryMapping<'a> {
         sbpf_version: SBPFVersion,
         cow_cb: MemoryCowCallback,
     ) -> Result<Self, EbpfError> {
-        debug_assert!(
-            sbpf_version != SBPFVersion::V4 || config.aligned_memory_mapping,
-            "SBPFv4 only supports aligned memory"
-        );
-        if sbpf_version == SBPFVersion::V4 || config.aligned_memory_mapping {
+        if config.aligned_memory_mapping {
             AlignedMemoryMapping::new_with_cow(regions, config, sbpf_version, cow_cb)
                 .map(MemoryMapping::Aligned)
         } else {
@@ -1227,7 +1219,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_STACK_START),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
         assert_error!(
@@ -1611,7 +1603,7 @@ mod test {
                 MemoryRegion::new_readonly(&mem2, ebpf::MM_STACK_START),
             ],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
         )
         .unwrap();
 
@@ -1772,7 +1764,7 @@ mod test {
         let m = MemoryMapping::new_with_cow(
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
             Box::new(|_| Err(())),
         )
         .unwrap();
@@ -1789,30 +1781,11 @@ mod test {
         let m = MemoryMapping::new_with_cow(
             vec![MemoryRegion::new_readonly(&original, ebpf::MM_RODATA_START)],
             &config,
-            SBPFVersion::V4,
+            SBPFVersion::V3,
             Box::new(|_| Err(())),
         )
         .unwrap();
 
         m.store(33u8, ebpf::MM_RODATA_START).unwrap();
-    }
-
-    #[test]
-    #[should_panic(expected = "SBPFv4 only supports aligned memory")]
-    fn v4_aligned_mapping() {
-        let config = Config {
-            aligned_memory_mapping: false,
-            ..Config::default()
-        };
-
-        let mapping = MemoryMapping::new_with_cow(
-            vec![MemoryRegion::new_readonly(&[11, 12], ebpf::MM_RODATA_START)],
-            &config,
-            SBPFVersion::V4,
-            Box::new(|_| Err(())),
-        )
-        .unwrap();
-
-        assert!(matches!(mapping, MemoryMapping::Aligned(_)));
     }
 }
