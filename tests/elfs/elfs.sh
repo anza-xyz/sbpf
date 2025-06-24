@@ -3,12 +3,12 @@
 # Requires Latest release of Solana's custom LLVM
 # https://github.com/anza-xyz/platform-tools/releases
 
-TOOLCHAIN="$HOME"/.cache/solana/v1.44/platform-tools/
+TOOLCHAIN="/Users/lucasste/Documents/rust/build/aarch64-apple-darwin"
 
 CC_V0="$TOOLCHAIN/llvm/bin/clang -Werror -target sbf -O2 -fno-builtin -fPIC"
 CC_V3="$CC_V0 -mcpu=v3"
 
-RC_V0="$TOOLCHAIN/rust/bin/rustc --target sbf-solana-solana --crate-type lib -C panic=abort -C opt-level=2"
+RC_V0="$TOOLCHAIN/stage1/bin/rustc --target sbf-solana-solana --crate-type lib -C panic=abort -C opt-level=2"
 RC_V3="$RC_V0 -C target_cpu=v3 -C target_feature=+static-syscalls"
 
 LD_COMMON="$TOOLCHAIN/llvm/bin/ld.lld -z notext -shared --Bdynamic -entry entrypoint"
