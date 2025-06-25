@@ -2269,7 +2269,7 @@ fn test_relative_call_sbpfv3() {
         config,
         [1],
         (),
-        TestContextObject::new(18),
+        TestContextObject::new(19),
         ProgramResult::Ok(3),
     );
 }
@@ -3018,7 +3018,7 @@ fn test_syscall_static() {
         (
             "log" => syscalls::SyscallString::vm,
         ),
-        TestContextObject::new(6),
+        TestContextObject::new(7),
         ProgramResult::Ok(0),
     );
 }
@@ -3063,7 +3063,7 @@ fn test_reloc_64_64() {
         "tests/elfs/reloc_64_64.so",
         [],
         (),
-        TestContextObject::new(3),
+        TestContextObject::new(4),
         ProgramResult::Ok(ebpf::MM_BYTECODE_START),
     );
 }
@@ -3101,7 +3101,7 @@ fn test_reloc_64_relative() {
         config,
         [],
         (),
-        TestContextObject::new(3),
+        TestContextObject::new(4),
         ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
@@ -3122,7 +3122,7 @@ fn test_reloc_64_relative_data() {
         config,
         [],
         (),
-        TestContextObject::new(4),
+        TestContextObject::new(5),
         ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
@@ -3183,7 +3183,7 @@ fn test_load_elf_rodata() {
         config,
         [],
         (),
-        TestContextObject::new(4),
+        TestContextObject::new(5),
         ProgramResult::Ok(42),
     );
 }
@@ -3213,7 +3213,7 @@ fn test_strict_header() {
         "tests/elfs/strict_header.so",
         [],
         (),
-        TestContextObject::new(6),
+        TestContextObject::new(8),
         ProgramResult::Ok(42),
     );
 }
@@ -3232,7 +3232,7 @@ fn test_struct_func_pointer() {
         config,
         [],
         (),
-        TestContextObject::new(3),
+        TestContextObject::new(4),
         ProgramResult::Ok(0x102030405060708),
     );
 }
