@@ -525,15 +525,17 @@ fn test_be64() {
 
 #[test]
 fn test_pqr() {
-    let mut prog = [0; 48];
-    prog[0] = ebpf::MOV32_IMM;
-    prog[8] = ebpf::HOR64_IMM;
-    prog[16] = ebpf::MOV32_IMM;
-    prog[17] = 1; // dst = R1
-    prog[24] = ebpf::HOR64_IMM;
+    let mut prog = [0; 56];
+    prog[0] = ebpf::ADD64_IMM;
+    prog[1] = 10;
+    prog[8] = ebpf::MOV32_IMM;
+    prog[16] = ebpf::HOR64_IMM;
+    prog[24] = ebpf::MOV32_IMM;
     prog[25] = 1; // dst = R1
-    prog[33] = 16; // src = R1
-    prog[40] = ebpf::RETURN;
+    prog[32] = ebpf::HOR64_IMM;
+    prog[33] = 1; // dst = R1
+    prog[41] = 16; // src = R1
+    prog[48] = ebpf::RETURN;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for (opc, dst, src, expected_result) in [
         (ebpf::UHMUL64_IMM, 13u64, 4u64, 0u64),
@@ -655,11 +657,106 @@ fn test_pqr() {
         ),
         (ebpf::SREM64_IMM, -13i64 as u64, -4i64 as u64, -1i64 as u64),
     ] {
-        LittleEndian::write_u32(&mut prog[4..], dst as u32);
-        LittleEndian::write_u32(&mut prog[12..], (dst >> 32) as u32);
-        LittleEndian::write_u32(&mut prog[20..], src as u32);
-        LittleEndian::write_u32(&mut prog[28..], (src >> 32) as u32);
-        LittleEndian::write_u32(&mut prog[36..], src as u32);
+        LittleEndian::write_u32(&mut prog[12..], dst as u32);
+        LittleEndian::write_u32(&mut prog[20..], (dst >> 32) as u32);
+        LittleEndian::write_u32(&mut prog[28..], src as u32);
+        LittleEndian::write_u32(&mut prog[36..], (src >> 32) as u32);
+        LittleEndian::write_u32(&mut prog[44..], src as u32);
+        prog[40] = opc;
+        #[allow(unused_mut)]
+        let mut executable = Executable::<TestContextObject>::from_text_bytes(
+            &prog,
+            loader.clone(),
+            SBPFVersion::V3,
+            FunctionRegistry::default(),
+        )
+        .unwrap();
+        test_interpreter_and_jit!(
+            executable,
+            [],
+            TestContextObject::new(7),
+            ProgramResult::Ok(expected_result),
+        );
+        prog[40] |= ebpf::BPF_X;
+        #[allow(unused_mut)]
+        let mut executable = Executable::<TestContextObject>::from_text_bytes(
+            &prog,
+            loader.clone(),
+            SBPFVersion::V3,
+            FunctionRegistry::default(),
+        )
+        .unwrap();
+        test_interpreter_and_jit!(
+            executable,
+            [],
+            TestContextObject::new(7),
+            ProgramResult::Ok(expected_result),
+        );
+    }
+}
+
+#[test]
+fn test_err_divide_by_zero() {
+    let mut prog = [0; 32];
+    prog[0] = ebpf::ADD64_IMM;
+    prog[1] = 10;
+    prog[8] = ebpf::MOV32_IMM;
+    prog[24] = ebpf::RETURN;
+    let loader = Arc::new(BuiltinProgram::new_mock());
+    for opc in [
+        ebpf::UDIV32_REG,
+        ebpf::UDIV64_REG,
+        ebpf::UREM32_REG,
+        ebpf::UREM64_REG,
+        ebpf::SDIV32_REG,
+        ebpf::SDIV64_REG,
+        ebpf::SREM32_REG,
+        ebpf::SREM64_REG,
+    ] {
+        prog[16] = opc;
+        #[allow(unused_mut)]
+        let mut executable = Executable::<TestContextObject>::from_text_bytes(
+            &prog,
+            loader.clone(),
+            SBPFVersion::V3,
+            FunctionRegistry::default(),
+        )
+        .unwrap();
+        test_interpreter_and_jit!(
+            executable,
+            [],
+            TestContextObject::new(3),
+            ProgramResult::Err(EbpfError::DivideByZero),
+        );
+    }
+}
+
+#[test]
+fn test_err_divide_overflow() {
+    let mut prog = [0; 48];
+    prog[0] = ebpf::ADD64_IMM;
+    prog[1] = 10;
+    prog[8] = ebpf::MOV64_IMM;
+    LittleEndian::write_i32(&mut prog[12..], 1);
+    prog[16] = ebpf::LSH64_IMM;
+    prog[24] = ebpf::MOV64_IMM;
+    prog[25] = 1; // dst = R1
+    LittleEndian::write_i32(&mut prog[28..], -1);
+    prog[33] = 16; // src = R1
+    LittleEndian::write_i32(&mut prog[36..], -1);
+    prog[40] = ebpf::RETURN;
+    let loader = Arc::new(BuiltinProgram::new_mock());
+    for opc in [
+        ebpf::SDIV32_IMM,
+        ebpf::SDIV64_IMM,
+        ebpf::SREM32_IMM,
+        ebpf::SREM64_IMM,
+        ebpf::SDIV32_REG,
+        ebpf::SDIV64_REG,
+        ebpf::SREM32_REG,
+        ebpf::SREM64_REG,
+    ] {
+        prog[20] = if opc & ebpf::BPF_B != 0 { 63 } else { 31 };
         prog[32] = opc;
         #[allow(unused_mut)]
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
@@ -672,98 +769,7 @@ fn test_pqr() {
         test_interpreter_and_jit!(
             executable,
             [],
-            TestContextObject::new(6),
-            ProgramResult::Ok(expected_result),
-        );
-        prog[32] |= ebpf::BPF_X;
-        #[allow(unused_mut)]
-        let mut executable = Executable::<TestContextObject>::from_text_bytes(
-            &prog,
-            loader.clone(),
-            SBPFVersion::V3,
-            FunctionRegistry::default(),
-        )
-        .unwrap();
-        test_interpreter_and_jit!(
-            executable,
-            [],
-            TestContextObject::new(6),
-            ProgramResult::Ok(expected_result),
-        );
-    }
-}
-
-#[test]
-fn test_err_divide_by_zero() {
-    let mut prog = [0; 24];
-    prog[0] = ebpf::MOV32_IMM;
-    prog[16] = ebpf::RETURN;
-    let loader = Arc::new(BuiltinProgram::new_mock());
-    for opc in [
-        ebpf::UDIV32_REG,
-        ebpf::UDIV64_REG,
-        ebpf::UREM32_REG,
-        ebpf::UREM64_REG,
-        ebpf::SDIV32_REG,
-        ebpf::SDIV64_REG,
-        ebpf::SREM32_REG,
-        ebpf::SREM64_REG,
-    ] {
-        prog[8] = opc;
-        #[allow(unused_mut)]
-        let mut executable = Executable::<TestContextObject>::from_text_bytes(
-            &prog,
-            loader.clone(),
-            SBPFVersion::V3,
-            FunctionRegistry::default(),
-        )
-        .unwrap();
-        test_interpreter_and_jit!(
-            executable,
-            [],
-            TestContextObject::new(2),
-            ProgramResult::Err(EbpfError::DivideByZero),
-        );
-    }
-}
-
-#[test]
-fn test_err_divide_overflow() {
-    let mut prog = [0; 40];
-    prog[0] = ebpf::MOV64_IMM;
-    LittleEndian::write_i32(&mut prog[4..], 1);
-    prog[8] = ebpf::LSH64_IMM;
-    prog[16] = ebpf::MOV64_IMM;
-    prog[17] = 1; // dst = R1
-    LittleEndian::write_i32(&mut prog[20..], -1);
-    prog[25] = 16; // src = R1
-    LittleEndian::write_i32(&mut prog[28..], -1);
-    prog[32] = ebpf::RETURN;
-    let loader = Arc::new(BuiltinProgram::new_mock());
-    for opc in [
-        ebpf::SDIV32_IMM,
-        ebpf::SDIV64_IMM,
-        ebpf::SREM32_IMM,
-        ebpf::SREM64_IMM,
-        ebpf::SDIV32_REG,
-        ebpf::SDIV64_REG,
-        ebpf::SREM32_REG,
-        ebpf::SREM64_REG,
-    ] {
-        prog[12] = if opc & ebpf::BPF_B != 0 { 63 } else { 31 };
-        prog[24] = opc;
-        #[allow(unused_mut)]
-        let mut executable = Executable::<TestContextObject>::from_text_bytes(
-            &prog,
-            loader.clone(),
-            SBPFVersion::V3,
-            FunctionRegistry::default(),
-        )
-        .unwrap();
-        test_interpreter_and_jit!(
-            executable,
-            [],
-            TestContextObject::new(4),
+            TestContextObject::new(5),
             ProgramResult::Err(EbpfError::DivideOverflow),
         );
     }
@@ -2201,15 +2207,17 @@ fn test_stack_call_depth_tracking() {
 #[test]
 fn test_err_mem_access_out_of_bound() {
     let mem = [0; 512];
-    let mut prog = [0; 32];
-    prog[0] = ebpf::MOV32_IMM;
-    prog[8] = ebpf::HOR64_IMM;
-    prog[16] = ebpf::ST_1B_IMM;
-    prog[24] = ebpf::RETURN;
+    let mut prog = [0; 40];
+    prog[0] = ebpf::ADD64_IMM;
+    prog[1] = 10;
+    prog[8] = ebpf::MOV32_IMM;
+    prog[16] = ebpf::HOR64_IMM;
+    prog[24] = ebpf::ST_1B_IMM;
+    prog[32] = ebpf::RETURN;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for address in [0x2u64, 0x8002u64, 0x80000002u64, 0x8000000000000002u64] {
-        LittleEndian::write_u32(&mut prog[4..], address as u32);
-        LittleEndian::write_u32(&mut prog[12..], (address >> 32) as u32);
+        LittleEndian::write_u32(&mut prog[12..], address as u32);
+        LittleEndian::write_u32(&mut prog[20..], (address >> 32) as u32);
         #[allow(unused_mut)]
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
@@ -2221,7 +2229,7 @@ fn test_err_mem_access_out_of_bound() {
         test_interpreter_and_jit!(
             executable,
             mem,
-            TestContextObject::new(3),
+            TestContextObject::new(4),
             ProgramResult::Err(EbpfError::AccessViolation(
                 AccessType::Store,
                 address,
@@ -3334,7 +3342,7 @@ fn test_tcp_port80_match() {
             0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, //
             0x44, 0x44, 0x44, 0x44, //
         ],
-        TestContextObject::new(17),
+        TestContextObject::new(18),
         ProgramResult::Ok(0x1),
     );
 }
@@ -3358,7 +3366,7 @@ fn test_tcp_port80_nomatch() {
             0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, //
             0x44, 0x44, 0x44, 0x44, //
         ],
-        TestContextObject::new(18),
+        TestContextObject::new(19),
         ProgramResult::Ok(0x0),
     );
 }
@@ -3382,7 +3390,7 @@ fn test_tcp_port80_nomatch_ethertype() {
             0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, //
             0x44, 0x44, 0x44, 0x44, //
         ],
-        TestContextObject::new(7),
+        TestContextObject::new(8),
         ProgramResult::Ok(0x0),
     );
 }
@@ -3406,7 +3414,7 @@ fn test_tcp_port80_nomatch_proto() {
             0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, 0x44, //
             0x44, 0x44, 0x44, 0x44, //
         ],
-        TestContextObject::new(9),
+        TestContextObject::new(10),
         ProgramResult::Ok(0x0),
     );
 }
@@ -3416,7 +3424,7 @@ fn test_tcp_sack_match() {
     test_interpreter_and_jit_asm!(
         TCP_SACK_ASM,
         TCP_SACK_MATCH,
-        TestContextObject::new(79),
+        TestContextObject::new(80),
         ProgramResult::Ok(0x1),
     );
 }
@@ -3426,7 +3434,7 @@ fn test_tcp_sack_nomatch() {
     test_interpreter_and_jit_asm!(
         TCP_SACK_ASM,
         TCP_SACK_NOMATCH,
-        TestContextObject::new(55),
+        TestContextObject::new(56),
         ProgramResult::Ok(0x0),
     );
 }

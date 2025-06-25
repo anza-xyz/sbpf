@@ -68,6 +68,7 @@ impl TestContextObject {
 // Assembly code and data for tcp_sack testcases.
 
 pub const PROG_TCP_PORT_80: &str = "
+    add64 r10, 0
     ldxb r2, [r1+0xc]
     ldxb r3, [r1+0xd]
     lsh64 r3, 0x8
@@ -89,6 +90,7 @@ pub const PROG_TCP_PORT_80: &str = "
     exit";
 
 pub const TCP_SACK_ASM: &str = "
+    add64 r10, 0
     ldxb r2, [r1+12]
     ldxb r3, [r1+13]
     lsh r3, 0x8
@@ -134,7 +136,8 @@ pub const TCP_SACK_ASM: &str = "
     mov r0, 0x1
     exit";
 
-pub const TCP_SACK_BIN: [u8; 352] = [
+pub const TCP_SACK_BIN: [u8; 360] = [
+    0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
     0x2c, 0x12, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, //
     0x2c, 0x13, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, //
     0x67, 0x03, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, //
