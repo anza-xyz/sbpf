@@ -242,33 +242,19 @@ impl<'a> Analysis<'a> {
             self.cfg_nodes.entry(*pc).or_default();
         }
         let mut cfg_edges = BTreeMap::new();
-        for (pc, insn) in self.instructions.iter().enumerate() {
+        for (_pc, insn) in self.instructions.iter().enumerate() {
             let target_pc = (insn.ptr as isize + insn.off as isize + 1) as usize;
             match insn.opc {
-                ebpf::CALL_IMM => {
-                    let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
-                    if let Some((_function_name, target_pc)) =
-                        self.executable.get_function_registry().lookup_by_key(key)
-                    {
-                        self.cfg_nodes.entry(insn.ptr + 1).or_default();
-                        self.cfg_nodes.entry(target_pc).or_default();
-                        let destinations = if flatten_call_graph {
-                            vec![insn.ptr + 1, target_pc]
-                        } else {
-                            vec![insn.ptr + 1]
-                        };
-                        cfg_edges.insert(insn.ptr, (insn.opc, destinations));
+                ebpf::CALL_IMM => { 
+                    if !sbpf_version.static_syscalls() {
+                        if let Some((function_name, _)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
+                            let syscall = String::from_utf8_lossy(function_name).to_string();
+                            if ["abort", "sol_panic_"].contains(&syscall.as_str()) {
+                                self.cfg_nodes.entry(insn.ptr + 1).or_default();
+                                cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
+                            }
+                        }
                     }
-                }
-                ebpf::CALL_REG => {
-                    // Abnormal CFG edge
-                    self.cfg_nodes.entry(insn.ptr + 1).or_default();
-                    let destinations = if flatten_call_graph {
-                        vec![insn.ptr + 1, self.super_root]
-                    } else {
-                        vec![insn.ptr + 1]
-                    };
-                    cfg_edges.insert(insn.ptr, (insn.opc, destinations));
                 }
                 ebpf::EXIT if !sbpf_version.static_syscalls() => {
                     self.cfg_nodes.entry(insn.ptr + 1).or_default();
@@ -430,12 +416,10 @@ impl<'a> Analysis<'a> {
     ) -> std::io::Result<()> {
         if let Some(cfg_node) = self.cfg_nodes.get(&pc) {
             let is_function = self.functions.contains_key(&pc);
-            if is_function || cfg_node.sources != vec![*last_basic_block] {
-                if is_function && !suppress_extra_newlines {
-                    writeln!(output)?;
-                }
-                writeln!(output, "{}:", cfg_node.label)?;
+            if is_function && !suppress_extra_newlines {
+                writeln!(output)?;
             }
+            writeln!(output, "{}:", cfg_node.label)?;
             let last_insn = &self.instructions[cfg_node.instructions.end - 1];
             *last_basic_block = if last_insn.opc == ebpf::JA {
                 usize::MAX
