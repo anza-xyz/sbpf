@@ -104,10 +104,11 @@ fn test_verifier_fail() {
 }
 
 #[test]
-#[should_panic(expected = "DivisionByZero(1)")]
+#[should_panic(expected = "DivisionByZero(2)")]
 fn test_verifier_err_div_by_zero_imm() {
     let executable = assemble::<TestContextObject>(
         "
+        add64 r10, 0
         mov32 r0, 1
         udiv32 r0, 0
         exit",
@@ -118,9 +119,10 @@ fn test_verifier_err_div_by_zero_imm() {
 }
 
 #[test]
-#[should_panic(expected = "UnsupportedLEBEArgument(0)")]
+#[should_panic(expected = "UnsupportedLEBEArgument(1)")]
 fn test_verifier_err_endian_size() {
     let prog = &[
+        0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
         0xdc, 0x01, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, //
         0xb7, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
         0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
@@ -180,6 +182,7 @@ fn test_verifier_err_invalid_reg_dst() {
     for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
         let executable = assemble::<TestContextObject>(
             "
+            add64 r10, 0
             mov r11, 1
             exit",
             Arc::new(BuiltinProgram::new_loader(Config {
@@ -189,7 +192,7 @@ fn test_verifier_err_invalid_reg_dst() {
         )
         .unwrap();
         let result = executable.verify::<RequisiteVerifier>();
-        assert_error!(result, "VerifierError(InvalidDestinationRegister(0))");
+        assert_error!(result, "VerifierError(InvalidDestinationRegister(1))");
     }
 }
 
@@ -200,6 +203,7 @@ fn test_verifier_err_invalid_reg_src() {
     for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
         let executable = assemble::<TestContextObject>(
             "
+            add64 r10, 0
             mov r0, r11
             exit",
             Arc::new(BuiltinProgram::new_loader(Config {
@@ -209,7 +213,7 @@ fn test_verifier_err_invalid_reg_src() {
         )
         .unwrap();
         let result = executable.verify::<RequisiteVerifier>();
-        assert_error!(result, "VerifierError(InvalidSourceRegister(0))");
+        assert_error!(result, "VerifierError(InvalidSourceRegister(1))");
     }
 }
 
@@ -218,6 +222,7 @@ fn test_verifier_resize_stack_ptr_success() {
     let executable = assemble::<TestContextObject>(
         "
         add r10, -64
+        exit
         add r10, 64
         exit",
         Arc::new(BuiltinProgram::new_loader(Config {
@@ -263,7 +268,10 @@ fn test_verifier_err_jmp_lddw() {
         ja +1
         lddw r0, 0x1122334455667788
         exit",
-        Arc::new(BuiltinProgram::new_mock()),
+        Arc::new(BuiltinProgram::new_loader(Config {
+            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+            ..Config::default()
+        })),
     )
     .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
@@ -317,10 +325,11 @@ fn test_verifier_err_function_fallthrough() {
 }
 
 #[test]
-#[should_panic(expected = "JumpOutOfCode(3, 0)")]
+#[should_panic(expected = "JumpOutOfCode(4, 1)")]
 fn test_verifier_err_jmp_out() {
     let executable = assemble::<TestContextObject>(
         "
+        add64 r10, 0
         ja +2
         exit",
         Arc::new(BuiltinProgram::new_mock()),
@@ -330,11 +339,12 @@ fn test_verifier_err_jmp_out() {
 }
 
 #[test]
-#[should_panic(expected = "JumpOutOfCode(18446744073709551615, 0)")]
+#[should_panic(expected = "JumpOutOfCode(18446744073709551615, 1)")]
 fn test_verifier_err_jmp_out_start() {
     let executable = assemble::<TestContextObject>(
         "
-        ja -2
+        add64 r10, 0
+        ja -3
         exit",
         Arc::new(BuiltinProgram::new_mock()),
     )
@@ -378,6 +388,7 @@ fn test_verifier_err_invalid_exit() {
 #[should_panic(expected = "InvalidSyscall(2432830685)")]
 fn test_verifier_unknown_syscall() {
     let prog = &[
+        0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
         0x95, 0x00, 0x00, 0x00, 0xDD, 0x0C, 0x02, 0x91, // syscall gather_bytes
         0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // return
     ];
@@ -394,6 +405,7 @@ fn test_verifier_unknown_syscall() {
 #[test]
 fn test_verifier_known_syscall() {
     let prog = &[
+        0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
         0x95, 0x00, 0x00, 0x00, 0xDD, 0x0C, 0x02, 0x91, // syscall gather_bytes
         0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // return
     ];
@@ -413,10 +425,11 @@ fn test_verifier_known_syscall() {
 }
 
 #[test]
-#[should_panic(expected = "CannotWriteR10(0)")]
+#[should_panic(expected = "CannotWriteR10(1)")]
 fn test_verifier_err_write_r10() {
     let executable = assemble::<TestContextObject>(
         "
+        add64 r10, 0
         mov r10, 1
         exit",
         Arc::new(BuiltinProgram::new_mock()),
@@ -429,26 +442,53 @@ fn test_verifier_err_write_r10() {
 fn test_verifier_err_all_shift_overflows() {
     let testcases = [
         // lsh32_imm
-        ("lsh32 r0, 16", Ok(())),
-        ("lsh32 r0, 32", Err("ShiftWithOverflow(32, 32, 0)")),
-        ("lsh32 r0, 64", Err("ShiftWithOverflow(64, 32, 0)")),
+        ("add64 r10, 0\n    lsh32 r0, 16", Ok(())),
+        (
+            "add64 r10, 0\n    lsh32 r0, 32",
+            Err("ShiftWithOverflow(32, 32, 1)"),
+        ),
+        (
+            "add64 r10, 0\n    lsh32 r0, 64",
+            Err("ShiftWithOverflow(64, 32, 1)"),
+        ),
         // rsh32_imm
-        ("rsh32 r0, 16", Ok(())),
-        ("rsh32 r0, 32", Err("ShiftWithOverflow(32, 32, 0)")),
-        ("rsh32 r0, 64", Err("ShiftWithOverflow(64, 32, 0)")),
+        ("add64 r10, 0\n    rsh32 r0, 16", Ok(())),
+        (
+            "add64 r10, 0\n    rsh32 r0, 32",
+            Err("ShiftWithOverflow(32, 32, 1)"),
+        ),
+        (
+            "add64 r10, 0\n    rsh32 r0, 64",
+            Err("ShiftWithOverflow(64, 32, 1)"),
+        ),
         // arsh32_imm
-        ("arsh32 r0, 16", Ok(())),
-        ("arsh32 r0, 32", Err("ShiftWithOverflow(32, 32, 0)")),
-        ("arsh32 r0, 64", Err("ShiftWithOverflow(64, 32, 0)")),
+        ("add64 r10, 0\n    arsh32 r0, 16", Ok(())),
+        (
+            "add64 r10, 0\n    arsh32 r0, 32",
+            Err("ShiftWithOverflow(32, 32, 1)"),
+        ),
+        (
+            "add64 r10, 0\n    arsh32 r0, 64",
+            Err("ShiftWithOverflow(64, 32, 1)"),
+        ),
         // lsh64_imm
-        ("lsh64 r0, 32", Ok(())),
-        ("lsh64 r0, 64", Err("ShiftWithOverflow(64, 64, 0)")),
+        ("add64 r10, 0\n    lsh64 r0, 32", Ok(())),
+        (
+            "add64 r10, 0\n    lsh64 r0, 64",
+            Err("ShiftWithOverflow(64, 64, 1)"),
+        ),
         // rsh64_imm
-        ("rsh64 r0, 32", Ok(())),
-        ("rsh64 r0, 64", Err("ShiftWithOverflow(64, 64, 0)")),
+        ("add64 r10, 0\n    rsh64 r0, 32", Ok(())),
+        (
+            "add64 r10, 0\n    rsh64 r0, 64",
+            Err("ShiftWithOverflow(64, 64, 1)"),
+        ),
         // arsh64_imm
-        ("arsh64 r0, 32", Ok(())),
-        ("arsh64 r0, 64", Err("ShiftWithOverflow(64, 64, 0)")),
+        ("add64 r10, 0\n    arsh64 r0, 32", Ok(())),
+        (
+            "add64 r10, 0\n    arsh64 r0, 64",
+            Err("ShiftWithOverflow(64, 64, 1)"),
+        ),
     ];
 
     for (overflowing_instruction, expected) in testcases {
@@ -473,8 +513,8 @@ fn test_sdiv_disabled() {
     ];
 
     for (opc, instruction) in instructions {
-        for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
-            let assembly = format!("\n{instruction}\nexit");
+        for highest_sbpf_version in [SBPFVersion::V1, SBPFVersion::V3] {
+            let assembly = format!("add64 r10, 0\n{instruction}\nexit");
             let executable = assemble::<TestContextObject>(
                 &assembly,
                 Arc::new(BuiltinProgram::new_loader(Config {
@@ -487,7 +527,7 @@ fn test_sdiv_disabled() {
             if highest_sbpf_version == SBPFVersion::V3 {
                 assert!(result.is_ok());
             } else {
-                assert_error!(result, "VerifierError(UnknownOpCode({}, {}))", opc, 0);
+                assert_error!(result, "VerifierError(UnknownOpCode({}, {}))", opc, 1);
             }
         }
     }
@@ -495,8 +535,9 @@ fn test_sdiv_disabled() {
 
 #[test]
 fn return_instr() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+    for sbpf_version in [SBPFVersion::V1, SBPFVersion::V3] {
         let prog = &[
+            0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
             0xbf, 0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, // mov64 r0, 2
             0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit (v1), syscall (v2)
             0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // return
@@ -513,7 +554,7 @@ fn return_instr() {
         if sbpf_version == SBPFVersion::V3 {
             assert_error!(result, "VerifierError(InvalidSyscall(0))");
         } else {
-            assert_error!(result, "VerifierError(UnknownOpCode(157, 2))");
+            assert_error!(result, "VerifierError(UnknownOpCode(157, 3))");
         }
     }
 }
@@ -521,8 +562,9 @@ fn return_instr() {
 #[test]
 fn return_in_v2() {
     let executable = assemble::<TestContextObject>(
-        "mov r0, 2
-                 return",
+        "add64 r10, 0
+        mov r0, 2
+        return",
         Arc::new(BuiltinProgram::new_loader(Config {
             enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
             ..Config::default()
@@ -536,8 +578,10 @@ fn return_in_v2() {
 #[test]
 fn function_without_return() {
     let executable = assemble::<TestContextObject>(
-        "mov r0, 2
-                add64 r0, 5",
+        "
+        add64 r10, 0
+        mov r0, 2
+        add64 r0, 5",
         Arc::new(BuiltinProgram::new_loader(Config {
             enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
             ..Config::default()
@@ -545,5 +589,5 @@ fn function_without_return() {
     )
     .unwrap();
     let result = executable.verify::<RequisiteVerifier>();
-    assert_error!(result, "VerifierError(InvalidFunction(1))");
+    assert_error!(result, "VerifierError(InvalidFunction(2))");
 }
