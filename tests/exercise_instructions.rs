@@ -411,6 +411,7 @@ fn test_ins(v0: bool, ins: String, prng: &mut SmallRng, cu: Option<u64>) {
 
     let asm = format!(
         "
+        add64 r10, 0
         ldxdw r9, [r1+72]
         ldxdw r8, [r1+64]
         ldxdw r7, [r1+56]
@@ -444,7 +445,7 @@ fn test_ins(v0: bool, ins: String, prng: &mut SmallRng, cu: Option<u64>) {
     let loader = Arc::new(BuiltinProgram::new_loader(config));
     let mut executable = assemble(asm.as_str(), loader).unwrap();
     let cu = cu
-        .map(|cu| cu.saturating_add(21))
+        .map(|cu| cu.saturating_add(22))
         .unwrap_or(executable.get_text_bytes().1.len().wrapping_shr(3) as u64);
     test_interpreter_and_jit!(
         override_budget => true,
