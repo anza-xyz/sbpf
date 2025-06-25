@@ -232,6 +232,7 @@ pub enum RuntimeEnvironmentSlot {
 /// use test_utils::TestContextObject;
 ///
 /// let prog = &[
+///     0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
 ///     0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
 /// ];
 /// let mem = &mut [
@@ -242,7 +243,7 @@ pub enum RuntimeEnvironmentSlot {
 /// let function_registry = FunctionRegistry::default();
 /// let mut executable = Executable::<TestContextObject>::from_text_bytes(prog, loader.clone(), SBPFVersion::V3, function_registry).unwrap();
 /// executable.verify::<RequisiteVerifier>().unwrap();
-/// let mut context_object = TestContextObject::new(1);
+/// let mut context_object = TestContextObject::new(2);
 /// let sbpf_version = executable.get_sbpf_version();
 ///
 /// let mut stack = AlignedMemory::<{ebpf::HOST_ALIGN}>::zero_filled(executable.get_config().stack_size());
@@ -264,7 +265,7 @@ pub enum RuntimeEnvironmentSlot {
 /// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, memory_mapping, stack_len);
 ///
 /// let (instruction_count, result) = vm.execute_program(&executable, true);
-/// assert_eq!(instruction_count, 1);
+/// assert_eq!(instruction_count, 2);
 /// assert_eq!(result.unwrap(), 0);
 /// ```
 #[repr(C)]
