@@ -21,12 +21,7 @@ SECTIONS
         _heap_end = .;
         . = ALIGN(8);
    } :heap
-  .dynsym 0xFFFFFFFF00000000 : {
-    *(.dynsym)
-    . = ALIGN(8);
-  } :dynsym
    .strtab : { *(.strtab) } :other
-   .dynstr : { *(.dynstr) } :other
   /DISCARD/ : {
       *(.comment*)
       *(.eh_frame*)
@@ -35,6 +30,8 @@ SECTIONS
       *(.data*)
       *(.rel.dyn*)
       *(.dynamic)
+      *(.dynsym)
+      *(.dynstr)
     }
 }
 
