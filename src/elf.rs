@@ -414,9 +414,7 @@ impl<C: ContextObject> Executable<C> {
         loader: Arc<BuiltinProgram<C>>,
     ) -> Result<Self, ElfParserError> {
         use crate::elf_parser::{
-            consts::{
-                ELFMAG, EV_CURRENT, PF_R, PF_W, PF_X, PT_GNU_STACK, PT_LOAD, SHN_UNDEF, STT_FUNC,
-            },
+            consts::{ELFMAG, EV_CURRENT, PF_R, PF_W, PF_X, PT_LOAD, SHN_UNDEF, STT_FUNC},
             types::{Elf64Ehdr, Elf64Shdr, Elf64Sym},
         };
 
@@ -453,15 +451,15 @@ impl<C: ContextObject> Executable<C> {
             return Err(ElfParserError::InvalidFileHeader);
         }
 
-        const EXPECTED_PROGRAM_HEADERS: [(u32, u32, u64); 4] = [
-            (PT_LOAD, PF_X, ebpf::MM_BYTECODE_START), // byte code
-            (PT_LOAD, PF_R, ebpf::MM_RODATA_START),   // read only data
-            (PT_GNU_STACK, PF_R | PF_W, ebpf::MM_STACK_START), // stack
-            (PT_LOAD, PF_R | PF_W, ebpf::MM_HEAP_START), // heap
+        const EXPECTED_PROGRAM_HEADERS: [(u32, u64); 4] = [
+            (PF_X, ebpf::MM_BYTECODE_START),     // byte code
+            (PF_R, ebpf::MM_RODATA_START),       // read only data
+            (PF_R | PF_W, ebpf::MM_STACK_START), // stack
+            (PF_R | PF_W, ebpf::MM_HEAP_START),  // heap
         ];
         let program_header_table =
             Elf64::slice_from_bytes::<Elf64Phdr>(elf_bytes, program_header_table_range.clone())?;
-        for (program_header, (p_type, p_flags, p_vaddr)) in program_header_table
+        for (program_header, (p_flags, p_vaddr)) in program_header_table
             .iter()
             .zip(EXPECTED_PROGRAM_HEADERS.iter())
         {
@@ -470,7 +468,7 @@ impl<C: ContextObject> Executable<C> {
             } else {
                 program_header.p_memsz
             };
-            if program_header.p_type != *p_type
+            if program_header.p_type != PT_LOAD
                 || program_header.p_flags != *p_flags
                 || program_header.p_offset < program_header_table_range.end as u64
                 || program_header.p_offset >= elf_bytes.len() as u64
