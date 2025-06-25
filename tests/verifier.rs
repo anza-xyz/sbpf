@@ -278,14 +278,16 @@ fn test_verifier_err_jmp_lddw() {
 }
 
 #[test]
-#[should_panic(expected = "InvalidFunction(1)")]
-fn test_verifier_err_call_lddw() {
+fn test_verifier_call_into_lddw() {
     let executable = assemble::<TestContextObject>(
         "
         call 1
         lddw r0, 0x1122334455667788
         exit",
-        Arc::new(BuiltinProgram::new_mock()),
+        Arc::new(BuiltinProgram::new_loader(Config {
+            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+            ..Config::default()
+        })),
     )
     .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();

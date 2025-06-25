@@ -172,21 +172,6 @@ fn check_jmp_offset(
     Ok(())
 }
 
-fn check_call_target<T>(
-    key: u32,
-    function_registry: &FunctionRegistry<T>,
-    error: VerifierError,
-) -> Result<(), VerifierError>
-where
-    T: Copy,
-    T: PartialEq,
-{
-    function_registry
-        .lookup_by_key(key)
-        .map(|_| ())
-        .ok_or(error)
-}
-
 fn check_registers(
     insn: &ebpf::Insn,
     store: bool,
@@ -239,26 +224,33 @@ pub struct RequisiteVerifier {}
 impl Verifier for RequisiteVerifier {
     /// Check the program against the verifier's rules
     #[rustfmt::skip]
-    fn verify<C: ContextObject>(prog: &[u8], _config: &Config, sbpf_version: SBPFVersion, function_registry: &FunctionRegistry<usize>, syscall_registry: &FunctionRegistry<BuiltinFunction<C>>) -> Result<(), VerifierError> {
+    fn verify<C: ContextObject>(prog: &[u8], _config: &Config, sbpf_version: SBPFVersion, _function_registry: &FunctionRegistry<usize>, syscall_registry: &FunctionRegistry<BuiltinFunction<C>>) -> Result<(), VerifierError> {
         check_prog_len(prog)?;
 
         let program_range = 0..prog.len() / ebpf::INSN_SIZE;
-        let mut function_iter = function_registry.keys().map(|insn_ptr| insn_ptr as usize).peekable();
         let mut function_range = program_range.start..program_range.end;
         let mut insn_ptr: usize = 0;
+        if sbpf_version.enable_stricter_verification() && !ebpf::get_insn(prog, insn_ptr).is_function_start_marker() {
+            return Err(VerifierError::InvalidFunction(0));
+        }
         while (insn_ptr + 1) * ebpf::INSN_SIZE <= prog.len() {
             let insn = ebpf::get_insn(prog, insn_ptr);
             let mut store = false;
 
-            if sbpf_version.static_syscalls() && function_iter.peek() == Some(&insn_ptr) {
-                function_range.start = function_iter.next().unwrap_or(0);
-                function_range.end = *function_iter.peek().unwrap_or(&program_range.end);
+            if sbpf_version.enable_stricter_verification() && insn.is_function_start_marker() {
+                function_range = insn_ptr..insn_ptr.saturating_add(1);
+                while function_range.end < program_range.end &&
+                    !ebpf::get_insn(prog, function_range.end).is_function_start_marker() {
+                    function_range.end = function_range.end.saturating_add(1);
+                }
                 let insn = ebpf::get_insn(prog, function_range.end.saturating_sub(1));
                 match insn.opc {
                     ebpf::JA | ebpf::RETURN => {},
-                    _ => return Err(VerifierError::InvalidFunction(
-                        function_range.end.saturating_sub(1),
-                    )),
+                    _ => {
+                        return Err(VerifierError::InvalidFunction(
+                            function_range.end.saturating_sub(1),
+                        ))
+                    },
                 }
             }
 
@@ -410,21 +402,20 @@ impl Verifier for RequisiteVerifier {
                 ebpf::JSLE_REG   => { check_jmp_offset(prog, insn_ptr, &function_range)?; },
                 ebpf::CALL_IMM   if sbpf_version.static_syscalls() => {
                     let target_pc = sbpf_version.calculate_call_imm_target_pc(insn_ptr, insn.imm);
-                    check_call_target(
-                        target_pc,
-                        function_registry,
-                        VerifierError::InvalidFunction(target_pc as usize)
-                    )?;
+                    if !program_range.contains(&(target_pc as usize)) ||
+                       !ebpf::get_insn(prog, target_pc as usize).is_function_start_marker() {
+                        return Err(VerifierError::InvalidFunction(target_pc as usize));
+                    }
                 },
                 ebpf::CALL_IMM   => {},
                 ebpf::CALL_REG   => { check_callx_register(&insn, insn_ptr, sbpf_version)?; },
                 ebpf::EXIT       if !sbpf_version.static_syscalls()   => {},
                 ebpf::RETURN     if sbpf_version.static_syscalls()    => {},
                 ebpf::SYSCALL    if sbpf_version.static_syscalls()    => {
-                    check_call_target(
-                        insn.imm as u32,
-                        syscall_registry,
-                        VerifierError::InvalidSyscall(insn.imm as u32))?;
+                    syscall_registry
+                        .lookup_by_key(insn.imm as u32)
+                        .map(|_| ())
+                        .ok_or(VerifierError::InvalidSyscall(insn.imm as u32))?;
                 },
 
                 _                => {
