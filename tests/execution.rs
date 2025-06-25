@@ -1916,17 +1916,29 @@ fn test_err_dynamic_stack_ptr_overflow() {
     test_interpreter_and_jit_asm!(
         "
         add r10, -0x7FFFFF00
+        call function_stage1
+        return
+        function_stage1:
         add r10, -0x7FFFFF00
+        call function_stage2
+        return
+        function_stage2:
         add r10, -0x7FFFFF00
+        call function_stage3
+        return
+        function_stage3:
         add r10, -0x7FFFFF00
+        call function_stage4
+        return
+        function_stage4:
         add r10, -0x40440
-        call function_foo
-        exit
-        function_foo:
+        call function_final
+        return
+        function_final:
         stb [r10], 0
-        exit",
+        return",
         [],
-        TestContextObject::new(7),
+        TestContextObject::new(11),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Store,
             u64::MAX - 63,
