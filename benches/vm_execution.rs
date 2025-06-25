@@ -130,6 +130,7 @@ fn bench_jit_vs_interpreter_address_translation(bencher: &mut Bencher) {
     bench_jit_vs_interpreter(
         bencher,
         "
+    add64 r10, 0
     ldxb r0, [r1]
     add r1, 1
     mov r0, r1
@@ -137,13 +138,14 @@ fn bench_jit_vs_interpreter_address_translation(bencher: &mut Bencher) {
     jlt r0, 0x20000, -5
     exit",
         Config::default(),
-        655361,
+        655362,
         &mut [0; 0x20000],
     );
 }
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 static ADDRESS_TRANSLATION_STACK_CODE: &str = "
+    add64 r10, 0
     mov r1, r2
     and r1, 4095
     mov r3, r10
@@ -164,7 +166,7 @@ fn bench_jit_vs_interpreter_address_translation_stack_fixed(bencher: &mut Benche
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
             ..Config::default()
         },
-        524289,
+        524290,
         &mut [],
     );
 }
@@ -176,7 +178,7 @@ fn bench_jit_vs_interpreter_address_translation_stack_dynamic(bencher: &mut Benc
         bencher,
         ADDRESS_TRANSLATION_STACK_CODE,
         Config::default(),
-        524289,
+        524290,
         &mut [],
     );
 }
@@ -187,13 +189,14 @@ fn bench_jit_vs_interpreter_empty_for_loop(bencher: &mut Bencher) {
     bench_jit_vs_interpreter(
         bencher,
         "
+    add64 r10, 0
     mov r1, r2
     and r1, 1023
     add r2, 1
     jlt r2, 0x10000, -4
     exit",
         Config::default(),
-        262145,
+        262146,
         &mut [0; 0],
     );
 }
@@ -234,6 +237,7 @@ fn bench_jit_vs_interpreter_call_depth_dynamic(bencher: &mut Bencher) {
     bench_jit_vs_interpreter(
         bencher,
         "
+    add64 r10, 0
     mov r6, 0
     add r6, 1
     mov r1, 18
@@ -250,7 +254,7 @@ fn bench_jit_vs_interpreter_call_depth_dynamic(bencher: &mut Bencher) {
     call function_foo
     exit",
         Config::default(),
-        156674,
+        156675,
         &mut [],
     );
 }
