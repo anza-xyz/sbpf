@@ -395,6 +395,13 @@ pub fn assemble<C: ContextObject>(
                             (AluBinary, [Register(dst), Register(src)]) => {
                                 insn(opc | ebpf::BPF_X, *dst, *src, 0, 0)
                             }
+                            (AluBinary, [Register(10), Integer(imm)]) if opc == ebpf::ADD64_IMM => {
+                                if sbpf_version.dynamic_stack_frames() {
+                                    insn(opc | ebpf::BPF_K, 10, 0, 0, *imm)
+                                } else {
+                                    insn(ebpf::OR64_IMM, 0, 0, 0, 0) // no-op
+                                }
+                            }
                             (AluBinary, [Register(dst), Integer(imm)]) => {
                                 insn(opc | ebpf::BPF_K, *dst, 0, 0, *imm)
                             }
