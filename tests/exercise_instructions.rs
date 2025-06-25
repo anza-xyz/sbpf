@@ -36,49 +36,49 @@ fn fuzz_alu() {
     for src in 0..10 {
         for dst in 0..10 {
             for _ in 0..10 {
-                test_ins(false, format!("mov64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("add64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("sub64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("or64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("xor64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("and64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("lmul64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("uhmul64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("shmul64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("udiv64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("urem64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("srem64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("sdiv64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("udiv64 r{src}, r{dst}"), &mut prng, 21);
+                test_ins(false, format!("mov64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("add64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("sub64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("or64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("xor64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("and64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("lmul64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("uhmul64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("shmul64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("udiv64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("urem64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("srem64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("sdiv64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("udiv64 r{src}, r{dst}"), &mut prng, None);
 
-                test_ins(false, format!("lsh64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("rsh64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("arsh64 r{src}, r{dst}"), &mut prng, 21);
+                test_ins(false, format!("lsh64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("rsh64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("arsh64 r{src}, r{dst}"), &mut prng, None);
 
-                test_ins(false, format!("mov32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("add32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("sub32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("or32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("xor32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("and32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("lmul32 r{src}, r{dst}"), &mut prng, 21);
-                // test_ins(format!("uhmul32 r{src}, r{dst}"), &mut p, 21rng);
-                // test_ins(format!("shmul32 r{src}, r{dst}"), &mut p, 21rng);
-                test_ins(false, format!("udiv32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("sdiv32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("srem32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("urem32 r{src}, r{dst}"), &mut prng, 21);
+                test_ins(false, format!("mov32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("add32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("sub32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("or32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("xor32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("and32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("lmul32 r{src}, r{dst}"), &mut prng, None);
+                // test_ins(format!("uhmul32 r{src}, r{dst}"), &mut p, None);
+                // test_ins(format!("shmul32 r{src}, r{dst}"), &mut p, None);
+                test_ins(false, format!("udiv32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("sdiv32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("srem32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("urem32 r{src}, r{dst}"), &mut prng, None);
 
-                test_ins(false, format!("lsh32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("rsh32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(false, format!("arsh32 r{src}, r{dst}"), &mut prng, 21);
+                test_ins(false, format!("lsh32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("rsh32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(false, format!("arsh32 r{src}, r{dst}"), &mut prng, None);
 
-                test_ins(true, format!("mul64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(true, format!("mod64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(true, format!("div64 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(true, format!("mul32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(true, format!("mod32 r{src}, r{dst}"), &mut prng, 21);
-                test_ins(true, format!("div32 r{src}, r{dst}"), &mut prng, 21);
+                test_ins(true, format!("mul64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(true, format!("mod64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(true, format!("div64 r{src}, r{dst}"), &mut prng, None);
+                test_ins(true, format!("mul32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(true, format!("mod32 r{src}, r{dst}"), &mut prng, None);
+                test_ins(true, format!("div32 r{src}, r{dst}"), &mut prng, None);
 
                 // test load, store
                 let rand = prng.next_u32() as i64;
@@ -101,7 +101,7 @@ fn fuzz_alu() {
                         addr >> 32,
                     ),
                     &mut prng,
-                    25,
+                    None,
                 );
 
                 test_ins(
@@ -116,7 +116,7 @@ fn fuzz_alu() {
                         addr >> 32,
                     ),
                     &mut prng,
-                    25,
+                    None,
                 );
 
                 let addr = rand % 79 + 0x4_0000_0000i64 - offset as i64;
@@ -133,7 +133,7 @@ fn fuzz_alu() {
                         addr >> 32,
                     ),
                     &mut prng,
-                    25,
+                    None,
                 );
 
                 test_ins(
@@ -148,7 +148,7 @@ fn fuzz_alu() {
                         addr >> 32,
                     ),
                     &mut prng,
-                    25,
+                    None,
                 );
 
                 let addr = rand % 77 + 0x4_0000_0000i64 - offset as i64;
@@ -164,7 +164,7 @@ fn fuzz_alu() {
                         addr >> 32,
                     ),
                     &mut prng,
-                    25,
+                    None,
                 );
                 test_ins(
                     false,
@@ -178,7 +178,7 @@ fn fuzz_alu() {
                         addr >> 32,
                     ),
                     &mut prng,
-                    25,
+                    None,
                 );
 
                 let addr = rand % 73 + 0x4_0000_0000i64 - offset as i64;
@@ -195,7 +195,7 @@ fn fuzz_alu() {
                         addr >> 32,
                     ),
                     &mut prng,
-                    25,
+                    None,
                 );
                 test_ins(
                     false,
@@ -209,7 +209,7 @@ fn fuzz_alu() {
                         addr >> 32,
                     ),
                     &mut prng,
-                    25,
+                    None,
                 );
 
                 // test conditionals
@@ -229,7 +229,7 @@ fn fuzz_alu() {
                         l2:",
                         ),
                         &mut prng,
-                        23,
+                        Some(2),
                     );
                 }
             }
@@ -237,46 +237,46 @@ fn fuzz_alu() {
 
         for _ in 0..10 {
             let imm = prng.next_u64() as i64;
-            test_ins(true, format!("lddw r{src}, {imm}"), &mut prng, 21);
+            test_ins(true, format!("lddw r{src}, {imm}"), &mut prng, Some(0));
 
             let mut imm = imm as i32;
 
-            test_ins(true, format!("neg64 r{src}"), &mut prng, 21);
-            test_ins(true, format!("neg32 r{src}"), &mut prng, 21);
+            test_ins(true, format!("neg64 r{src}"), &mut prng, None);
+            test_ins(true, format!("neg32 r{src}"), &mut prng, None);
 
-            test_ins(true, format!("mul64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(true, format!("mod64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(true, format!("div64 r{src}, {imm}"), &mut prng, 21);
+            test_ins(true, format!("mul64 r{src}, {imm}"), &mut prng, None);
+            test_ins(true, format!("mod64 r{src}, {imm}"), &mut prng, None);
+            test_ins(true, format!("div64 r{src}, {imm}"), &mut prng, None);
 
-            test_ins(true, format!("mul32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(true, format!("mod32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(true, format!("div32 r{src}, {imm}"), &mut prng, 21);
+            test_ins(true, format!("mul32 r{src}, {imm}"), &mut prng, None);
+            test_ins(true, format!("mod32 r{src}, {imm}"), &mut prng, None);
+            test_ins(true, format!("div32 r{src}, {imm}"), &mut prng, None);
 
-            test_ins(false, format!("mov64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("add64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("sub64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("or64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("xor64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("and64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("lmul64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("uhmul64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("shmul64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("udiv64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("urem64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("sdiv64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("srem64 r{src}, {imm}"), &mut prng, 21);
+            test_ins(false, format!("mov64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("add64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("sub64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("or64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("xor64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("and64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("lmul64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("uhmul64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("shmul64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("udiv64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("urem64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("sdiv64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("srem64 r{src}, {imm}"), &mut prng, None);
 
-            test_ins(false, format!("mov32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("add32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("sub32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("or32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("xor32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("and32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("lmul32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("udiv32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("urem32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("sdiv32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("srem32 r{src}, {imm}"), &mut prng, 21);
+            test_ins(false, format!("mov32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("add32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("sub32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("or32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("xor32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("and32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("lmul32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("udiv32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("urem32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("sdiv32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("srem32 r{src}, {imm}"), &mut prng, None);
 
             // test st imm
             let rand = prng.next_u32() as i64;
@@ -297,7 +297,7 @@ fn fuzz_alu() {
                     imm as i8,
                 ),
                 &mut prng,
-                25,
+                None,
             );
 
             let addr = rand % 79 + 0x4_0000_0000i64 - offset as i64;
@@ -314,7 +314,7 @@ fn fuzz_alu() {
                     imm as i16
                 ),
                 &mut prng,
-                25,
+                None,
             );
 
             let addr = rand % 77 + 0x4_0000_0000i64 - offset as i64;
@@ -330,7 +330,7 @@ fn fuzz_alu() {
                     addr >> 32,
                 ),
                 &mut prng,
-                25,
+                None,
             );
 
             let addr = rand % 73 + 0x4_0000_0000i64 - offset as i64;
@@ -346,7 +346,7 @@ fn fuzz_alu() {
                     addr >> 32,
                 ),
                 &mut prng,
-                25,
+                None,
             );
 
             // unconditional jump
@@ -358,7 +358,7 @@ fn fuzz_alu() {
             1:",
                 ),
                 &mut prng,
-                21,
+                Some(0),
             );
 
             for jc in [
@@ -376,35 +376,35 @@ fn fuzz_alu() {
                     l2:",
                     ),
                     &mut prng,
-                    23,
+                    Some(2),
                 );
             }
 
             imm &= 63;
 
-            test_ins(false, format!("lsh64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("rsh64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("arsh64 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("hor64 r{src}, {imm}"), &mut prng, 21);
+            test_ins(false, format!("lsh64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("rsh64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("arsh64 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("hor64 r{src}, {imm}"), &mut prng, None);
 
             imm &= 31;
 
-            test_ins(false, format!("lsh32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("rsh32 r{src}, {imm}"), &mut prng, 21);
-            test_ins(false, format!("arsh32 r{src}, {imm}"), &mut prng, 21);
+            test_ins(false, format!("lsh32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("rsh32 r{src}, {imm}"), &mut prng, None);
+            test_ins(false, format!("arsh32 r{src}, {imm}"), &mut prng, None);
 
-            test_ins(false, format!("be64 r{src}"), &mut prng, 21);
-            test_ins(false, format!("be32 r{src}"), &mut prng, 21);
-            test_ins(false, format!("be16 r{src}"), &mut prng, 21);
+            test_ins(false, format!("be64 r{src}"), &mut prng, None);
+            test_ins(false, format!("be32 r{src}"), &mut prng, None);
+            test_ins(false, format!("be16 r{src}"), &mut prng, None);
 
-            test_ins(true, format!("le64 r{src}"), &mut prng, 21);
-            test_ins(true, format!("le32 r{src}"), &mut prng, 21);
-            test_ins(true, format!("le16 r{src}"), &mut prng, 21);
+            test_ins(true, format!("le64 r{src}"), &mut prng, None);
+            test_ins(true, format!("le32 r{src}"), &mut prng, None);
+            test_ins(true, format!("le16 r{src}"), &mut prng, None);
         }
     }
 }
 
-fn test_ins(v0: bool, ins: String, prng: &mut SmallRng, cu: u64) {
+fn test_ins(v0: bool, ins: String, prng: &mut SmallRng, cu: Option<u64>) {
     let mut input = [0u8; 80];
 
     prng.fill_bytes(&mut input);
@@ -443,6 +443,9 @@ fn test_ins(v0: bool, ins: String, prng: &mut SmallRng, cu: u64) {
     }
     let loader = Arc::new(BuiltinProgram::new_loader(config));
     let mut executable = assemble(asm.as_str(), loader).unwrap();
+    let cu = cu
+        .map(|cu| cu.saturating_add(21))
+        .unwrap_or(executable.get_text_bytes().1.len().wrapping_shr(3) as u64);
     test_interpreter_and_jit!(
         override_budget => true,
         executable,
