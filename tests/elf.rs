@@ -6,7 +6,7 @@ use solana_sbpf::{
     elf::{get_ro_region, ElfError, Executable, Section},
     elf_parser::{
         consts::{ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFOSABI_NONE, EM_BPF, ET_REL},
-        types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr, Elf64Sym},
+        types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr},
         Elf64, ElfParserError, SECTION_NAME_LENGTH_MAXIMUM,
     },
     memory_region::{AccessType, MemoryMapping},
@@ -41,7 +41,7 @@ fn test_strict_header() {
             ..Config::default()
         }));
         let executable = ElfExecutable::load(&elf_bytes, loader.clone()).unwrap();
-        let (name, _pc) = executable.get_function_registry().lookup_by_key(4).unwrap();
+        let (name, _pc) = executable.get_function_registry().lookup_by_key(5).unwrap();
         assert_eq!(name, b"entrypoint");
     }
 
@@ -95,7 +95,6 @@ fn test_strict_header() {
         expected_results_readonly.iter(),
         expected_results_writable.iter(),
         expected_results_writable.iter(),
-        expected_results_readonly.iter(),
     ];
     for (header_index, expected_results) in expected_results.into_iter().enumerate() {
         for (offset, expected) in (std::mem::size_of::<Elf64Ehdr>()
@@ -112,44 +111,10 @@ fn test_strict_header() {
         }
     }
 
-    // Break the dynamic symbol table one byte at a time
-    for index in 1..3 {
-        let expected_results = std::iter::repeat_n(&Ok(()), 8)
-            .chain(std::iter::repeat_n(&Err(ElfParserError::OutOfBounds), 8))
-            .chain(std::iter::repeat_n(&Err(ElfParserError::InvalidSize), 1))
-            .chain(std::iter::repeat_n(&Err(ElfParserError::OutOfBounds), 7));
-        for (offset, expected) in (0x1d0 + std::mem::size_of::<Elf64Sym>() * index
-            ..0x1d0 + std::mem::size_of::<Elf64Sym>() * (index + 1))
-            .zip(expected_results)
-        {
-            let mut elf_bytes = elf_bytes.clone();
-            elf_bytes[offset] = 0xAF;
-            let result =
-                ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).map(|_| ());
-            assert_eq!(&result, expected);
-        }
-    }
-
-    // Check that an empty function symbol fails
+    // Check that an entrypoint missing a function start marker fails
     {
         let mut elf_bytes = elf_bytes.clone();
-        elf_bytes[0x210] = 0x00;
-        let err = ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
-        assert_eq!(err, ElfParserError::InvalidSize);
-    }
-
-    // Check that bytecode not covered by function symbols fails
-    {
-        let mut elf_bytes = elf_bytes.clone();
-        elf_bytes[0x210] = 0x08;
-        let err = ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
-        assert_eq!(err, ElfParserError::OutOfBounds);
-    }
-
-    // Check that an entrypoint not covered by function symbols fails
-    {
-        let mut elf_bytes = elf_bytes.clone();
-        elf_bytes[0x0018] = 0x10;
+        elf_bytes[0x1B8] = 0x00;
         let err = ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
         assert_eq!(err, ElfParserError::InvalidFileHeader);
     }
