@@ -331,11 +331,6 @@ impl<'a> UnalignedMemoryMapping<'a> {
 
     /// Replaces the `MemoryRegion` at the given index
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
-        if index >= self.common.regions.len()
-            || self.common.regions[index].vm_addr != region.vm_addr
-        {
-            return Err(EbpfError::InvalidMemoryRegion(index));
-        }
         self.common.regions[index] = region;
         self.cache.get_mut().flush();
         Ok(())
@@ -401,9 +396,6 @@ impl<'a> AlignedMemoryMapping<'a> {
 
     /// Replaces the `MemoryRegion` at the given index
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
-        if index >= self.common.regions.len() {
-            return Err(EbpfError::InvalidMemoryRegion(index));
-        }
         let begin_index = region
             .vm_addr
             .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
@@ -587,6 +579,16 @@ impl<'a> MemoryMapping<'a> {
 
     /// Replaces the `MemoryRegion` at the given index
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
+        let regions = self.get_regions();
+        let next_region_start = regions
+            .get(index.saturating_add(1))
+            .map_or(u64::MAX, |next_region| next_region.vm_addr);
+        if index >= regions.len()
+            || regions[index].vm_addr != region.vm_addr
+            || region.vm_addr_range().end > next_region_start
+        {
+            return Err(EbpfError::InvalidMemoryRegion(index));
+        }
         match self {
             MemoryMapping::Identity => Err(EbpfError::InvalidMemoryRegion(index)),
             MemoryMapping::Aligned(m) => m.replace_region(index, region),
