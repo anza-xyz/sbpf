@@ -79,10 +79,11 @@ fn test_verifier_success() {
     )
     .unwrap();
     executable.verify::<TautologyVerifier>().unwrap();
+    let mut context_object = TestContextObject::default();
     create_vm!(
         _vm,
         &executable,
-        &mut TestContextObject::default(),
+        &mut context_object,
         stack,
         heap,
         Vec::new(),

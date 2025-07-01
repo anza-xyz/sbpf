@@ -265,6 +265,7 @@ macro_rules! create_vm {
             memory_mapping,
             stack_len,
         );
+        $vm_name.registers[1] = solana_sbpf::ebpf::MM_INPUT_START;
     };
 }
 
@@ -299,6 +300,7 @@ macro_rules! test_interpreter_and_jit {
                 vec![mem_region],
                 None
             );
+            vm.registers[1] = ebpf::MM_INPUT_START;
             let (instruction_count_interpreter, result_interpreter) = vm.execute_program(&$executable, true);
             (
                 instruction_count_interpreter,
@@ -325,6 +327,7 @@ macro_rules! test_interpreter_and_jit {
             match compilation_result {
                 Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
+                    vm.registers[1] = ebpf::MM_INPUT_START;
                     let (instruction_count_jit, result_jit) = vm.execute_program(&$executable, false);
                     let tracer_jit = &vm.context_object_pointer;
                     let mut diverged = false;
