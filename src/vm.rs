@@ -351,7 +351,6 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         interpreted: bool,
     ) -> (u64, ProgramResult) {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
-        self.registers[1] = ebpf::MM_INPUT_START;
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
         let initial_insn_count = self.context_object_pointer.get_remaining();
