@@ -19,6 +19,8 @@ pub enum SBPFVersion {
     V2,
     /// SIMD-0178, SIMD-0179, SIMD-0189
     V3,
+    /// SIMD-0177
+    V4,
     /// Used for future versions
     Reserved,
 }

@@ -112,7 +112,7 @@ impl Default for Config {
             sanitize_user_provided_values: true,
             optimize_rodata: true,
             aligned_memory_mapping: true,
-            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V3,
+            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
         }
     }
 }
@@ -241,7 +241,7 @@ pub enum RuntimeEnvironmentSlot {
 ///
 /// let loader = std::sync::Arc::new(BuiltinProgram::new_mock());
 /// let function_registry = FunctionRegistry::default();
-/// let mut executable = Executable::<TestContextObject>::from_text_bytes(prog, loader.clone(), SBPFVersion::V3, function_registry).unwrap();
+/// let mut executable = Executable::<TestContextObject>::from_text_bytes(prog, loader.clone(), SBPFVersion::V4, function_registry).unwrap();
 /// executable.verify::<RequisiteVerifier>().unwrap();
 /// let mut context_object = TestContextObject::new(2);
 /// let sbpf_version = executable.get_sbpf_version();
