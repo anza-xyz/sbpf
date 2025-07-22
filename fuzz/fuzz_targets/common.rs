@@ -2,7 +2,7 @@ use std::mem::size_of;
 
 use arbitrary::{Arbitrary, Unstructured};
 
-use solana_sbpf::vm::Config;
+use solana_sbpf::{program::SBPFVersion, vm::Config};
 
 #[derive(Debug)]
 pub struct ConfigTemplate {
@@ -13,11 +13,22 @@ pub struct ConfigTemplate {
     enable_symbol_and_section_labels: bool,
     sanitize_user_provided_values: bool,
     optimize_rodata: bool,
+    pub sbpf_version: SBPFVersion,
 }
 
 impl<'a> Arbitrary<'a> for ConfigTemplate {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let bools = u16::arbitrary(u)?;
+        let version = u8::arbitrary(u)?;
+        let sbpf_version = match version {
+            0 => SBPFVersion::V0,
+            1 => SBPFVersion::V1,
+            2 => SBPFVersion::V2,
+            3 => SBPFVersion::V3,
+            4 => SBPFVersion::V4,
+            5 => SBPFVersion::Reserved,
+            _ => SBPFVersion::V3, // default to V3 if out of range
+        };
         Ok(ConfigTemplate {
             max_call_depth: usize::from(u8::arbitrary(u)?) + 1, // larger is unreasonable + must be non-zero
             instruction_meter_checkpoint_distance: usize::from(u16::arbitrary(u)?), // larger is unreasonable
@@ -26,6 +37,7 @@ impl<'a> Arbitrary<'a> for ConfigTemplate {
             enable_symbol_and_section_labels: bools & (1 << 1) != 0,
             sanitize_user_provided_values: bools & (1 << 3) != 0,
             optimize_rodata: bools & (1 << 9) != 0,
+            sbpf_version,
         })
     }
 
@@ -48,6 +60,7 @@ impl From<ConfigTemplate> for Config {
                 enable_symbol_and_section_labels,
                 sanitize_user_provided_values,
                 optimize_rodata,
+                ..
             } => Config {
                 max_call_depth,
                 enable_stack_frame_gaps,

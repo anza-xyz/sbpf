@@ -23,6 +23,7 @@ struct FuzzData {
 
 fuzz_target!(|data: FuzzData| {
     let prog = make_program(&data.prog);
+    let sbpf_version = data.template.sbpf_version;
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
     let syscall_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
@@ -30,7 +31,7 @@ fuzz_target!(|data: FuzzData| {
     RequisiteVerifier::verify(
         prog.into_bytes(),
         &config,
-        SBPFVersion::V3,
+        sbpf_version,
         &function_registry,
         &syscall_registry,
     )

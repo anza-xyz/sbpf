@@ -37,6 +37,7 @@ fuzz_target!(|data: FuzzData| {
         .set_off(data.exit_off)
         .set_imm(data.exit_imm)
         .push();
+    let sbpf_version = data.template.sbpf_version;
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
     let syscall_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
@@ -44,7 +45,7 @@ fuzz_target!(|data: FuzzData| {
     if RequisiteVerifier::verify(
         prog.into_bytes(),
         &config,
-        SBPFVersion::V3,
+        sbpf_version,
         &function_registry,
         &syscall_registry,
     )
@@ -57,10 +58,8 @@ fuzz_target!(|data: FuzzData| {
     #[allow(unused_mut)]
     let mut executable = Executable::<TestContextObject>::from_text_bytes(
         prog.into_bytes(),
-        std::sync::Arc::new(BuiltinProgram::new_loader(
-            config,
-        )),
-        SBPFVersion::V3,
+        std::sync::Arc::new(BuiltinProgram::new_loader(config)),
+        sbpf_version,
         function_registry,
     )
     .unwrap();
