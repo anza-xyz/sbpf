@@ -111,6 +111,15 @@ fn test_strict_header() {
         }
     }
 
+    // Check that an unaligned program header length fails
+    {
+        let mut elf_bytes = elf_bytes.clone();
+        elf_bytes[0x60] = 0x29;
+        elf_bytes[0x68] = 0x29;
+        let err = ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
+        assert_eq!(err, ElfParserError::InvalidProgramHeader);
+    }
+
     // Check that an entrypoint missing a function start marker fails
     {
         let mut elf_bytes = elf_bytes.clone();
