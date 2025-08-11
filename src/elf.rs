@@ -479,6 +479,7 @@ impl<C: ContextObject> Executable<C> {
                 || program_header.p_filesz != p_filesz
                 || program_header.p_filesz
                     > (elf_bytes.len() as u64).saturating_sub(program_header.p_offset)
+                || program_header.p_filesz.checked_rem(ebpf::INSN_SIZE as u64) != Some(0)
                 || program_header.p_memsz >= ebpf::MM_REGION_SIZE
             {
                 return Err(ElfParserError::InvalidProgramHeader);
