@@ -495,7 +495,9 @@ impl<C: ContextObject> Executable<C> {
             rodata_header.file_range().unwrap_or_default(),
         );
 
-        if !bytecode_header.vm_range().contains(&file_header.e_entry)
+        if !bytecode_header
+            .vm_range()
+            .contains(&file_header.e_entry.saturating_add(ebpf::INSN_SIZE as u64))
             || file_header.e_entry.checked_rem(ebpf::INSN_SIZE as u64) != Some(0)
         {
             return Err(ElfParserError::InvalidFileHeader);
