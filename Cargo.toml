@@ -1,6 +1,6 @@
 [package]
 name = "solana-sbpf"
-version = "0.12.0"
+version = "0.12.1"
 description = "Virtual machine and JIT compiler for eBPF programs"
 authors = ["Anza Maintainers <maintainers@anza.xyz>"]
 repository = "https://github.com/anza-xyz/sbpf"
