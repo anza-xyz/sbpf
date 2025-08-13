@@ -308,7 +308,7 @@ checksum = "6e3bad0ee36814ca07d7968269dd4b7ec89ec2da10c4bb613928d3077083c232"
 
 [[package]]
 name = "sbpf_cli"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "clap",
  "solana-sbpf",
@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "solana-sbpf"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "byteorder",
  "combine",
@@ -359,7 +359,7 @@ dependencies = [
 
 [[package]]
 name = "test_utils"
-version = "0.12.1"
+version = "0.12.2"
 dependencies = [
  "libc",
  "solana-sbpf",
@@ -367,7 +367,7 @@ dependencies = [
 
 [[package]]
 name = "textwrap"
-version = "0.12.1"
+version = "0.12.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "203008d98caf094106cfaba70acfed15e18ed3ddb7d94e49baec153a2b462789"
 dependencies = [
