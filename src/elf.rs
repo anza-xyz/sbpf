@@ -8,7 +8,7 @@
 
 use crate::{
     aligned_memory::{is_memory_aligned, AlignedMemory},
-    ebpf::{self, EF_SBPF_V2, HOST_ALIGN, INSN_SIZE},
+    ebpf::{self, HOST_ALIGN, INSN_SIZE},
     elf_parser::{
         consts::{
             ELFCLASS64, ELFDATA2LSB, ELFOSABI_NONE, EM_BPF, EM_SBPF, ET_DYN, R_X86_64_32,
@@ -380,21 +380,13 @@ impl<C: ContextObject> Executable<C> {
                 .ok_or(ElfParserError::OutOfBounds)?,
         );
         let config = loader.get_config();
-        let sbpf_version = if config.enabled_sbpf_versions.end() == &SBPFVersion::V0 {
-            if e_flags == EF_SBPF_V2 {
-                SBPFVersion::Reserved
-            } else {
-                SBPFVersion::V0
-            }
-        } else {
-            match e_flags {
-                0 => SBPFVersion::V0,
-                1 => SBPFVersion::V1,
-                2 => SBPFVersion::V2,
-                3 => SBPFVersion::V3,
-                4 => SBPFVersion::V4,
-                _ => SBPFVersion::Reserved,
-            }
+        let sbpf_version = match e_flags {
+            0 => SBPFVersion::V0,
+            1 => SBPFVersion::V1,
+            2 => SBPFVersion::V2,
+            3 => SBPFVersion::V3,
+            4 => SBPFVersion::V4,
+            _ => SBPFVersion::Reserved,
         };
         if !config.enabled_sbpf_versions.contains(&sbpf_version) {
             return Err(ElfError::UnsupportedSBPFVersion);
@@ -608,11 +600,7 @@ impl<C: ContextObject> Executable<C> {
 
         let config = loader.get_config();
         let header = elf.file_header();
-        let sbpf_version = if header.e_flags == EF_SBPF_V2 {
-            SBPFVersion::Reserved
-        } else {
-            SBPFVersion::V0
-        };
+        let sbpf_version = SBPFVersion::V0;
 
         Self::validate(config, &elf, elf_bytes.as_slice())?;
 
@@ -735,11 +723,7 @@ impl<C: ContextObject> Executable<C> {
             return Err(ElfError::WrongType);
         }
 
-        let sbpf_version = if header.e_flags == EF_SBPF_V2 {
-            SBPFVersion::Reserved
-        } else {
-            SBPFVersion::V0
-        };
+        let sbpf_version = SBPFVersion::V0;
         if !config.enabled_sbpf_versions.contains(&sbpf_version) {
             return Err(ElfError::UnsupportedSBPFVersion);
         }
@@ -995,11 +979,7 @@ impl<C: ContextObject> Executable<C> {
     ) -> Result<(), ElfError> {
         let mut syscall_cache = BTreeMap::new();
         let text_section = get_section(elf, b".text")?;
-        let sbpf_version = if elf.file_header().e_flags == EF_SBPF_V2 {
-            SBPFVersion::Reserved
-        } else {
-            SBPFVersion::V0
-        };
+        let sbpf_version = SBPFVersion::V0;
 
         // Fixup all program counter relative call instructions
         let config = loader.get_config();
