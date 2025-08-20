@@ -656,7 +656,6 @@ impl<C: ContextObject> Executable<C> {
 
         let ro_section = Self::parse_ro_sections(
             config,
-            &sbpf_version,
             elf.section_header_table()
                 .iter()
                 .map(|s| (elf.section_name(s.sh_name).ok(), s)),
@@ -795,10 +794,10 @@ impl<C: ContextObject> Executable<C> {
     /// Parses and concatenates the readonly data sections
     pub fn parse_ro_sections<'a, S: IntoIterator<Item = (Option<&'a [u8]>, &'a Elf64Shdr)>>(
         config: &Config,
-        sbpf_version: &SBPFVersion,
         sections: S,
         elf_bytes: &[u8],
     ) -> Result<Section, ElfError> {
+        let sbpf_version = SBPFVersion::V0;
         // the lowest section address
         let mut lowest_addr = usize::MAX;
         // the highest section address
