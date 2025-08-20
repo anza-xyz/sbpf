@@ -600,26 +600,22 @@ impl<C: ContextObject> Executable<C> {
 
         let config = loader.get_config();
         let header = elf.file_header();
-        let sbpf_version = SBPFVersion::V0;
 
         Self::validate(config, &elf, elf_bytes.as_slice())?;
 
         // calculate the text section info
         let text_section = get_section(&elf, b".text")?;
-        let text_section_vaddr =
-            if sbpf_version.enable_elf_vaddr() && text_section.sh_addr >= ebpf::MM_RODATA_START {
-                text_section.sh_addr
-            } else {
-                text_section.sh_addr.saturating_add(ebpf::MM_RODATA_START)
-            };
-        let vaddr_end = if sbpf_version.reject_rodata_stack_overlap() {
+        let text_section_vaddr = if false && text_section.sh_addr >= ebpf::MM_RODATA_START {
+            text_section.sh_addr
+        } else {
+            text_section.sh_addr.saturating_add(ebpf::MM_RODATA_START)
+        };
+        let vaddr_end = if false {
             text_section_vaddr.saturating_add(text_section.sh_size)
         } else {
             text_section_vaddr
         };
-        if (config.reject_broken_elfs
-            && !sbpf_version.enable_elf_vaddr()
-            && text_section.sh_addr != text_section.sh_offset)
+        if (config.reject_broken_elfs && !false && text_section.sh_addr != text_section.sh_offset)
             || vaddr_end > ebpf::MM_STACK_START
         {
             return Err(ElfError::ValueOutOfBounds);
@@ -640,12 +636,12 @@ impl<C: ContextObject> Executable<C> {
             return Err(ElfError::InvalidEntrypoint);
         }
         let entry_pc = if let Some(entry_pc) = (offset as usize).checked_div(ebpf::INSN_SIZE) {
-            if !sbpf_version.static_syscalls() {
+            if !false {
                 function_registry.unregister_function(ebpf::hash_symbol_name(b"entrypoint"));
             }
             function_registry.register_function_hashed_legacy(
                 &loader,
-                !sbpf_version.static_syscalls(),
+                !false,
                 *b"entrypoint",
                 entry_pc,
             )?;
@@ -664,7 +660,7 @@ impl<C: ContextObject> Executable<C> {
 
         Ok(Self {
             elf_bytes,
-            sbpf_version,
+            sbpf_version: SBPFVersion::Reserved, // Is set in Self::load()
             ro_section,
             text_section_vaddr,
             text_section_range: text_section.file_range().unwrap_or_default(),
@@ -722,12 +718,11 @@ impl<C: ContextObject> Executable<C> {
             return Err(ElfError::WrongType);
         }
 
-        let sbpf_version = SBPFVersion::V0;
-        if !config.enabled_sbpf_versions.contains(&sbpf_version) {
+        if !true {
             return Err(ElfError::UnsupportedSBPFVersion);
         }
 
-        if sbpf_version.enable_elf_vaddr() {
+        if false {
             if !config.optimize_rodata {
                 // When optimize_rodata=false, we allocate a vector and copy all
                 // rodata sections into it. In that case we can't allow virtual
@@ -797,7 +792,6 @@ impl<C: ContextObject> Executable<C> {
         sections: S,
         elf_bytes: &[u8],
     ) -> Result<Section, ElfError> {
-        let sbpf_version = SBPFVersion::V0;
         // the lowest section address
         let mut lowest_addr = usize::MAX;
         // the highest section address
@@ -846,7 +840,7 @@ impl<C: ContextObject> Executable<C> {
             // If sbpf_version.enable_elf_vaddr()=false, section_addr must match
             // sh_offset for backwards compatibility
             if !invalid_offsets {
-                if sbpf_version.enable_elf_vaddr() {
+                if false {
                     // This is enforced in validate()
                     debug_assert!(config.optimize_rodata);
                     if section_addr < section_header.sh_offset {
@@ -866,13 +860,12 @@ impl<C: ContextObject> Executable<C> {
                 }
             }
 
-            let mut vaddr_end =
-                if sbpf_version.enable_elf_vaddr() && section_addr >= ebpf::MM_RODATA_START {
-                    section_addr
-                } else {
-                    section_addr.saturating_add(ebpf::MM_RODATA_START)
-                };
-            if sbpf_version.reject_rodata_stack_overlap() {
+            let mut vaddr_end = if false && section_addr >= ebpf::MM_RODATA_START {
+                section_addr
+            } else {
+                section_addr.saturating_add(ebpf::MM_RODATA_START)
+            };
+            if false {
                 vaddr_end = vaddr_end.saturating_add(section_header.sh_size);
             }
             if (config.reject_broken_elfs && invalid_offsets) || vaddr_end > ebpf::MM_STACK_START {
@@ -900,7 +893,7 @@ impl<C: ContextObject> Executable<C> {
                 .saturating_add(1)
                 .saturating_sub(first_ro_section)
                 == n_ro_sections;
-        if sbpf_version.enable_elf_vaddr() && !can_borrow {
+        if false && !can_borrow {
             return Err(ElfError::ValueOutOfBounds);
         }
         let ro_section = if config.optimize_rodata && can_borrow {
@@ -922,7 +915,7 @@ impl<C: ContextObject> Executable<C> {
                 // it now.
                 lowest_addr
             } else {
-                if sbpf_version.enable_elf_vaddr() {
+                if false {
                     return Err(ElfError::ValueOutOfBounds);
                 }
                 lowest_addr.saturating_add(ebpf::MM_RODATA_START as usize)
@@ -978,7 +971,6 @@ impl<C: ContextObject> Executable<C> {
     ) -> Result<(), ElfError> {
         let mut syscall_cache = BTreeMap::new();
         let text_section = get_section(elf, b".text")?;
-        let sbpf_version = SBPFVersion::V0;
 
         // Fixup all program counter relative call instructions
         let config = loader.get_config();
@@ -1005,11 +997,11 @@ impl<C: ContextObject> Executable<C> {
                 };
                 let key = function_registry.register_function_hashed_legacy(
                     loader,
-                    !sbpf_version.static_syscalls(),
+                    !false,
                     name.as_bytes(),
                     target_pc as usize,
                 )?;
-                if !sbpf_version.static_syscalls() {
+                if !false {
                     let offset = i.saturating_mul(ebpf::INSN_SIZE).saturating_add(4);
                     let checked_slice = text_bytes
                         .get_mut(offset..offset.saturating_add(4))
@@ -1028,7 +1020,7 @@ impl<C: ContextObject> Executable<C> {
             // When sbpf_version.enable_elf_vaddr()=true, we allow section.sh_addr !=
             // section.sh_offset so we need to bring r_offset to the correct
             // byte offset.
-            if sbpf_version.enable_elf_vaddr() {
+            if false {
                 match program_header {
                     Some(header) if header.vm_range().contains(&(r_offset as u64)) => {}
                     _ => {
@@ -1051,7 +1043,7 @@ impl<C: ContextObject> Executable<C> {
                         .file_range()
                         .unwrap_or_default()
                         .contains(&r_offset)
-                        || sbpf_version == SBPFVersion::V0
+                        || true
                     {
                         r_offset.saturating_add(BYTE_OFFSET_IMMEDIATE)
                     } else {
@@ -1086,7 +1078,7 @@ impl<C: ContextObject> Executable<C> {
                         .file_range()
                         .unwrap_or_default()
                         .contains(&r_offset)
-                        || sbpf_version == SBPFVersion::V0
+                        || true
                     {
                         let imm_low_offset = imm_offset;
                         let imm_high_offset = imm_low_offset.saturating_add(INSN_SIZE);
@@ -1192,7 +1184,7 @@ impl<C: ContextObject> Executable<C> {
                             refd_addr.checked_shr(32).unwrap_or_default() as u32,
                         );
                     } else {
-                        let refd_addr = if sbpf_version != SBPFVersion::V0 {
+                        let refd_addr = if false {
                             // We're relocating an address inside a data section (eg .rodata). The
                             // address is encoded as a simple u64.
 
@@ -1250,12 +1242,8 @@ impl<C: ContextObject> Executable<C> {
                             as usize)
                             .checked_div(ebpf::INSN_SIZE)
                             .unwrap_or_default();
-                        function_registry.register_function_hashed_legacy(
-                            loader,
-                            !sbpf_version.static_syscalls(),
-                            name,
-                            target_pc,
-                        )?
+                        function_registry
+                            .register_function_hashed_legacy(loader, !false, name, target_pc)?
                     } else {
                         // Else it's a syscall
                         let hash = *syscall_cache
@@ -1297,12 +1285,8 @@ impl<C: ContextObject> Executable<C> {
                 let name = elf
                     .symbol_name(symbol.st_name as Elf64Word)
                     .map_err(|_| ElfError::UnknownSymbol(symbol.st_name as usize))?;
-                function_registry.register_function_hashed_legacy(
-                    loader,
-                    !sbpf_version.static_syscalls(),
-                    name,
-                    target_pc,
-                )?;
+                function_registry
+                    .register_function_hashed_legacy(loader, !false, name, target_pc)?;
             }
         }
 
