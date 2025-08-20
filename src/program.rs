@@ -82,17 +82,6 @@ impl SBPFVersion {
         self >= SBPFVersion::V3
     }
 
-    /// Ensure that rodata sections don't exceed their maximum allowed size and
-    /// overlap with the stack
-    pub fn reject_rodata_stack_overlap(self) -> bool {
-        self != SBPFVersion::V0
-    }
-
-    /// Allow sh_addr != sh_offset in elf sections.
-    pub fn enable_elf_vaddr(self) -> bool {
-        self != SBPFVersion::V0
-    }
-
     /// Calculate the target program counter for a CALL_IMM instruction depending on
     /// the SBPF version.
     pub fn calculate_call_imm_target_pc(self, pc: usize, imm: i64) -> u32 {
