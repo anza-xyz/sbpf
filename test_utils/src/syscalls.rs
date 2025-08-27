@@ -94,6 +94,9 @@ declare_builtin_function!(
         _arg5: u64,
         memory_mapping: &mut MemoryMapping,
     ) -> Result<u64, Box<dyn std::error::Error>> {
+        if len == 0 {
+            return Ok(0);
+        }
         let host_addr: Result<u64, EbpfError> =
             memory_mapping.map(AccessType::Store, vm_addr, len).into();
         let host_addr = host_addr?;
@@ -157,6 +160,9 @@ declare_builtin_function!(
         _arg5: u64,
         memory_mapping: &mut MemoryMapping,
     ) -> Result<u64, Box<dyn std::error::Error>> {
+        if len == 0 {
+            return Ok(0);
+        }
         let host_addr: Result<u64, EbpfError> =
             memory_mapping.map(AccessType::Load, vm_addr, len).into();
         let host_addr = host_addr?;

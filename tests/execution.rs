@@ -2288,8 +2288,8 @@ fn test_err_syscall_string() {
         (
             "bpf_syscall_string" => syscalls::SyscallString::vm,
         ),
-        TestContextObject::new(3),
-        ProgramResult::Err(EbpfError::SyscallError(Box::new(EbpfError::AccessViolation(AccessType::Load, 0, 0, "unknown")))),
+        TestContextObject::new(5),
+        ProgramResult::Ok(0),
     );
 }
 
