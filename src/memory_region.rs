@@ -386,7 +386,9 @@ impl<'a> AlignedMemoryMapping<'a> {
     #[inline]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
-        if (1..self.common.regions.len()).contains(&index) {
+        if index < self.common.regions.len()
+            || (index == 0 && !self.common.config.allow_memory_region_zero)
+        {
             // Safety: bounds check above
             let region = unsafe { self.common.regions.get_unchecked(index) };
             return Some((index, region));
@@ -930,7 +932,7 @@ mod test {
             SBPFVersion::V4,
         )
         .unwrap();
-        assert!(m.find_region(ebpf::MM_REGION_SIZE - 1).is_none());
+        assert_eq!(m.find_region(ebpf::MM_REGION_SIZE - 1).unwrap().1.len, 0);
         assert_eq!(
             m.find_region(ebpf::MM_REGION_SIZE).unwrap().1.host_addr,
             mem1.as_ptr() as u64
