@@ -156,10 +156,10 @@ fn get_host_ptr<C: ContextObject>(
     if !interpreter
         .executable
         .get_sbpf_version()
-        .enable_lower_bytecode_vaddr()
-        && vm_addr < ebpf::MM_RODATA_START
+        .enable_lower_rodata_vaddr()
+        && vm_addr < ebpf::MM_BYTECODE_START
     {
-        vm_addr += ebpf::MM_RODATA_START;
+        vm_addr += ebpf::MM_BYTECODE_START;
     }
     match interpreter.vm.memory_mapping.map(
         AccessType::Load,

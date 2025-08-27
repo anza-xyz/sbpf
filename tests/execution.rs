@@ -2680,7 +2680,7 @@ fn test_reloc_64_64_sbpfv0() {
         [],
         (),
         TestContextObject::new(2),
-        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x120),
+        ProgramResult::Ok(ebpf::MM_BYTECODE_START + 0x120),
     );
 }
 
@@ -2713,7 +2713,7 @@ fn test_reloc_64_relative_sbpfv0() {
         [],
         (),
         TestContextObject::new(2),
-        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x138),
+        ProgramResult::Ok(ebpf::MM_BYTECODE_START + 0x138),
     );
 }
 
@@ -2779,7 +2779,7 @@ fn test_reloc_64_relative_data_sbpfv0() {
         [],
         (),
         TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x140),
+        ProgramResult::Ok(ebpf::MM_BYTECODE_START + 0x140),
     );
 }
 
