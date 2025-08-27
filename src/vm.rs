@@ -111,7 +111,7 @@ impl Default for Config {
             #[cfg(feature = "jit")]
             sanitize_user_provided_values: true,
             optimize_rodata: true,
-            aligned_memory_mapping: true,
+            aligned_memory_mapping: false,
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
         }
     }
