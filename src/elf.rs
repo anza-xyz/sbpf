@@ -356,12 +356,15 @@ impl<C: ContextObject> Executable<C> {
         Ok(Self {
             elf_bytes,
             sbpf_version,
-            ro_section: Section::Borrowed(ebpf::MM_RODATA_START as usize, 0..text_bytes.len()),
-            text_section_vaddr: if sbpf_version.enable_lower_bytecode_vaddr() {
-                ebpf::MM_BYTECODE_START
-            } else {
-                ebpf::MM_RODATA_START
-            },
+            ro_section: Section::Borrowed(
+                if sbpf_version.enable_lower_rodata_vaddr() {
+                    ebpf::MM_RODATA_START
+                } else {
+                    ebpf::MM_BYTECODE_START
+                } as usize,
+                0..text_bytes.len(),
+            ),
+            text_section_vaddr: ebpf::MM_BYTECODE_START,
             text_section_range: 0..text_bytes.len(),
             entry_pc,
             function_registry,
@@ -445,8 +448,8 @@ impl<C: ContextObject> Executable<C> {
         }
 
         const EXPECTED_PROGRAM_HEADERS: [(u32, u64); 4] = [
-            (PF_X, ebpf::MM_BYTECODE_START),     // byte code
-            (PF_R, ebpf::MM_RODATA_START),       // read only data
+            (PF_X, ebpf::MM_RODATA_START),       // byte code
+            (PF_R, ebpf::MM_BYTECODE_START),     // read only data
             (PF_R | PF_W, ebpf::MM_STACK_START), // stack
             (PF_R | PF_W, ebpf::MM_HEAP_START),  // heap
         ];
@@ -658,7 +661,7 @@ impl<C: ContextObject> Executable<C> {
                 return Err(ElfError::ValueOutOfBounds);
             }
         } else {
-            debug_assert_eq!(ro_section_vaddr, ebpf::MM_RODATA_START);
+            debug_assert_eq!(ro_section_vaddr, ebpf::MM_REGION_SIZE);
         }
 
         Ok(Self {

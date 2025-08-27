@@ -204,8 +204,8 @@ impl CommonMemoryMapping<'_> {
                 stack_frame,
             ))
         } else {
-            let region_name = match vm_addr & (!ebpf::MM_RODATA_START.saturating_sub(1)) {
-                ebpf::MM_RODATA_START => "program",
+            let region_name = match vm_addr & (!ebpf::MM_BYTECODE_START.saturating_sub(1)) {
+                ebpf::MM_BYTECODE_START => "program",
                 ebpf::MM_STACK_START => "stack",
                 ebpf::MM_HEAP_START => "heap",
                 ebpf::MM_INPUT_START => "input",

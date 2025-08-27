@@ -74,7 +74,7 @@ impl SBPFVersion {
         self >= SBPFVersion::V3
     }
     /// ... SIMD-0189
-    pub fn enable_lower_bytecode_vaddr(self) -> bool {
+    pub fn enable_lower_rodata_vaddr(self) -> bool {
         self >= SBPFVersion::V3
     }
     /// ... SIMD-0377
