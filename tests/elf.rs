@@ -264,9 +264,7 @@ fn test_entrypoint() {
 fn new_section(sh_addr: u64, sh_size: u64) -> Elf64Shdr {
     Elf64Shdr {
         sh_addr,
-        sh_offset: sh_addr
-            .checked_sub(ebpf::MM_RODATA_START)
-            .unwrap_or(sh_addr),
+        sh_offset: sh_addr.checked_sub(ebpf::MM_REGION_SIZE).unwrap_or(sh_addr),
         sh_size,
         sh_name: 0,
         sh_type: 0,
@@ -299,7 +297,7 @@ fn test_owned_ro_sections_not_contiguous() {
             sections,
             &elf_bytes,
         ),
-        Ok(Section::Owned(offset, data)) if offset == ebpf::MM_RODATA_START as usize + 10 && data.len() == 30
+        Ok(Section::Owned(offset, data)) if offset == ebpf::MM_REGION_SIZE as usize + 10 && data.len() == 30
     ));
 }
 
@@ -325,7 +323,7 @@ fn test_owned_ro_sections_with_sh_offset() {
             sections,
             &elf_bytes,
         ),
-        Ok(Section::Owned(offset, data)) if offset == ebpf::MM_RODATA_START as usize + 10 && data.len() == 20
+        Ok(Section::Owned(offset, data)) if offset == ebpf::MM_REGION_SIZE as usize + 10 && data.len() == 20
     ));
 }
 
@@ -381,7 +379,7 @@ fn test_owned_ro_region_no_initial_gap() {
         memory_mapping
             .map(
                 AccessType::Load,
-                ebpf::MM_RODATA_START,
+                ebpf::MM_REGION_SIZE,
                 s3.sh_addr + s3.sh_size
             )
             .unwrap(),
@@ -392,7 +390,7 @@ fn test_owned_ro_region_no_initial_gap() {
     memory_mapping
         .map(
             AccessType::Load,
-            ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size,
+            ebpf::MM_REGION_SIZE + s3.sh_addr + s3.sh_size,
             1,
         )
         .unwrap_err();
@@ -432,7 +430,7 @@ fn test_owned_ro_region_initial_gap_mappable() {
         memory_mapping
             .map(
                 AccessType::Load,
-                ebpf::MM_RODATA_START,
+                ebpf::MM_REGION_SIZE,
                 s3.sh_addr + s3.sh_size
             )
             .unwrap(),
@@ -443,7 +441,7 @@ fn test_owned_ro_region_initial_gap_mappable() {
     memory_mapping
         .map(
             AccessType::Load,
-            ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size,
+            ebpf::MM_REGION_SIZE + s3.sh_addr + s3.sh_size,
             1,
         )
         .unwrap_err();
@@ -472,16 +470,16 @@ fn test_owned_ro_region_initial_gap_map_error() {
     let ro_region = get_ro_region(&ro_section, &elf_bytes);
     let memory_mapping = MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap();
 
-    // s1 starts at sh_addr=10 so [MM_RODATA_START..MM_RODATA_START + 10] is not mappable
+    // s1 starts at sh_addr=10 so [MM_REGION_SIZE..MM_REGION_SIZE + 10] is not mappable
 
     // the low bound of the initial gap is not mappable
     memory_mapping
-        .map(AccessType::Load, ebpf::MM_RODATA_START, 1)
+        .map(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
         .unwrap_err();
 
     // the hi bound of the initial gap is not mappable
     memory_mapping
-        .map(AccessType::Load, ebpf::MM_RODATA_START + s1.sh_addr - 1, 1)
+        .map(AccessType::Load, ebpf::MM_REGION_SIZE + s1.sh_addr - 1, 1)
         .unwrap_err();
 
     // [s1.sh_addr..s3.sh_addr + s3.sh_size] is the valid ro memory area
@@ -489,7 +487,7 @@ fn test_owned_ro_region_initial_gap_map_error() {
         memory_mapping
             .map(
                 AccessType::Load,
-                ebpf::MM_RODATA_START + s1.sh_addr,
+                ebpf::MM_REGION_SIZE + s1.sh_addr,
                 s3.sh_addr + s3.sh_size - s1.sh_addr
             )
             .unwrap(),
@@ -500,7 +498,7 @@ fn test_owned_ro_region_initial_gap_map_error() {
     memory_mapping
         .map(
             AccessType::Load,
-            ebpf::MM_RODATA_START + s3.sh_addr + s3.sh_size,
+            ebpf::MM_REGION_SIZE + s3.sh_addr + s3.sh_size,
             1,
         )
         .unwrap_err();
@@ -527,7 +525,7 @@ fn test_borrowed_ro_sections_disabled() {
             sections,
             &elf_bytes,
         ),
-        Ok(Section::Owned(offset, data)) if offset == ebpf::MM_RODATA_START as usize && data.len() == 20
+        Ok(Section::Owned(offset, data)) if offset == ebpf::MM_REGION_SIZE as usize && data.len() == 20
     ));
 }
 
@@ -548,7 +546,7 @@ fn test_borrowed_ro_sections() {
     assert_eq!(
         ElfExecutable::parse_ro_sections(&config, sections, &elf_bytes),
         Ok(Section::Borrowed(
-            ebpf::MM_RODATA_START as usize + 20,
+            ebpf::MM_REGION_SIZE as usize + 20,
             20..50
         ))
     );
@@ -576,7 +574,7 @@ fn test_borrowed_ro_region_no_initial_gap() {
         memory_mapping
             .map(
                 AccessType::Load,
-                ebpf::MM_RODATA_START + s1.sh_offset,
+                ebpf::MM_REGION_SIZE + s1.sh_offset,
                 s2.sh_offset + s2.sh_size
             )
             .unwrap(),
@@ -585,7 +583,7 @@ fn test_borrowed_ro_region_no_initial_gap() {
 
     // one byte past the ro section is not mappable
     memory_mapping
-        .map(AccessType::Load, ebpf::MM_RODATA_START + s3.sh_offset, 1)
+        .map(AccessType::Load, ebpf::MM_REGION_SIZE + s3.sh_offset, 1)
         .unwrap_err();
 }
 
@@ -609,16 +607,12 @@ fn test_borrowed_ro_region_initial_gap() {
 
     // the low bound of the initial gap is not mappable
     memory_mapping
-        .map(AccessType::Load, ebpf::MM_RODATA_START + s1.sh_offset, 1)
+        .map(AccessType::Load, ebpf::MM_REGION_SIZE + s1.sh_offset, 1)
         .unwrap_err();
 
     // the hi bound of the initial gap is not mappable
     memory_mapping
-        .map(
-            AccessType::Load,
-            ebpf::MM_RODATA_START + s2.sh_offset - 1,
-            1,
-        )
+        .map(AccessType::Load, ebpf::MM_REGION_SIZE + s2.sh_offset - 1, 1)
         .unwrap_err();
 
     // [s2.sh_offset..s3.sh_offset + s3.sh_size] is the valid ro memory area
@@ -626,7 +620,7 @@ fn test_borrowed_ro_region_initial_gap() {
         memory_mapping
             .map(
                 AccessType::Load,
-                ebpf::MM_RODATA_START + s2.sh_offset,
+                ebpf::MM_REGION_SIZE + s2.sh_offset,
                 s3.sh_offset + s3.sh_size - s2.sh_offset
             )
             .unwrap(),
@@ -637,7 +631,7 @@ fn test_borrowed_ro_region_initial_gap() {
     memory_mapping
         .map(
             AccessType::Load,
-            ebpf::MM_RODATA_START + s3.sh_offset + s3.sh_size,
+            ebpf::MM_REGION_SIZE + s3.sh_offset + s3.sh_size,
             1,
         )
         .unwrap_err();

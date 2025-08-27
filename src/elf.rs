@@ -605,7 +605,7 @@ impl<C: ContextObject> Executable<C> {
 
         // calculate the text section info
         let text_section = get_section(&elf, b".text")?;
-        let text_section_vaddr = text_section.sh_addr.saturating_add(ebpf::MM_RODATA_START);
+        let text_section_vaddr = text_section.sh_addr.saturating_add(ebpf::MM_REGION_SIZE);
         if (config.reject_broken_elfs && text_section.sh_addr != text_section.sh_offset)
             || text_section_vaddr > ebpf::MM_STACK_START
         {
@@ -797,7 +797,7 @@ impl<C: ContextObject> Executable<C> {
                 invalid_offsets = true;
             }
 
-            let vaddr_end = section_addr.saturating_add(ebpf::MM_RODATA_START);
+            let vaddr_end = section_addr.saturating_add(ebpf::MM_REGION_SIZE);
             if (config.reject_broken_elfs && invalid_offsets) || vaddr_end > ebpf::MM_STACK_START {
                 return Err(ElfError::ValueOutOfBounds);
             }
@@ -827,14 +827,14 @@ impl<C: ContextObject> Executable<C> {
             // Read only sections are grouped together with no intermixed non-ro
             // sections. We can borrow.
 
-            let addr_offset = if lowest_addr >= ebpf::MM_RODATA_START as usize {
+            let addr_offset = if lowest_addr >= ebpf::MM_REGION_SIZE as usize {
                 // The first field of Section::Borrowed is an offset from
-                // ebpf::MM_RODATA_START so if the linker has already put the
-                // sections within ebpf::MM_RODATA_START, we need to subtract
+                // ebpf::MM_REGION_SIZE * 1 so if the linker has already put the
+                // sections within ebpf::MM_REGION_SIZE * 1, we need to subtract
                 // it now.
                 lowest_addr
             } else {
-                lowest_addr.saturating_add(ebpf::MM_RODATA_START as usize)
+                lowest_addr.saturating_add(ebpf::MM_REGION_SIZE as usize)
             };
 
             Section::Borrowed(addr_offset, lowest_addr..highest_addr)
@@ -843,14 +843,14 @@ impl<C: ContextObject> Executable<C> {
             // sections and and copy the ro ones at their intended offsets.
 
             if config.optimize_rodata {
-                // The rodata region starts at MM_RODATA_START + offset,
-                // [MM_RODATA_START, MM_RODATA_START + offset) is not
+                // The rodata region starts at MM_REGION_SIZE * 1 + offset,
+                // [MM_REGION_SIZE * 1, MM_REGION_SIZE * 1 + offset) is not
                 // mappable. We only need to allocate highest_addr - lowest_addr
                 // bytes.
                 highest_addr = highest_addr.saturating_sub(lowest_addr);
             } else {
-                // For backwards compatibility, the whole [MM_RODATA_START,
-                // MM_RODATA_START + highest_addr) range is mappable. We need
+                // For backwards compatibility, the whole [MM_REGION_SIZE * 1,
+                // MM_REGION_SIZE * 1 + highest_addr) range is mappable. We need
                 // to allocate the whole address range.
                 lowest_addr = 0;
             };
@@ -867,10 +867,10 @@ impl<C: ContextObject> Executable<C> {
                     .copy_from_slice(slice);
             }
 
-            let addr_offset = if lowest_addr >= ebpf::MM_RODATA_START as usize {
+            let addr_offset = if lowest_addr >= ebpf::MM_REGION_SIZE as usize {
                 lowest_addr
             } else {
-                lowest_addr.saturating_add(ebpf::MM_RODATA_START as usize)
+                lowest_addr.saturating_add(ebpf::MM_REGION_SIZE as usize)
             };
             Section::Owned(addr_offset, ro_section)
         };
@@ -951,11 +951,11 @@ impl<C: ContextObject> Executable<C> {
                     let mut addr = symbol.st_value.saturating_add(refd_addr);
 
                     // The "physical address" from the VM's perspective is rooted
-                    // at `MM_RODATA_START`. If the linker hasn't already put
-                    // the symbol within `MM_RODATA_START`, we need to do so
+                    // at ebpf::MM_REGION_SIZE * 1. If the linker hasn't already put
+                    // the symbol within ebpf::MM_REGION_SIZE * 1, we need to do so
                     // now.
-                    if addr < ebpf::MM_RODATA_START {
-                        addr = ebpf::MM_RODATA_START.saturating_add(addr);
+                    if addr < ebpf::MM_REGION_SIZE {
+                        addr = ebpf::MM_REGION_SIZE.saturating_add(addr);
                     }
 
                     let imm_low_offset = imm_offset;
@@ -1027,10 +1027,10 @@ impl<C: ContextObject> Executable<C> {
                             return Err(ElfError::InvalidVirtualAddress(refd_addr));
                         }
 
-                        if refd_addr < ebpf::MM_RODATA_START {
+                        if refd_addr < ebpf::MM_REGION_SIZE {
                             // The linker hasn't already placed rodata within
-                            // MM_RODATA_START, so we do so now
-                            refd_addr = ebpf::MM_RODATA_START.saturating_add(refd_addr);
+                            // ebpf::MM_REGION_SIZE * 1, so we do so now
+                            refd_addr = ebpf::MM_REGION_SIZE.saturating_add(refd_addr);
                         }
 
                         // Write back the low half
@@ -1063,7 +1063,7 @@ impl<C: ContextObject> Executable<C> {
                             .get(imm_offset..imm_offset.saturating_add(BYTE_LENGTH_IMMEDIATE))
                             .ok_or(ElfError::ValueOutOfBounds)?;
                         let mut refd_addr = LittleEndian::read_u32(addr_slice) as u64;
-                        refd_addr = ebpf::MM_RODATA_START.saturating_add(refd_addr);
+                        refd_addr = ebpf::MM_REGION_SIZE.saturating_add(refd_addr);
 
                         let addr_slice = elf_bytes
                             .get_mut(r_offset..r_offset.saturating_add(mem::size_of::<u64>()))
@@ -1169,8 +1169,8 @@ pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
         Section::Borrowed(offset, byte_range) => (*offset, &elf[byte_range.clone()]),
     };
 
-    // If offset > 0, the region will start at MM_RODATA_START + the offset of
-    // the first read only byte. [MM_RODATA_START, MM_RODATA_START + offset)
+    // If offset > 0, the region will start at ebpf::MM_REGION_SIZE * 1 + the offset of
+    // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
     // will be unmappable, see MemoryRegion::vm_to_host.
     MemoryRegion::new_readonly(ro_data, offset as u64)
 }
