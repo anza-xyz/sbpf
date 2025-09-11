@@ -93,6 +93,7 @@ pub struct X86Instruction {
     size: OperandSize,
     opcode_escape_sequence: u8,
     opcode: u8,
+    second_opcode: Option<u8>, // support second_opcode to optimize
     modrm: bool,
     indirect: Option<X86IndirectAccess>,
     first_operand: u8,
@@ -106,6 +107,7 @@ impl X86Instruction {
         size: OperandSize::S0,
         opcode_escape_sequence: 0,
         opcode: 0,
+        second_opcode:None, // support second_opcode to optimize
         modrm: true,
         indirect: None,
         first_operand: 0,
@@ -185,6 +187,13 @@ impl X86Instruction {
             _ => {}
         }
         jit.emit::<u8>(self.opcode);
+        // match if have "second opcode" ?
+        match self.second_opcode {
+            Some(i)=> {
+                jit.emit::<u8>(i);
+            }
+            None => {} 
+        } 
         if self.modrm {
             jit.emit::<u8>((modrm.mode << 6) | (modrm.r << 3) | modrm.m);
             let sib = (sib.scale << 6) | (sib.index << 3) | sib.base;
@@ -200,6 +209,7 @@ impl X86Instruction {
     pub const fn alu(
         size: OperandSize,
         opcode: u8,
+        second_opcode: Option<u8>,
         source: X86Register,
         destination: X86Register,
         indirect: Option<X86IndirectAccess>,
@@ -208,6 +218,7 @@ impl X86Instruction {
         Self {
             size,
             opcode,
+            second_opcode,
             first_operand: source as u8,
             second_operand: destination as u8,
             indirect,
