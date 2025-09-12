@@ -92,8 +92,7 @@ pub enum FenceType {
 pub struct X86Instruction {
     size: OperandSize,
     opcode_escape_sequence: u8,
-    opcode: u8,
-    second_opcode: Option<u8>, // support second_opcode to optimize
+    opcode: u16, // 0-7 is first opcode, 8-15 is second opcode
     modrm: bool,
     indirect: Option<X86IndirectAccess>,
     first_operand: u8,
@@ -107,7 +106,6 @@ impl X86Instruction {
         size: OperandSize::S0,
         opcode_escape_sequence: 0,
         opcode: 0,
-        second_opcode:None, // support second_opcode to optimize
         modrm: true,
         indirect: None,
         first_operand: 0,
@@ -186,14 +184,12 @@ impl X86Instruction {
             3 => jit.emit::<u16>(0x0f3a),
             _ => {}
         }
-        jit.emit::<u8>(self.opcode);
-        // match if have "second opcode" ?
-        match self.second_opcode {
-            Some(i)=> {
-                jit.emit::<u8>(i);
-            }
-            None => {} 
-        } 
+        // If the high 8 bits are zero
+        if self.opcode >> 8 == 0 {
+            jit.emit::<u8>((self.opcode & 0xFF) as u8);
+        } else {
+            jit.emit::<u16>(self.opcode);
+        }        
         if self.modrm {
             jit.emit::<u8>((modrm.mode << 6) | (modrm.r << 3) | modrm.m);
             let sib = (sib.scale << 6) | (sib.index << 3) | sib.base;
@@ -208,8 +204,7 @@ impl X86Instruction {
     /// Arithmetic or logic
     pub const fn alu(
         size: OperandSize,
-        opcode: u8,
-        second_opcode: Option<u8>,
+        opcode: u16,
         source: X86Register,
         destination: X86Register,
         indirect: Option<X86IndirectAccess>,
@@ -218,7 +213,6 @@ impl X86Instruction {
         Self {
             size,
             opcode,
-            second_opcode,
             first_operand: source as u8,
             second_operand: destination as u8,
             indirect,
@@ -229,7 +223,7 @@ impl X86Instruction {
     /// Arithmetic or logic
     pub const fn alu_immediate(
         size: OperandSize,
-        opcode: u8,
+        opcode: u16,
         opcode_extension: u8,
         destination: X86Register,
         immediate: i64,
@@ -321,7 +315,7 @@ impl X86Instruction {
         Self {
             size,
             opcode_escape_sequence: 1,
-            opcode: condition,
+            opcode: condition as u16,
             first_operand: destination as u8,
             second_operand: source as u8,
             ..Self::DEFAULT
@@ -364,7 +358,7 @@ impl X86Instruction {
             OperandSize::S32 | OperandSize::S64 => Self {
                 size,
                 opcode_escape_sequence: 1,
-                opcode: 0xc8 | ((destination as u8) & 0b111),
+                opcode: 0xc8 | ((destination as u8) & 0b111) as u16,
                 modrm: false,
                 second_operand: destination as u8,
                 ..Self::DEFAULT
@@ -578,7 +572,7 @@ impl X86Instruction {
         // Load full u64 imm into u64 reg
         Self {
             size,
-            opcode: 0xb8 | ((destination as u8) & 0b111),
+            opcode: (0xb8 | ((destination as u8) & 0b111)) as u16,
             modrm: false,
             second_operand: destination as u8,
             immediate_size: size,
@@ -638,7 +632,7 @@ impl X86Instruction {
         if indirect.is_none() {
             Self {
                 size: OperandSize::S32,
-                opcode: 0x50 | ((source as u8) & 0b111),
+                opcode: 0x50 | ((source as u8) & 0b111) as u16,
                 modrm: false,
                 second_operand: source as u8,
                 ..Self::DEFAULT
@@ -660,7 +654,7 @@ impl X86Instruction {
     pub const fn pop(destination: X86Register) -> Self {
         Self {
             size: OperandSize::S32,
-            opcode: 0x58 | ((destination as u8) & 0b111),
+            opcode: 0x58 | ((destination as u8) & 0b111) as u16,
             modrm: false,
             second_operand: destination as u8,
             ..Self::DEFAULT
@@ -668,7 +662,7 @@ impl X86Instruction {
     }
 
     /// Jump to relative destination on condition
-    pub const fn conditional_jump_immediate(opcode: u8, relative_destination: i32) -> Self {
+    pub const fn conditional_jump_immediate(opcode: u16, relative_destination: i32) -> Self {
         Self {
             size: OperandSize::S32,
             opcode_escape_sequence: 1,
