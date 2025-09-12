@@ -92,7 +92,7 @@ pub enum FenceType {
 pub struct X86Instruction {
     size: OperandSize,
     opcode_escape_sequence: u8,
-    opcode: u16, // 0-7 is first opcode, 8-15 is second opcode
+    opcode: u16, // lower 8 bits (0–7) are first opcode, upper 8 bits (8–15) are second opcode
     modrm: bool,
     indirect: Option<X86IndirectAccess>,
     first_operand: u8,
