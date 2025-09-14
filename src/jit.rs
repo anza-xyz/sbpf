@@ -636,9 +636,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     }
                 }
                 ebpf::SUB64_REG  => self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, src, dst, None)),
-                // ebpf::MUL64_IMM if !self.executable.get_sbpf_version().enable_pqr() => {
-                //     self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xaf0f, dst, src, None));
-                // },
                 ebpf::MUL64_IMM | ebpf::DIV64_IMM | ebpf::MOD64_IMM if !self.executable.get_sbpf_version().enable_pqr() =>
                     self.emit_product_quotient_remainder(
                         OperandSize::S64,
@@ -653,7 +650,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::ST_2B_IMM  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                     self.emit_address_translation(None, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 2, Some(Value::Constant64(insn.imm, true)));
                 },
-                ebpf::MUL64_REG | ebpf::DIV64_REG | ebpf::MOD64_REG if !self.executable.get_sbpf_version().enable_pqr() =>
+                ebpf::MUL64_REG if !self.executable.get_sbpf_version().enable_pqr() => {
+                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xaf0f, dst, src, None));
+                },
+                ebpf::DIV64_REG | ebpf::MOD64_REG if !self.executable.get_sbpf_version().enable_pqr() =>
                     self.emit_product_quotient_remainder(
                         OperandSize::S64,
                         (insn.opc & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_MOD,
