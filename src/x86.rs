@@ -189,7 +189,7 @@ impl X86Instruction {
             jit.emit::<u8>((self.opcode & 0xFF) as u8);
         } else {
             jit.emit::<u16>(self.opcode);
-        }        
+        }
         if self.modrm {
             jit.emit::<u8>((modrm.mode << 6) | (modrm.r << 3) | modrm.m);
             let sib = (sib.scale << 6) | (sib.index << 3) | sib.base;
