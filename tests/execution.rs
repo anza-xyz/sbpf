@@ -524,7 +524,95 @@ fn test_be64() {
 // BPF_PQR : Product / Quotient / Remainder
 
 #[test]
-fn test_pqr() {
+fn test_pqr_v0() {
+    let mut prog = [0; 48];
+    prog[0] = ebpf::LD_DW_IMM;
+    prog[16] = ebpf::LD_DW_IMM;
+    prog[17] = 1; // dst = R1
+    prog[33] = 16; // src = R1
+    prog[40] = ebpf::EXIT;
+    let loader = Arc::new(BuiltinProgram::new_mock());
+    for (opc, dst, src, expected_result) in [
+        (ebpf::DIV32_IMM, 13u64, 4u64, 3u64),
+        (ebpf::DIV64_IMM, 13u64, 4u64, 3u64),
+        (ebpf::MOD32_IMM, 13u64, 4u64, 1u64),
+        (ebpf::MOD64_IMM, 13u64, 4u64, 1u64),
+        (ebpf::DIV32_IMM, 13u64, u32::MAX as u64, 0u64),
+        (ebpf::DIV64_IMM, 13u64, u32::MAX as u64, 0u64),
+        (ebpf::MOD32_IMM, 13u64, u32::MAX as u64, 13u64),
+        (ebpf::MOD64_IMM, 13u64, u32::MAX as u64, 13u64),
+        (ebpf::DIV32_IMM, u64::MAX, 4u64, (u32::MAX / 4) as u64),
+        (ebpf::DIV64_IMM, u64::MAX, 4u64, u64::MAX / 4),
+        (ebpf::MOD32_IMM, u64::MAX, 4u64, 3u64),
+        (ebpf::MOD64_IMM, u64::MAX, 4u64, 3u64),
+        (ebpf::DIV32_IMM, u64::MAX, u32::MAX as u64, 1u64),
+        /* Sign extension is messed up in V0: REG and IMM are different
+        (
+            ebpf::DIV64_IMM,
+            u64::MAX,
+            u32::MAX as u64,
+            u32::MAX as u64 + 2,
+        ),*/
+        (ebpf::MOD32_IMM, u64::MAX, u32::MAX as u64, 0u64),
+        (ebpf::MOD64_IMM, u64::MAX, u32::MAX as u64, 0u64),
+        (
+            ebpf::MUL32_IMM,
+            13i64 as u64,
+            4i32 as u32 as u64,
+            52i32 as u32 as u64,
+        ),
+        (ebpf::MUL64_IMM, 13i64 as u64, 4i64 as u64, 52i64 as u64),
+        (
+            ebpf::MUL32_IMM,
+            13i64 as u64,
+            -4i32 as u32 as u64,
+            -52i32 as i64 as u64,
+            // Sign extension is messed up in V0 as the result should be: -52i32 as u32 as u64,
+        ),
+        (ebpf::MUL64_IMM, 13i64 as u64, -4i64 as u64, -52i64 as u64),
+        (ebpf::MUL64_IMM, -13i64 as u64, 4i64 as u64, -52i64 as u64),
+        (ebpf::MUL64_IMM, -13i64 as u64, -4i64 as u64, 52i64 as u64),
+    ] {
+        LittleEndian::write_u32(&mut prog[4..], dst as u32);
+        LittleEndian::write_u32(&mut prog[12..], (dst >> 32) as u32);
+        LittleEndian::write_u32(&mut prog[20..], src as u32);
+        LittleEndian::write_u32(&mut prog[28..], (src >> 32) as u32);
+        LittleEndian::write_u32(&mut prog[36..], src as u32);
+        prog[32] = opc;
+        #[allow(unused_mut)]
+        let mut executable = Executable::<TestContextObject>::from_text_bytes(
+            &prog,
+            loader.clone(),
+            SBPFVersion::V0,
+            FunctionRegistry::default(),
+        )
+        .unwrap();
+        test_interpreter_and_jit!(
+            executable,
+            [],
+            TestContextObject::new(4),
+            ProgramResult::Ok(expected_result),
+        );
+        prog[32] |= ebpf::BPF_X;
+        #[allow(unused_mut)]
+        let mut executable = Executable::<TestContextObject>::from_text_bytes(
+            &prog,
+            loader.clone(),
+            SBPFVersion::V0,
+            FunctionRegistry::default(),
+        )
+        .unwrap();
+        test_interpreter_and_jit!(
+            executable,
+            [],
+            TestContextObject::new(4),
+            ProgramResult::Ok(expected_result),
+        );
+    }
+}
+
+#[test]
+fn test_pqr_v3() {
     let mut prog = [0; 56];
     prog[0] = ebpf::ADD64_IMM;
     prog[1] = 10;
