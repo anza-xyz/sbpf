@@ -958,31 +958,27 @@ impl<C: ContextObject> Executable<C> {
                         addr = ebpf::MM_RODATA_START.saturating_add(addr);
                     }
 
-                    {
-                        let imm_low_offset = imm_offset;
-                        let imm_high_offset = imm_low_offset.saturating_add(INSN_SIZE);
+                    let imm_low_offset = imm_offset;
+                    let imm_high_offset = imm_low_offset.saturating_add(INSN_SIZE);
 
-                        // Write the low side of the relocate address
-                        let imm_slice = elf_bytes
-                            .get_mut(
-                                imm_low_offset
-                                    ..imm_low_offset.saturating_add(BYTE_LENGTH_IMMEDIATE),
-                            )
-                            .ok_or(ElfError::ValueOutOfBounds)?;
-                        LittleEndian::write_u32(imm_slice, (addr & 0xFFFFFFFF) as u32);
+                    // Write the low side of the relocate address
+                    let imm_slice = elf_bytes
+                        .get_mut(
+                            imm_low_offset..imm_low_offset.saturating_add(BYTE_LENGTH_IMMEDIATE),
+                        )
+                        .ok_or(ElfError::ValueOutOfBounds)?;
+                    LittleEndian::write_u32(imm_slice, (addr & 0xFFFFFFFF) as u32);
 
-                        // Write the high side of the relocate address
-                        let imm_slice = elf_bytes
-                            .get_mut(
-                                imm_high_offset
-                                    ..imm_high_offset.saturating_add(BYTE_LENGTH_IMMEDIATE),
-                            )
-                            .ok_or(ElfError::ValueOutOfBounds)?;
-                        LittleEndian::write_u32(
-                            imm_slice,
-                            addr.checked_shr(32).unwrap_or_default() as u32,
-                        );
-                    }
+                    // Write the high side of the relocate address
+                    let imm_slice = elf_bytes
+                        .get_mut(
+                            imm_high_offset..imm_high_offset.saturating_add(BYTE_LENGTH_IMMEDIATE),
+                        )
+                        .ok_or(ElfError::ValueOutOfBounds)?;
+                    LittleEndian::write_u32(
+                        imm_slice,
+                        addr.checked_shr(32).unwrap_or_default() as u32,
+                    );
                 }
                 Some(BpfRelocationType::R_Bpf_64_Relative) => {
                     // Relocation between different sections, where the target
