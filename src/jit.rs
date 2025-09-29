@@ -651,7 +651,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_address_translation(None, Value::RegisterPlusConstant64(dst, insn.off as i64, true), 2, Some(Value::Constant64(insn.imm, true)));
                 },
                 ebpf::MUL64_REG if !self.executable.get_sbpf_version().enable_pqr() => {
-                    self.emit_ins(X86Instruction::alu(OperandSize::S64, 0xaf0f, dst, src, None));
+                    self.emit_ins(X86Instruction::alu_escaped(OperandSize::S64, 1, 0xaf, dst, src, None));
                 },
                 ebpf::DIV64_REG | ebpf::MOD64_REG if !self.executable.get_sbpf_version().enable_pqr() =>
                     self.emit_product_quotient_remainder(
@@ -920,7 +920,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
-    fn emit_sanitized_alu(&mut self, size: OperandSize, opcode: u16, opcode_extension: u8, destination: X86Register, immediate: i64) {
+    fn emit_sanitized_alu(&mut self, size: OperandSize, opcode: u8, opcode_extension: u8, destination: X86Register, immediate: i64) {
         if self.should_sanitize_constant(immediate) {
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
             self.emit_ins(X86Instruction::alu(size, opcode, REGISTER_SCRATCH, destination, None));
@@ -1210,7 +1210,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
-    fn emit_conditional_branch_reg(&mut self, op: u16, bitwise: bool, first_operand: X86Register, second_operand: X86Register, target_pc: usize) {
+    fn emit_conditional_branch_reg(&mut self, op: u8, bitwise: bool, first_operand: X86Register, second_operand: X86Register, target_pc: usize) {
         self.emit_validate_and_profile_instruction_count(Some(target_pc));
         if bitwise { // Logical
             self.emit_ins(X86Instruction::test(OperandSize::S64, first_operand, second_operand, None));
@@ -1223,7 +1223,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_undo_profile_instruction_count(target_pc);
     }
 
-    fn emit_conditional_branch_imm(&mut self, op: u16, bitwise: bool, immediate: i64, second_operand: X86Register, target_pc: usize) {
+    fn emit_conditional_branch_imm(&mut self, op: u8, bitwise: bool, immediate: i64, second_operand: X86Register, target_pc: usize) {
         self.emit_validate_and_profile_instruction_count(Some(target_pc));
         if self.should_sanitize_constant(immediate) {
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
