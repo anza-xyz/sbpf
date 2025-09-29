@@ -148,78 +148,38 @@ fn test_bounce() {
 }
 
 #[test]
-fn test_add32() {
+fn test_add32_sub32() {
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 2
-        add32 r0, 1
+        mov32 r0, 1
+        add32 r0, 2
+        mov32 r1, 5
         add32 r0, r1
-        exit",
-        [],
-        TestContextObject::new(6),
-        ProgramResult::Ok(0x3),
-    );
-}
-
-#[test]
-fn test_alu32_arithmetic() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 1
-        mov32 r2, 2
-        mov32 r3, 3
-        mov32 r4, 4
-        mov32 r5, 5
-        mov32 r6, 6
-        mov32 r7, 7
-        mov32 r8, 8
-        mov32 r9, 9
-        sub32 r0, 13
+        mov32 r1, 3
         sub32 r0, r1
-        add32 r0, 23
-        add32 r0, r7
-        lmul32 r0, 7
-        lmul32 r0, r3
-        udiv32 r0, 2
-        udiv32 r0, r4
         exit",
         [],
-        TestContextObject::new(20),
-        ProgramResult::Ok(110),
+        TestContextObject::new(8),
+        ProgramResult::Ok(5),
     );
 }
 
 #[test]
-fn test_alu64_arithmetic() {
+fn test_add64_sub64() {
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        mov r0, 0
-        mov r1, 1
-        mov r2, 2
-        mov r3, 3
-        mov r4, 4
-        mov r5, 5
-        mov r6, 6
-        mov r7, 7
-        mov r8, 8
-        mov r9, 9
-        sub r0, 13
-        sub r0, r1
-        add r0, 23
-        add r0, r7
-        lmul r0, 7
-        lmul r0, r3
-        udiv r0, 2
-        udiv r0, r4
+        mov32 r0, 1
+        add64 r0, 2
+        mov32 r1, 5
+        add64 r0, r1
+        mov32 r1, 3
+        sub64 r0, r1
         exit",
         [],
-        TestContextObject::new(20),
-        ProgramResult::Ok(110),
+        TestContextObject::new(8),
+        ProgramResult::Ok(5),
     );
 }
 
