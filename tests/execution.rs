@@ -30,7 +30,7 @@ use solana_sbpf::{
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test_utils::{
-    assert_error, compare_instruction_trace, create_vm, syscalls, test_interpreter_and_jit,
+    assert_error, compare_register_trace, create_vm, syscalls, test_interpreter_and_jit,
     test_interpreter_and_jit_asm, test_interpreter_and_jit_elf, test_syscall_asm,
     TestContextObject, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
 };
@@ -3448,7 +3448,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
         Arc::new(BuiltinProgram::new_loader(Config {
-            enable_instruction_tracing: true,
+            enable_register_tracing: true,
             ..Config::default()
         })),
         SBPFVersion::V4,
@@ -3477,7 +3477,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         );
         let (instruction_count_interpreter, result_interpreter) =
             vm.execute_program(&executable, true);
-        let trace_interpreter = vm.instruction_trace.clone();
+        let trace_interpreter = vm.register_trace.clone();
         (
             instruction_count_interpreter,
             trace_interpreter,
@@ -3497,10 +3497,10 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         None
     );
     let (instruction_count_jit, result_jit) = vm.execute_program(&executable, false);
-    let trace_jit = &vm.instruction_trace;
+    let trace_jit = &vm.register_trace;
     debug_assert!(!trace_interpreter.is_empty());
     if format!("{result_interpreter:?}") != format!("{result_jit:?}")
-        || !compare_instruction_trace(&trace_interpreter, trace_jit)
+        || !compare_register_trace(&trace_interpreter, trace_jit)
     {
         let analysis =
             solana_sbpf::static_analysis::Analysis::from_executable(&executable).unwrap();
@@ -3508,10 +3508,10 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         println!("result_jit={result_jit:?}");
         let stdout = std::io::stdout();
         analysis
-            .disassemble_instruction_trace(&mut stdout.lock(), &trace_interpreter)
+            .disassemble_register_trace(&mut stdout.lock(), &trace_interpreter)
             .unwrap();
         analysis
-            .disassemble_instruction_trace(&mut stdout.lock(), trace_jit)
+            .disassemble_register_trace(&mut stdout.lock(), trace_jit)
             .unwrap();
         panic!();
     }

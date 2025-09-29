@@ -50,7 +50,7 @@ fn test_runtime_environment_slots() {
     check_slot!(env, registers, Registers);
     check_slot!(env, program_result, ProgramResult);
     check_slot!(env, memory_mapping, MemoryMapping);
-    check_slot!(env, instruction_trace, InstructionTrace);
+    check_slot!(env, register_trace, RegisterTrace);
 }
 
 #[test]

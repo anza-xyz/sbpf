@@ -14,7 +14,7 @@ use solana_sbpf::{
     elf::Executable,
     error::EbpfError,
     memory_region::{AccessViolationHandler, MemoryMapping, MemoryRegion},
-    static_analysis::InstructionTraceEntry,
+    static_analysis::RegisterTraceEntry,
     vm::ContextObject,
 };
 
@@ -47,9 +47,9 @@ impl TestContextObject {
 /// Compares an interpreter trace and a JIT trace.
 ///
 /// The log of the JIT can be longer because it only validates the instruction meter at branches.
-pub fn compare_instruction_trace(
-    interpreter: &[InstructionTraceEntry],
-    mut jit: &[InstructionTraceEntry],
+pub fn compare_register_trace(
+    interpreter: &[RegisterTraceEntry],
+    mut jit: &[RegisterTraceEntry],
 ) -> bool {
     if jit.len() > interpreter.len() {
         jit = &jit[0..interpreter.len()];
@@ -305,7 +305,7 @@ macro_rules! test_interpreter_and_jit {
                 instruction_count_interpreter,
                 result_interpreter,
                 vm.registers[11],
-                vm.instruction_trace.clone(),
+                vm.register_trace.clone(),
             )
         };
         #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
@@ -328,7 +328,7 @@ macro_rules! test_interpreter_and_jit {
                 Ok(()) => {
                     vm.registers[1] = ebpf::MM_INPUT_START;
                     let (instruction_count_jit, result_jit) = vm.execute_program(&$executable, false);
-                    let trace_jit = &vm.instruction_trace;
+                    let trace_jit = &vm.register_trace;
                     let mut diverged = false;
                     if format!("{:?}", result_interpreter) != format!("{:?}", result_jit) {
                         println!(
@@ -351,17 +351,17 @@ macro_rules! test_interpreter_and_jit {
                         );
                         diverged = true;
                     }
-                    if !compare_instruction_trace(&_trace_interpreter, trace_jit) {
+                    if !compare_register_trace(&_trace_interpreter, trace_jit) {
                         let analysis = Analysis::from_executable(&$executable).unwrap();
                         let stdout = std::io::stdout();
                         analysis
-                            .disassemble_instruction_trace(
+                            .disassemble_register_trace(
                                 &mut stdout.lock(),
                                 &_trace_interpreter,
                             )
                             .unwrap();
                         analysis
-                            .disassemble_instruction_trace(&mut stdout.lock(), trace_jit)
+                            .disassemble_register_trace(&mut stdout.lock(), trace_jit)
                             .unwrap();
                         diverged = true;
                     }
@@ -406,7 +406,7 @@ macro_rules! test_interpreter_and_jit_asm {
         #[allow(unused_mut)]
         {
             let mut config = $config;
-            config.enable_instruction_tracing = true;
+            config.enable_register_tracing = true;
             let loader = Arc::new(BuiltinProgram::new_loader(config));
             let mut executable = assemble($source, loader).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
@@ -433,7 +433,7 @@ macro_rules! test_syscall_asm {
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut config = Config {
-            enable_instruction_tracing: true,
+            enable_register_tracing: true,
             ..Config::default()
         };
         for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
@@ -465,7 +465,7 @@ macro_rules! test_interpreter_and_jit_elf {
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let config = Config {
-            enable_instruction_tracing: true,
+            enable_register_tracing: true,
             ..Config::default()
         };
         test_interpreter_and_jit_elf!($source, config, $mem, ($($syscall_name => $syscall_function),*), $context_object, $expected_result);

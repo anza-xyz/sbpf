@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 /// Register state recorded after executing one instruction
 ///
 /// The last register is the program counter (aka pc).
-pub type InstructionTraceEntry = [u64; 12];
+pub type RegisterTraceEntry = [u64; 12];
 
 /// Used for topological sort
 #[derive(PartialEq, Eq, Debug)]
@@ -472,10 +472,10 @@ impl<'a> Analysis<'a> {
     }
 
     /// Use this method to print the trace log
-    pub fn disassemble_instruction_trace<W: std::io::Write>(
+    pub fn disassemble_register_trace<W: std::io::Write>(
         &self,
         output: &mut W,
-        instruction_trace: &[InstructionTraceEntry],
+        register_trace: &[RegisterTraceEntry],
     ) -> Result<(), std::io::Error> {
         let mut pc_to_insn_index = vec![
             0usize;
@@ -488,7 +488,7 @@ impl<'a> Analysis<'a> {
             pc_to_insn_index[insn.ptr] = index;
             pc_to_insn_index[insn.ptr + 1] = index;
         }
-        for (index, entry) in instruction_trace.iter().enumerate() {
+        for (index, entry) in register_trace.iter().enumerate() {
             let pc = entry[11] as usize;
             let insn = &self.instructions[pc_to_insn_index[pc]];
             writeln!(

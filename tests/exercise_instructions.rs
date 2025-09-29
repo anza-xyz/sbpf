@@ -25,9 +25,7 @@ use solana_sbpf::{
     vm::{Config, ContextObject},
 };
 use std::sync::Arc;
-use test_utils::{
-    compare_instruction_trace, create_vm, test_interpreter_and_jit, TestContextObject,
-};
+use test_utils::{compare_register_trace, create_vm, test_interpreter_and_jit, TestContextObject};
 
 // BPF_ALU32_LOAD : Arithmetic and Logic
 #[test]
@@ -438,7 +436,7 @@ fn test_ins(v0: bool, ins: String, prng: &mut SmallRng, cu: Option<u64>) {
     );
 
     let mut config = Config {
-        enable_instruction_tracing: true,
+        enable_register_tracing: true,
         ..Config::default()
     };
     if v0 {
