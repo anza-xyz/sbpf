@@ -601,7 +601,7 @@ impl<C: ContextObject> Executable<C> {
         let config = loader.get_config();
         let header = elf.file_header();
 
-        Self::validate(config, &elf, elf_bytes.as_slice())?;
+        Self::validate(&elf, elf_bytes.as_slice())?;
 
         // calculate the text section info
         let text_section = get_section(&elf, b".text")?;
@@ -688,7 +688,7 @@ impl<C: ContextObject> Executable<C> {
     // Functions exposed for tests
 
     /// Validates the ELF
-    pub fn validate(_config: &Config, elf: &Elf64, elf_bytes: &[u8]) -> Result<(), ElfError> {
+    pub fn validate(elf: &Elf64, elf_bytes: &[u8]) -> Result<(), ElfError> {
         let header = elf.file_header();
         if header.e_ident.ei_class != ELFCLASS64 {
             return Err(ElfError::WrongClass);
@@ -1058,18 +1058,16 @@ impl<C: ContextObject> Executable<C> {
                             refd_addr.checked_shr(32).unwrap_or_default() as u32,
                         );
                     } else {
-                        let refd_addr = {
-                            // There used to be a bug in toolchains before
-                            // https://github.com/solana-labs/llvm-project/pull/35 where for 64 bit
-                            // relocations we were encoding only the low 32 bits, shifted 32 bits to
-                            // the left. Our relocation code used to be compatible with that, so we
-                            // need to keep supporting this case for backwards compatibility.
-                            let addr_slice = elf_bytes
-                                .get(imm_offset..imm_offset.saturating_add(BYTE_LENGTH_IMMEDIATE))
-                                .ok_or(ElfError::ValueOutOfBounds)?;
-                            let refd_addr = LittleEndian::read_u32(addr_slice) as u64;
-                            ebpf::MM_RODATA_START.saturating_add(refd_addr)
-                        };
+                        // There used to be a bug in toolchains before
+                        // https://github.com/solana-labs/llvm-project/pull/35 where for 64 bit
+                        // relocations we were encoding only the low 32 bits, shifted 32 bits to
+                        // the left. Our relocation code used to be compatible with that, so we
+                        // need to keep supporting this case for backwards compatibility.
+                        let addr_slice = elf_bytes
+                            .get(imm_offset..imm_offset.saturating_add(BYTE_LENGTH_IMMEDIATE))
+                            .ok_or(ElfError::ValueOutOfBounds)?;
+                        let mut refd_addr = LittleEndian::read_u32(addr_slice) as u64;
+                        refd_addr = ebpf::MM_RODATA_START.saturating_add(refd_addr);
 
                         let addr_slice = elf_bytes
                             .get_mut(r_offset..r_offset.saturating_add(mem::size_of::<u64>()))

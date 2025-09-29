@@ -135,15 +135,13 @@ fn test_validate() {
     let elf = Elf64::parse(&elf_bytes).unwrap();
     let mut header = elf.file_header().clone();
 
-    let config = Config::default();
-
     let write_header = |header: Elf64Ehdr| unsafe {
         let mut bytes = elf_bytes.clone();
         std::ptr::write(bytes.as_mut_ptr().cast::<Elf64Ehdr>(), header);
         bytes
     };
 
-    ElfExecutable::validate(&config, &elf, &elf_bytes).expect("validation failed");
+    ElfExecutable::validate(&elf, &elf_bytes).expect("validation failed");
 
     header.e_ident.ei_class = ELFCLASS32;
     let bytes = write_header(header.clone());
@@ -152,8 +150,7 @@ fn test_validate() {
 
     header.e_ident.ei_class = ELFCLASS64;
     let bytes = write_header(header.clone());
-    ElfExecutable::validate(&config, &Elf64::parse(&bytes).unwrap(), &elf_bytes)
-        .expect("validation failed");
+    ElfExecutable::validate(&Elf64::parse(&bytes).unwrap(), &elf_bytes).expect("validation failed");
 
     header.e_ident.ei_data = ELFDATA2MSB;
     let bytes = write_header(header.clone());
@@ -162,32 +159,29 @@ fn test_validate() {
 
     header.e_ident.ei_data = ELFDATA2LSB;
     let bytes = write_header(header.clone());
-    ElfExecutable::validate(&config, &Elf64::parse(&bytes).unwrap(), &elf_bytes)
-        .expect("validation failed");
+    ElfExecutable::validate(&Elf64::parse(&bytes).unwrap(), &elf_bytes).expect("validation failed");
 
     header.e_ident.ei_osabi = 1;
     let bytes = write_header(header.clone());
-    ElfExecutable::validate(&config, &Elf64::parse(&bytes).unwrap(), &elf_bytes)
+    ElfExecutable::validate(&Elf64::parse(&bytes).unwrap(), &elf_bytes)
         .expect_err("allowed wrong abi");
 
     header.e_ident.ei_osabi = ELFOSABI_NONE;
     let bytes = write_header(header.clone());
-    ElfExecutable::validate(&config, &Elf64::parse(&bytes).unwrap(), &elf_bytes)
-        .expect("validation failed");
+    ElfExecutable::validate(&Elf64::parse(&bytes).unwrap(), &elf_bytes).expect("validation failed");
 
     header.e_machine = 42;
     let bytes = write_header(header.clone());
-    ElfExecutable::validate(&config, &Elf64::parse(&bytes).unwrap(), &elf_bytes)
+    ElfExecutable::validate(&Elf64::parse(&bytes).unwrap(), &elf_bytes)
         .expect_err("allowed wrong machine");
 
     header.e_machine = EM_BPF;
     let bytes = write_header(header.clone());
-    ElfExecutable::validate(&config, &Elf64::parse(&bytes).unwrap(), &elf_bytes)
-        .expect("validation failed");
+    ElfExecutable::validate(&Elf64::parse(&bytes).unwrap(), &elf_bytes).expect("validation failed");
 
     header.e_type = ET_REL;
     let bytes = write_header(header);
-    ElfExecutable::validate(&config, &Elf64::parse(&bytes).unwrap(), &elf_bytes)
+    ElfExecutable::validate(&Elf64::parse(&bytes).unwrap(), &elf_bytes)
         .expect_err("allowed wrong type");
 }
 
