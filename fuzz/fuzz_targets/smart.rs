@@ -10,7 +10,7 @@ use solana_sbpf::{
     elf::Executable,
     insn_builder::{Arch, IntoBytes},
     memory_region::MemoryRegion,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
 };
 use test_utils::{create_vm, TestContextObject};

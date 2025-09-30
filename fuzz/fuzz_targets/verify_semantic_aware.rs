@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use semantic_aware::*;
 use solana_sbpf::{
     insn_builder::IntoBytes,
-    program::{BuiltinFunction, FunctionRegistry, SBPFVersion},
+    program::{BuiltinFunction, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
 };
 use test_utils::TestContextObject;
