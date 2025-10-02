@@ -759,35 +759,35 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                         src, dst, None,
                     ),
 
-                // BPF_JMP class
+                // BPF_JMP64 class
                 ebpf::JA         => {
                     self.emit_validate_and_profile_instruction_count(Some(target_pc));
                     self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, target_pc as i64));
                     let jump_offset = self.relative_to_target_pc(target_pc, 5);
                     self.emit_ins(X86Instruction::jump_immediate(jump_offset));
                 },
-                ebpf::JEQ_IMM    => self.emit_conditional_branch_imm(0x84, false, insn.imm, dst, target_pc),
-                ebpf::JEQ_REG    => self.emit_conditional_branch_reg(0x84, false, src, dst, target_pc),
-                ebpf::JGT_IMM    => self.emit_conditional_branch_imm(0x87, false, insn.imm, dst, target_pc),
-                ebpf::JGT_REG    => self.emit_conditional_branch_reg(0x87, false, src, dst, target_pc),
-                ebpf::JGE_IMM    => self.emit_conditional_branch_imm(0x83, false, insn.imm, dst, target_pc),
-                ebpf::JGE_REG    => self.emit_conditional_branch_reg(0x83, false, src, dst, target_pc),
-                ebpf::JLT_IMM    => self.emit_conditional_branch_imm(0x82, false, insn.imm, dst, target_pc),
-                ebpf::JLT_REG    => self.emit_conditional_branch_reg(0x82, false, src, dst, target_pc),
-                ebpf::JLE_IMM    => self.emit_conditional_branch_imm(0x86, false, insn.imm, dst, target_pc),
-                ebpf::JLE_REG    => self.emit_conditional_branch_reg(0x86, false, src, dst, target_pc),
-                ebpf::JSET_IMM   => self.emit_conditional_branch_imm(0x85, true, insn.imm, dst, target_pc),
-                ebpf::JSET_REG   => self.emit_conditional_branch_reg(0x85, true, src, dst, target_pc),
-                ebpf::JNE_IMM    => self.emit_conditional_branch_imm(0x85, false, insn.imm, dst, target_pc),
-                ebpf::JNE_REG    => self.emit_conditional_branch_reg(0x85, false, src, dst, target_pc),
-                ebpf::JSGT_IMM   => self.emit_conditional_branch_imm(0x8f, false, insn.imm, dst, target_pc),
-                ebpf::JSGT_REG   => self.emit_conditional_branch_reg(0x8f, false, src, dst, target_pc),
-                ebpf::JSGE_IMM   => self.emit_conditional_branch_imm(0x8d, false, insn.imm, dst, target_pc),
-                ebpf::JSGE_REG   => self.emit_conditional_branch_reg(0x8d, false, src, dst, target_pc),
-                ebpf::JSLT_IMM   => self.emit_conditional_branch_imm(0x8c, false, insn.imm, dst, target_pc),
-                ebpf::JSLT_REG   => self.emit_conditional_branch_reg(0x8c, false, src, dst, target_pc),
-                ebpf::JSLE_IMM   => self.emit_conditional_branch_imm(0x8e, false, insn.imm, dst, target_pc),
-                ebpf::JSLE_REG   => self.emit_conditional_branch_reg(0x8e, false, src, dst, target_pc),
+                ebpf::JEQ64_IMM    => self.emit_conditional_branch_imm(0x84, false, insn.imm, dst, target_pc),
+                ebpf::JEQ64_REG    => self.emit_conditional_branch_reg(0x84, false, src, dst, target_pc),
+                ebpf::JGT64_IMM    => self.emit_conditional_branch_imm(0x87, false, insn.imm, dst, target_pc),
+                ebpf::JGT64_REG    => self.emit_conditional_branch_reg(0x87, false, src, dst, target_pc),
+                ebpf::JGE64_IMM    => self.emit_conditional_branch_imm(0x83, false, insn.imm, dst, target_pc),
+                ebpf::JGE64_REG    => self.emit_conditional_branch_reg(0x83, false, src, dst, target_pc),
+                ebpf::JLT64_IMM    => self.emit_conditional_branch_imm(0x82, false, insn.imm, dst, target_pc),
+                ebpf::JLT64_REG    => self.emit_conditional_branch_reg(0x82, false, src, dst, target_pc),
+                ebpf::JLE64_IMM    => self.emit_conditional_branch_imm(0x86, false, insn.imm, dst, target_pc),
+                ebpf::JLE64_REG    => self.emit_conditional_branch_reg(0x86, false, src, dst, target_pc),
+                ebpf::JSET64_IMM   => self.emit_conditional_branch_imm(0x85, true, insn.imm, dst, target_pc),
+                ebpf::JSET64_REG   => self.emit_conditional_branch_reg(0x85, true, src, dst, target_pc),
+                ebpf::JNE64_IMM    => self.emit_conditional_branch_imm(0x85, false, insn.imm, dst, target_pc),
+                ebpf::JNE64_REG    => self.emit_conditional_branch_reg(0x85, false, src, dst, target_pc),
+                ebpf::JSGT64_IMM   => self.emit_conditional_branch_imm(0x8f, false, insn.imm, dst, target_pc),
+                ebpf::JSGT64_REG   => self.emit_conditional_branch_reg(0x8f, false, src, dst, target_pc),
+                ebpf::JSGE64_IMM   => self.emit_conditional_branch_imm(0x8d, false, insn.imm, dst, target_pc),
+                ebpf::JSGE64_REG   => self.emit_conditional_branch_reg(0x8d, false, src, dst, target_pc),
+                ebpf::JSLT64_IMM   => self.emit_conditional_branch_imm(0x8c, false, insn.imm, dst, target_pc),
+                ebpf::JSLT64_REG   => self.emit_conditional_branch_reg(0x8c, false, src, dst, target_pc),
+                ebpf::JSLE64_IMM   => self.emit_conditional_branch_imm(0x8e, false, insn.imm, dst, target_pc),
+                ebpf::JSLE64_REG   => self.emit_conditional_branch_reg(0x8e, false, src, dst, target_pc),
                 ebpf::CALL_IMM => {
                     // For JIT, external functions MUST be registered at compile time.
                     let key = self

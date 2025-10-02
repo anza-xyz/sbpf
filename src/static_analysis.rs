@@ -277,28 +277,28 @@ impl<'a> Analysis<'a> {
                     self.cfg_nodes.entry(target_pc).or_default();
                     cfg_edges.insert(insn.ptr, (insn.opc, vec![target_pc]));
                 }
-                ebpf::JEQ_IMM
-                | ebpf::JGT_IMM
-                | ebpf::JGE_IMM
-                | ebpf::JLT_IMM
-                | ebpf::JLE_IMM
-                | ebpf::JSET_IMM
-                | ebpf::JNE_IMM
-                | ebpf::JSGT_IMM
-                | ebpf::JSGE_IMM
-                | ebpf::JSLT_IMM
-                | ebpf::JSLE_IMM
-                | ebpf::JEQ_REG
-                | ebpf::JGT_REG
-                | ebpf::JGE_REG
-                | ebpf::JLT_REG
-                | ebpf::JLE_REG
-                | ebpf::JSET_REG
-                | ebpf::JNE_REG
-                | ebpf::JSGT_REG
-                | ebpf::JSGE_REG
-                | ebpf::JSLT_REG
-                | ebpf::JSLE_REG => {
+                ebpf::JEQ64_IMM
+                | ebpf::JGT64_IMM
+                | ebpf::JGE64_IMM
+                | ebpf::JLT64_IMM
+                | ebpf::JLE64_IMM
+                | ebpf::JSET64_IMM
+                | ebpf::JNE64_IMM
+                | ebpf::JSGT64_IMM
+                | ebpf::JSGE64_IMM
+                | ebpf::JSLT64_IMM
+                | ebpf::JSLE64_IMM
+                | ebpf::JEQ64_REG
+                | ebpf::JGT64_REG
+                | ebpf::JGE64_REG
+                | ebpf::JLT64_REG
+                | ebpf::JLE64_REG
+                | ebpf::JSET64_REG
+                | ebpf::JNE64_REG
+                | ebpf::JSGT64_REG
+                | ebpf::JSGE64_REG
+                | ebpf::JSLT64_REG
+                | ebpf::JSLE64_REG => {
                     self.cfg_nodes.entry(insn.ptr + 1).or_default();
                     self.cfg_nodes.entry(target_pc).or_default();
                     cfg_edges.insert(insn.ptr, (insn.opc, vec![insn.ptr + 1, target_pc]));
@@ -1035,30 +1035,30 @@ impl<'a> Analysis<'a> {
                             bind(&mut state, insn, false, DataResource::Register(insn.src));
                             bind(&mut state, insn, true, DataResource::Register(insn.dst));
                         }
-                        ebpf::JEQ_IMM
-                        | ebpf::JGT_IMM
-                        | ebpf::JGE_IMM
-                        | ebpf::JLT_IMM
-                        | ebpf::JLE_IMM
-                        | ebpf::JSET_IMM
-                        | ebpf::JNE_IMM
-                        | ebpf::JSGT_IMM
-                        | ebpf::JSGE_IMM
-                        | ebpf::JSLT_IMM
-                        | ebpf::JSLE_IMM => {
+                        ebpf::JEQ64_IMM
+                        | ebpf::JGT64_IMM
+                        | ebpf::JGE64_IMM
+                        | ebpf::JLT64_IMM
+                        | ebpf::JLE64_IMM
+                        | ebpf::JSET64_IMM
+                        | ebpf::JNE64_IMM
+                        | ebpf::JSGT64_IMM
+                        | ebpf::JSGE64_IMM
+                        | ebpf::JSLT64_IMM
+                        | ebpf::JSLE64_IMM => {
                             bind(&mut state, insn, false, DataResource::Register(insn.dst));
                         }
-                        ebpf::JEQ_REG
-                        | ebpf::JGT_REG
-                        | ebpf::JGE_REG
-                        | ebpf::JLT_REG
-                        | ebpf::JLE_REG
-                        | ebpf::JSET_REG
-                        | ebpf::JNE_REG
-                        | ebpf::JSGT_REG
-                        | ebpf::JSGE_REG
-                        | ebpf::JSLT_REG
-                        | ebpf::JSLE_REG => {
+                        ebpf::JEQ64_REG
+                        | ebpf::JGT64_REG
+                        | ebpf::JGE64_REG
+                        | ebpf::JLT64_REG
+                        | ebpf::JLE64_REG
+                        | ebpf::JSET64_REG
+                        | ebpf::JNE64_REG
+                        | ebpf::JSGT64_REG
+                        | ebpf::JSGE64_REG
+                        | ebpf::JSLT64_REG
+                        | ebpf::JSLE64_REG => {
                             bind(&mut state, insn, false, DataResource::Register(insn.src));
                             bind(&mut state, insn, false, DataResource::Register(insn.dst));
                         }

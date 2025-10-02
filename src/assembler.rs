@@ -226,7 +226,12 @@ fn make_instruction_map(sbpf_version: SBPFVersion) -> HashMap<String, (Instructi
 
         // JumpConditional.
         for &(name, condition) in &jump_conditions {
-            entry(name, JumpConditional, ebpf::BPF_JMP | condition);
+            entry(name, JumpConditional, ebpf::BPF_JMP64 | condition);
+            entry(
+                &format!("{name}64"),
+                JumpConditional,
+                ebpf::BPF_JMP64 | condition,
+            );
         }
 
         // Endian.
