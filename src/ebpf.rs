@@ -64,8 +64,10 @@ pub const BPF_ST: u8 = 0x02;
 pub const BPF_STX: u8 = 0x03;
 /// BPF operation class: 32 bit arithmetic or load.
 pub const BPF_ALU32_LOAD: u8 = 0x04;
-/// BPF operation class: control flow.
+/// BPF operation class: 64 bit control flow.
 pub const BPF_JMP64: u8 = 0x05;
+/// BPF operation class: 32 bit control flow.
+pub const BPF_JMP32: u8 = 0x06;
 /// BPF operation class: product / quotient / remainder.
 pub const BPF_PQR: u8 = 0x06;
 /// BPF operation class: 64 bit arithmetic or store.
@@ -173,7 +175,7 @@ pub const BPF_SDIV: u8 = 0xC0;
 /// BPF PQR operation code: signed division remainder.
 pub const BPF_SREM: u8 = 0xE0;
 
-// Operation codes -- BPF_JMP64 class:
+// Operation codes -- BPF_JMP32 and BPF_JMP64 classes:
 /// BPF JMP operation code: jump.
 pub const BPF_JA: u8 = 0x00;
 /// BPF JMP operation code: jump if equal.
@@ -425,6 +427,51 @@ pub const SDIV64_REG: u8 = BPF_PQR | BPF_B | BPF_X | BPF_SDIV;
 pub const SREM64_IMM: u8 = BPF_PQR | BPF_B | BPF_K | BPF_SREM;
 /// BPF opcode: `srem64 dst, src` /// `dst %= src`.
 pub const SREM64_REG: u8 = BPF_PQR | BPF_B | BPF_X | BPF_SREM;
+
+/// BPF opcode: `jeq32 dst, imm, +off` /// `PC += off if dst == imm`.
+pub const JEQ32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JEQ;
+/// BPF opcode: `jeq32 dst, src, +off` /// `PC += off if dst == src`.
+pub const JEQ32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JEQ;
+/// BPF opcode: `jgt32 dst, imm, +off` /// `PC += off if dst > imm`.
+pub const JGT32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JGT;
+/// BPF opcode: `jgt32 dst, src, +off` /// `PC += off if dst > src`.
+pub const JGT32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JGT;
+/// BPF opcode: `jge32 dst, imm, +off` /// `PC += off if dst >= imm`.
+pub const JGE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JGE;
+/// BPF opcode: `jge32 dst, src, +off` /// `PC += off if dst >= src`.
+pub const JGE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JGE;
+/// BPF opcode: `jlt32 dst, imm, +off` /// `PC += off if dst < imm`.
+pub const JLT32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JLT;
+/// BPF opcode: `jlt32 dst, src, +off` /// `PC += off if dst < src`.
+pub const JLT32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JLT;
+/// BPF opcode: `jle32 dst, imm, +off` /// `PC += off if dst <= imm`.
+pub const JLE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JLE;
+/// BPF opcode: `jle32 dst, src, +off` /// `PC += off if dst <= src`.
+pub const JLE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JLE;
+/// BPF opcode: `jset32 dst, imm, +off` /// `PC += off if dst & imm`.
+pub const JSET32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSET;
+/// BPF opcode: `jset32 dst, src, +off` /// `PC += off if dst & src`.
+pub const JSET32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSET;
+/// BPF opcode: `jne32 dst, imm, +off` /// `PC += off if dst != imm`.
+pub const JNE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JNE;
+/// BPF opcode: `jne32 dst, src, +off` /// `PC += off if dst != src`.
+pub const JNE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JNE;
+/// BPF opcode: `jsgt32 dst, imm, +off` /// `PC += off if dst > imm (signed)`.
+pub const JSGT32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSGT;
+/// BPF opcode: `jsgt32 dst, src, +off` /// `PC += off if dst > src (signed)`.
+pub const JSGT32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSGT;
+/// BPF opcode: `jsge32 dst, imm, +off` /// `PC += off if dst >= imm (signed)`.
+pub const JSGE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSGE;
+/// BPF opcode: `jsge32 dst, src, +off` /// `PC += off if dst >= src (signed)`.
+pub const JSGE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSGE;
+/// BPF opcode: `jslt32 dst, imm, +off` /// `PC += off if dst < imm (signed)`.
+pub const JSLT32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSLT;
+/// BPF opcode: `jslt32 dst, src, +off` /// `PC += off if dst < src (signed)`.
+pub const JSLT32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSLT;
+/// BPF opcode: `jsle32 dst, imm, +off` /// `PC += off if dst <= imm (signed)`.
+pub const JSLE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSLE;
+/// BPF opcode: `jsle32 dst, src, +off` /// `PC += off if dst <= src (signed)`.
+pub const JSLE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSLE;
 
 /// BPF opcode: `ja64 +off` /// `PC += off`.
 pub const JA: u8 = BPF_JMP64 | BPF_JA;
