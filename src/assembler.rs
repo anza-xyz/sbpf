@@ -112,6 +112,7 @@ fn make_instruction_map(sbpf_version: SBPFVersion) -> HashMap<String, (Instructi
             result.insert(name.to_string(), (inst_type, opc))
         };
 
+        // Miscellaneous.
         if sbpf_version == SBPFVersion::V0 {
             entry("exit", NoOperand, ebpf::EXIT);
             entry("return", NoOperand, ebpf::EXIT);
@@ -119,8 +120,6 @@ fn make_instruction_map(sbpf_version: SBPFVersion) -> HashMap<String, (Instructi
             entry("exit", NoOperand, ebpf::RETURN);
             entry("return", NoOperand, ebpf::RETURN);
         }
-
-        // Miscellaneous.
         entry("ja", JumpUnconditional, ebpf::JA);
         entry(
             "syscall",
@@ -241,7 +240,17 @@ fn make_instruction_map(sbpf_version: SBPFVersion) -> HashMap<String, (Instructi
 
         // JumpConditional.
         for &(name, condition) in &jump_conditions {
-            entry(name, JumpConditional, ebpf::BPF_JMP | condition);
+            entry(name, JumpConditional, ebpf::BPF_JMP64 | condition);
+            entry(
+                &format!("{name}32"),
+                JumpConditional,
+                ebpf::BPF_JMP32 | condition,
+            );
+            entry(
+                &format!("{name}64"),
+                JumpConditional,
+                ebpf::BPF_JMP64 | condition,
+            );
         }
 
         // Endian.

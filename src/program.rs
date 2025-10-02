@@ -33,7 +33,7 @@ impl SBPFVersion {
 
     /// Enable SIMD-0174: SBPF arithmetics improvements
     pub fn enable_pqr(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
     /// ... SIMD-0174
     pub fn explicit_sign_extension_of_results(self) -> bool {
@@ -62,7 +62,7 @@ impl SBPFVersion {
     }
     /// ... SIMD-0173
     pub fn move_memory_instruction_classes(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
 
     /// Enable SIMD-0178: SBPF Static Syscalls
@@ -79,6 +79,10 @@ impl SBPFVersion {
     }
     /// ... SIMD-0189
     pub fn enable_lower_bytecode_vaddr(self) -> bool {
+        self >= SBPFVersion::V3
+    }
+    /// ... SIMD-????
+    pub fn enable_jmp32(self) -> bool {
         self >= SBPFVersion::V3
     }
 
