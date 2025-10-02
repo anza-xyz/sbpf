@@ -119,6 +119,22 @@ fn test_jeq() {
         asm("jeq r1, r3, +8"),
         Ok(vec![insn(0, ebpf::JEQ64_REG, 1, 3, 8, 0)])
     );
+    assert_eq!(
+        asm("jeq32 r1, 4, +8"),
+        Ok(vec![insn(0, ebpf::JEQ32_IMM, 1, 0, 8, 4)])
+    );
+    assert_eq!(
+        asm("jeq32 r1, r3, +8"),
+        Ok(vec![insn(0, ebpf::JEQ32_REG, 1, 3, 8, 0)])
+    );
+    assert_eq!(
+        asm("jeq64 r1, 4, +8"),
+        Ok(vec![insn(0, ebpf::JEQ64_IMM, 1, 0, 8, 4)])
+    );
+    assert_eq!(
+        asm("jeq64 r1, r3, +8"),
+        Ok(vec![insn(0, ebpf::JEQ64_REG, 1, 3, 8, 0)])
+    );
 }
 
 #[test]

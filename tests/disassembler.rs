@@ -100,25 +100,6 @@ lbb_1:
     );
 }
 
-// Example for InstructionType::JumpConditional.
-#[test]
-fn test_jeq() {
-    disasm!(
-        "entrypoint:
-    jeq r1, 4, lbb_1
-lbb_1:
-    exit
-"
-    );
-    disasm!(
-        "entrypoint:
-    jeq r1, r3, lbb_1
-lbb_1:
-    exit
-"
-    );
-}
-
 // Example for InstructionType::Call.
 #[test]
 fn test_call() {
@@ -344,6 +325,42 @@ lbb_11:
     jsge r1, 2, lbb_11
     jslt r1, 2, lbb_11
     jsle r1, 2, lbb_11
+lbb_11:
+    exit
+"
+    );
+
+    disasm!(
+        "entrypoint:
+    jeq32 r1, r2, lbb_11
+    jgt32 r1, r2, lbb_11
+    jge32 r1, r2, lbb_11
+    jlt32 r1, r2, lbb_11
+    jle32 r1, r2, lbb_11
+    jset32 r1, r2, lbb_11
+    jne32 r1, r2, lbb_11
+    jsgt32 r1, r2, lbb_11
+    jsge32 r1, r2, lbb_11
+    jslt32 r1, r2, lbb_11
+    jsle32 r1, r2, lbb_11
+lbb_11:
+    exit
+"
+    );
+
+    disasm!(
+        "entrypoint:
+    jeq32 r1, 2, lbb_11
+    jgt32 r1, 2, lbb_11
+    jge32 r1, 2, lbb_11
+    jlt32 r1, 2, lbb_11
+    jle32 r1, 2, lbb_11
+    jset32 r1, 2, lbb_11
+    jne32 r1, 2, lbb_11
+    jsgt32 r1, 2, lbb_11
+    jsge32 r1, 2, lbb_11
+    jslt32 r1, 2, lbb_11
+    jsle32 r1, 2, lbb_11
 lbb_11:
     exit
 "
