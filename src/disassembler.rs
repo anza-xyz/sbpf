@@ -237,6 +237,30 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::SREM64_IMM  if sbpf_version.enable_pqr() => { name = "srem64"; desc = alu_imm_str(name, insn); },
         ebpf::SREM64_REG  if sbpf_version.enable_pqr() => { name = "srem64"; desc = alu_reg_str(name, insn); },
 
+        // BPF_JMP32 class
+        ebpf::JEQ32_IMM   if sbpf_version.enable_jmp32() => { name = "jeq32";  desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JEQ32_REG   if sbpf_version.enable_jmp32() => { name = "jeq32";  desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JGT32_IMM   if sbpf_version.enable_jmp32() => { name = "jgt32";  desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JGT32_REG   if sbpf_version.enable_jmp32() => { name = "jgt32";  desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JGE32_IMM   if sbpf_version.enable_jmp32() => { name = "jge32";  desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JGE32_REG   if sbpf_version.enable_jmp32() => { name = "jge32";  desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JLT32_IMM   if sbpf_version.enable_jmp32() => { name = "jlt32";  desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JLT32_REG   if sbpf_version.enable_jmp32() => { name = "jlt32";  desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JLE32_IMM   if sbpf_version.enable_jmp32() => { name = "jle32";  desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JLE32_REG   if sbpf_version.enable_jmp32() => { name = "jle32";  desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JSET32_IMM  if sbpf_version.enable_jmp32() => { name = "jset32"; desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JSET32_REG  if sbpf_version.enable_jmp32() => { name = "jset32"; desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JNE32_IMM   if sbpf_version.enable_jmp32() => { name = "jne32";  desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JNE32_REG   if sbpf_version.enable_jmp32() => { name = "jne32";  desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JSGT32_IMM  if sbpf_version.enable_jmp32() => { name = "jsgt32"; desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JSGT32_REG  if sbpf_version.enable_jmp32() => { name = "jsgt32"; desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JSGE32_IMM  if sbpf_version.enable_jmp32() => { name = "jsge32"; desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JSGE32_REG  if sbpf_version.enable_jmp32() => { name = "jsge32"; desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JSLT32_IMM  if sbpf_version.enable_jmp32() => { name = "jslt32"; desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JSLT32_REG  if sbpf_version.enable_jmp32() => { name = "jslt32"; desc = jmp_reg_str(name, insn, cfg_nodes); },
+        ebpf::JSLE32_IMM  if sbpf_version.enable_jmp32() => { name = "jsle32"; desc = jmp_imm_str(name, insn, cfg_nodes); },
+        ebpf::JSLE32_REG  if sbpf_version.enable_jmp32() => { name = "jsle32"; desc = jmp_reg_str(name, insn, cfg_nodes); },
+        
         // BPF_JMP64 class
         ebpf::JA         => {
             name = "ja";
