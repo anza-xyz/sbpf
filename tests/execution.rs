@@ -1539,7 +1539,12 @@ fn test_conditional_jumps() {
         LittleEndian::write_u32(&mut prog[28..], dst as u32);
         LittleEndian::write_u32(&mut prog[36..], (dst as i64 >> 32) as u32);
         LittleEndian::write_u32(&mut prog[44..], src as u32);
-        for op_class in [ebpf::BPF_JMP | ebpf::BPF_K, ebpf::BPF_JMP | ebpf::BPF_X] {
+        for op_class in [
+            ebpf::BPF_JMP32 | ebpf::BPF_K,
+            ebpf::BPF_JMP32 | ebpf::BPF_X,
+            ebpf::BPF_JMP64 | ebpf::BPF_K,
+            ebpf::BPF_JMP64 | ebpf::BPF_X,
+        ] {
             prog[40] = op_class | opc;
             #[allow(unused_mut)]
             let mut executable = Executable::<TestContextObject>::from_text_bytes(
