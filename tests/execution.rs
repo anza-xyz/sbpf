@@ -193,30 +193,30 @@ fn test_lmul128() {
         mov r3, 0
         mov r4, 20
         mov r5, 0
-        lmul64 r3, r4
-        lmul64 r5, r2
+        mul64 r3, r4
+        mul64 r5, r2
         add64 r5, r3
         mov64 r0, r2
         rsh64 r0, 0x20
         mov64 r3, r4
         rsh64 r3, 0x20
         mov64 r6, r3
-        lmul64 r6, r0
+        mul64 r6, r0
         add64 r5, r6
         lsh64 r4, 0x20
         rsh64 r4, 0x20
         mov64 r6, r4
-        lmul64 r6, r0
+        mul64 r6, r0
         lsh64 r2, 0x20
         rsh64 r2, 0x20
-        lmul64 r4, r2
+        mul64 r4, r2
         mov64 r0, r4
         rsh64 r0, 0x20
         add64 r0, r6
         mov64 r6, r0
         rsh64 r6, 0x20
         add64 r5, r6
-        lmul64 r3, r2
+        mul64 r3, r2
         lsh64 r0, 0x20
         rsh64 r0, 0x20
         add64 r0, r3
@@ -308,12 +308,11 @@ fn test_arsh32_high_shift() {
         "
         add64 r10, 0
         mov r0, 8
-        mov32 r1, 0x00000001
-        hor64 r1, 0x00000001
+        lddw r1, 0x100000001
         arsh32 r0, r1
         exit",
         [],
-        TestContextObject::new(6),
+        TestContextObject::new(5),
         ProgramResult::Ok(0x4),
     );
 }
@@ -572,7 +571,7 @@ fn test_pqr_v0() {
 }
 
 #[test]
-fn test_pqr_v3() {
+fn test_pqr_v2() {
     let mut prog = [0; 56];
     prog[0] = ebpf::ADD64_IMM;
     prog[1] = 10;
@@ -715,7 +714,7 @@ fn test_pqr_v3() {
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
             loader.clone(),
-            SBPFVersion::V3,
+            SBPFVersion::V2,
             FunctionRegistry::default(),
         )
         .unwrap();
@@ -730,7 +729,7 @@ fn test_pqr_v3() {
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
             loader.clone(),
-            SBPFVersion::V3,
+            SBPFVersion::V2,
             FunctionRegistry::default(),
         )
         .unwrap();
@@ -744,7 +743,7 @@ fn test_pqr_v3() {
 }
 
 #[test]
-fn test_err_divide_by_zero() {
+fn test_err_pqr_divide_by_zero() {
     let mut prog = [0; 32];
     prog[0] = ebpf::ADD64_IMM;
     prog[1] = 10;
@@ -766,7 +765,7 @@ fn test_err_divide_by_zero() {
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
             loader.clone(),
-            SBPFVersion::V3,
+            SBPFVersion::V2,
             FunctionRegistry::default(),
         )
         .unwrap();
@@ -780,7 +779,7 @@ fn test_err_divide_by_zero() {
 }
 
 #[test]
-fn test_err_divide_overflow() {
+fn test_err_pqr_divide_overflow() {
     let mut prog = [0; 48];
     prog[0] = ebpf::ADD64_IMM;
     prog[1] = 10;
@@ -810,7 +809,7 @@ fn test_err_divide_overflow() {
         let mut executable = Executable::<TestContextObject>::from_text_bytes(
             &prog,
             loader.clone(),
-            SBPFVersion::V4,
+            SBPFVersion::V2,
             FunctionRegistry::default(),
         )
         .unwrap();
@@ -1018,12 +1017,17 @@ fn test_memory_instructions() {
 
 #[test]
 fn test_hor64() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V2..=SBPFVersion::V2,
+        ..Config::default()
+    };
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
         hor64 r0, 0x10203040
         hor64 r0, 0x01020304
         exit",
+        config,
         [],
         TestContextObject::new(4),
         ProgramResult::Ok(0x1122334400000000),
@@ -2258,9 +2262,8 @@ fn test_err_mem_access_out_of_bound() {
     let mut prog = [0; 40];
     prog[0] = ebpf::ADD64_IMM;
     prog[1] = 10;
-    prog[8] = ebpf::MOV32_IMM;
-    prog[16] = ebpf::HOR64_IMM;
-    prog[24] = ebpf::ST_1B_IMM;
+    prog[8] = ebpf::LD_DW_IMM;
+    prog[24] = ebpf::ST_B_IMM;
     prog[32] = ebpf::EXIT;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for address in [0x2u64, 0x8002u64, 0x80000002u64, 0x8000000000000002u64] {
@@ -2277,7 +2280,7 @@ fn test_err_mem_access_out_of_bound() {
         test_interpreter_and_jit!(
             executable,
             mem,
-            TestContextObject::new(4),
+            TestContextObject::new(3),
             ProgramResult::Err(EbpfError::AccessViolation(
                 AccessType::Store,
                 address,
@@ -2488,13 +2491,11 @@ fn test_err_callx_oob_high() {
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        mov64 r0, -0x1
-        lsh64 r0, 0x20
-        or64 r0, 0x3
+        lddw r0, 0x100000000
         callx r0
         exit",
         [],
-        TestContextObject::new(5),
+        TestContextObject::new(3),
         ProgramResult::Err(EbpfError::CallOutsideTextSegment),
     );
 }
@@ -2504,12 +2505,11 @@ fn test_err_callx_oob_max() {
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        mov64 r0, -0x8
-        hor64 r0, -0x1
+        lddw r0, 0xFFFFFFFFFFFFFFF8
         callx r0
         exit",
         [],
-        TestContextObject::new(4),
+        TestContextObject::new(3),
         ProgramResult::Err(EbpfError::CallOutsideTextSegment),
     );
 }
@@ -2934,7 +2934,7 @@ fn test_err_capped_before_exception() {
         add64 r10, 0
         mov64 r1, 0x0
         mov64 r2, 0x0
-        udiv64 r1, r2
+        div64 r1, r2
         mov64 r0, 0x0
         exit",
         [],
@@ -3066,7 +3066,7 @@ fn test_syscall_static() {
         (
             "log" => syscalls::SyscallString::vm,
         ),
-        TestContextObject::new(7),
+        TestContextObject::new(6),
         ProgramResult::Ok(0),
     );
 }
@@ -3111,7 +3111,7 @@ fn test_reloc_64_64() {
         "tests/elfs/reloc_64_64.so",
         [],
         (),
-        TestContextObject::new(4),
+        TestContextObject::new(3),
         ProgramResult::Ok(ebpf::MM_BYTECODE_START),
     );
 }
@@ -3149,7 +3149,7 @@ fn test_reloc_64_relative() {
         config,
         [],
         (),
-        TestContextObject::new(4),
+        TestContextObject::new(3),
         ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
@@ -3170,7 +3170,7 @@ fn test_reloc_64_relative_data() {
         config,
         [],
         (),
-        TestContextObject::new(5),
+        TestContextObject::new(4),
         ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
@@ -3231,7 +3231,7 @@ fn test_load_elf_rodata() {
         config,
         [],
         (),
-        TestContextObject::new(5),
+        TestContextObject::new(4),
         ProgramResult::Ok(42),
     );
 }
@@ -3261,7 +3261,7 @@ fn test_strict_header() {
         "tests/elfs/strict_header.so",
         [],
         (),
-        TestContextObject::new(8),
+        TestContextObject::new(7),
         ProgramResult::Ok(42),
     );
 }
@@ -3280,7 +3280,7 @@ fn test_struct_func_pointer() {
         config,
         [],
         (),
-        TestContextObject::new(4),
+        TestContextObject::new(3),
         ProgramResult::Ok(0x102030405060708),
     );
 }
@@ -3298,7 +3298,7 @@ fn test_lmul_loop() {
         rsh r1, 0x20
         jeq r1, 0x0, +4
         mov r0, 0x7
-        lmul r0, 0x7
+        mul r0, 0x7
         add r1, -1
         jne r1, 0x0, -3
         exit",
@@ -3322,8 +3322,8 @@ fn test_prime() {
         mov r0, 0x1
         jge r2, r1, +7
         mov r3, r1
-        udiv r3, r2
-        lmul r3, r2
+        div r3, r2
+        mul r3, r2
         mov r4, r1
         sub r4, r3
         mov r0, 0x0

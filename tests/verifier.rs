@@ -111,7 +111,7 @@ fn test_verifier_err_div_by_zero_imm() {
         "
         add64 r10, 0
         mov32 r0, 1
-        udiv32 r0, 0
+        div32 r0, 0
         exit",
         Arc::new(BuiltinProgram::new_mock()),
     )
