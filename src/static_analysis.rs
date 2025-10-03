@@ -272,10 +272,6 @@ impl<'a> Analysis<'a> {
                     self.cfg_nodes.entry(insn.ptr + 1).or_default();
                     cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
                 }
-                ebpf::RETURN if sbpf_version.static_syscalls() => {
-                    self.cfg_nodes.entry(insn.ptr + 1).or_default();
-                    cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
-                }
                 ebpf::JA => {
                     self.cfg_nodes.entry(insn.ptr + 1).or_default();
                     self.cfg_nodes.entry(target_pc).or_default();

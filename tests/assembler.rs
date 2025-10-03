@@ -67,10 +67,6 @@ fn test_exit() {
         asm_with_config("exit", config.clone()),
         Ok(vec![insn(0, ebpf::EXIT, 0, 0, 0, 0)])
     );
-    assert_eq!(
-        asm_with_config("return", config),
-        Ok(vec![insn(0, ebpf::EXIT, 0, 0, 0, 0)])
-    );
 }
 
 #[test]
@@ -82,23 +78,7 @@ fn test_static_syscall() {
 
     assert_eq!(
         asm_with_config("syscall 3", config),
-        Ok(vec![insn(0, ebpf::SYSCALL, 0, 0, 0, 3)])
-    );
-}
-
-#[test]
-fn test_return() {
-    let config = Config {
-        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V3,
-        ..Config::default()
-    };
-    assert_eq!(
-        asm_with_config("exit", config.clone()),
-        Ok(vec![insn(0, ebpf::RETURN, 0, 0, 0, 0)])
-    );
-    assert_eq!(
-        asm_with_config("return", config),
-        Ok(vec![insn(0, ebpf::RETURN, 0, 0, 0, 0)])
+        Ok(vec![insn(0, ebpf::CALL_IMM, 0, 0, 0, 3)])
     );
 }
 
@@ -145,7 +125,7 @@ fn test_jeq() {
 fn test_call_reg() {
     assert_eq!(
         asm("callx r3"),
-        Ok(vec![insn(0, ebpf::CALL_REG, 0, 3, 0, 0)])
+        Ok(vec![insn(0, ebpf::CALL_REG, 0, 0, 0, 3)])
     );
 }
 
@@ -154,7 +134,7 @@ fn test_call_reg() {
 fn test_call_imm() {
     assert_eq!(
         asm("call 299"),
-        Ok(vec![insn(0, ebpf::CALL_IMM, 0, 0, 0, 299)])
+        Ok(vec![insn(0, ebpf::CALL_IMM, 0, 1, 0, 299)])
     );
 }
 
@@ -385,10 +365,10 @@ fn test_load_reg() {
              ldxw r1, [r2+3]
              ldxdw r1, [r2+3]"),
         Ok(vec![
-            insn(0, ebpf::LD_1B_REG, 1, 2, 3, 0),
-            insn(1, ebpf::LD_2B_REG, 1, 2, 3, 0),
-            insn(2, ebpf::LD_4B_REG, 1, 2, 3, 0),
-            insn(3, ebpf::LD_8B_REG, 1, 2, 3, 0)
+            insn(0, ebpf::LD_B_REG, 1, 2, 3, 0),
+            insn(1, ebpf::LD_H_REG, 1, 2, 3, 0),
+            insn(2, ebpf::LD_W_REG, 1, 2, 3, 0),
+            insn(3, ebpf::LD_DW_REG, 1, 2, 3, 0)
         ])
     );
 }
@@ -402,10 +382,10 @@ fn test_store_imm() {
              stw [r1+2], 3
              stdw [r1+2], 3"),
         Ok(vec![
-            insn(0, ebpf::ST_1B_IMM, 1, 0, 2, 3),
-            insn(1, ebpf::ST_2B_IMM, 1, 0, 2, 3),
-            insn(2, ebpf::ST_4B_IMM, 1, 0, 2, 3),
-            insn(3, ebpf::ST_8B_IMM, 1, 0, 2, 3)
+            insn(0, ebpf::ST_B_IMM, 1, 0, 2, 3),
+            insn(1, ebpf::ST_H_IMM, 1, 0, 2, 3),
+            insn(2, ebpf::ST_W_IMM, 1, 0, 2, 3),
+            insn(3, ebpf::ST_DW_IMM, 1, 0, 2, 3)
         ])
     );
 }
@@ -419,10 +399,10 @@ fn test_store_reg() {
              stxw [r1+2], r3
              stxdw [r1+2], r3"),
         Ok(vec![
-            insn(0, ebpf::ST_1B_REG, 1, 3, 2, 0),
-            insn(1, ebpf::ST_2B_REG, 1, 3, 2, 0),
-            insn(2, ebpf::ST_4B_REG, 1, 3, 2, 0),
-            insn(3, ebpf::ST_8B_REG, 1, 3, 2, 0)
+            insn(0, ebpf::ST_B_REG, 1, 3, 2, 0),
+            insn(1, ebpf::ST_H_REG, 1, 3, 2, 0),
+            insn(2, ebpf::ST_W_REG, 1, 3, 2, 0),
+            insn(3, ebpf::ST_DW_REG, 1, 3, 2, 0)
         ])
     );
 }

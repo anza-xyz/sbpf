@@ -245,7 +245,7 @@ impl Verifier for RequisiteVerifier {
                 }
                 let insn = ebpf::get_insn(prog, function_range.end.saturating_sub(1));
                 match insn.opc {
-                    ebpf::JA | ebpf::RETURN => {},
+                    ebpf::JA | ebpf::EXIT => {},
                     _ => {
                         return Err(VerifierError::InvalidFunction(
                             function_range.end.saturating_sub(1),
@@ -400,23 +400,22 @@ impl Verifier for RequisiteVerifier {
                 ebpf::JSLT_REG   => { check_jmp_offset(prog, insn_ptr, &function_range)?; },
                 ebpf::JSLE_IMM   => { check_jmp_offset(prog, insn_ptr, &function_range)?; },
                 ebpf::JSLE_REG   => { check_jmp_offset(prog, insn_ptr, &function_range)?; },
-                ebpf::CALL_IMM   if sbpf_version.static_syscalls() => {
+                ebpf::CALL_IMM   if sbpf_version.static_syscalls() && insn.src == 1 => {
                     let target_pc = sbpf_version.calculate_call_imm_target_pc(insn_ptr, insn.imm);
                     if !program_range.contains(&(target_pc as usize)) ||
                        !ebpf::get_insn(prog, target_pc as usize).is_function_start_marker() {
                         return Err(VerifierError::InvalidFunction(target_pc as usize));
                     }
                 },
-                ebpf::CALL_IMM   => {},
-                ebpf::CALL_REG   => { check_callx_register(&insn, insn_ptr, sbpf_version)?; },
-                ebpf::EXIT       if !sbpf_version.static_syscalls()   => {},
-                ebpf::RETURN     if sbpf_version.static_syscalls()    => {},
-                ebpf::SYSCALL    if sbpf_version.static_syscalls()    => {
+                ebpf::CALL_IMM   if sbpf_version.static_syscalls() && insn.src == 0 => {
                     syscall_registry
                         .lookup_by_key(insn.imm as u32)
                         .map(|_| ())
                         .ok_or(VerifierError::InvalidSyscall(insn.imm as u32))?;
                 },
+                ebpf::CALL_IMM  if !sbpf_version.static_syscalls() => {},
+                ebpf::CALL_REG   => { check_callx_register(&insn, insn_ptr, sbpf_version)?; },
+                ebpf::EXIT       => {},
 
                 _                => {
                     return Err(VerifierError::UnknownOpCode(insn.opc, insn_ptr));

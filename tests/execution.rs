@@ -583,7 +583,7 @@ fn test_pqr_v3() {
     prog[32] = ebpf::HOR64_IMM;
     prog[33] = 1; // dst = R1
     prog[41] = 16; // src = R1
-    prog[48] = ebpf::RETURN;
+    prog[48] = ebpf::EXIT;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for (opc, dst, src, expected_result) in [
         (ebpf::UHMUL64_IMM, 13u64, 4u64, 0u64),
@@ -749,7 +749,7 @@ fn test_err_divide_by_zero() {
     prog[0] = ebpf::ADD64_IMM;
     prog[1] = 10;
     prog[8] = ebpf::MOV32_IMM;
-    prog[24] = ebpf::RETURN;
+    prog[24] = ebpf::EXIT;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for opc in [
         ebpf::UDIV32_REG,
@@ -792,7 +792,7 @@ fn test_err_divide_overflow() {
     LittleEndian::write_i32(&mut prog[28..], -1);
     prog[33] = 16; // src = R1
     LittleEndian::write_i32(&mut prog[36..], -1);
-    prog[40] = ebpf::RETURN;
+    prog[40] = ebpf::EXIT;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for opc in [
         ebpf::SDIV32_IMM,
@@ -2057,27 +2057,27 @@ fn test_err_dynamic_stack_ptr_overflow() {
         "
         add r10, -0x7FFFFF00
         call function_stage1
-        return
+        exit
         function_stage1:
         add r10, -0x7FFFFF00
         call function_stage2
-        return
+        exit
         function_stage2:
         add r10, -0x7FFFFF00
         call function_stage3
-        return
+        exit
         function_stage3:
         add r10, -0x7FFFFF00
         call function_stage4
-        return
+        exit
         function_stage4:
         add r10, -0x40440
         call function_final
-        return
+        exit
         function_final:
         add r10, 0
         stb [r10], 0
-        return",
+        exit",
         [],
         TestContextObject::new(12),
         ProgramResult::Err(EbpfError::AccessViolation(
@@ -2261,7 +2261,7 @@ fn test_err_mem_access_out_of_bound() {
     prog[8] = ebpf::MOV32_IMM;
     prog[16] = ebpf::HOR64_IMM;
     prog[24] = ebpf::ST_1B_IMM;
-    prog[32] = ebpf::RETURN;
+    prog[32] = ebpf::EXIT;
     let loader = Arc::new(BuiltinProgram::new_mock());
     for address in [0x2u64, 0x8002u64, 0x80000002u64, 0x8000000000000002u64] {
         LittleEndian::write_u32(&mut prog[12..], address as u32);
@@ -3604,13 +3604,13 @@ fn test_call_imm_does_not_dispatch_syscalls() {
         "
         add64 r10, 0
         call function_foo
-        return
+        exit
         syscall bpf_syscall_string
-        return
+        exit
         function_foo:
         add64 r10, 0
         mov r0, 42
-        return",
+        exit",
         [],
         (
             "bpf_syscall_string" => syscalls::SyscallString::vm,
@@ -3629,7 +3629,7 @@ fn test_callx_unsupported_instruction_and_exceeded_max_instructions() {
         add64 r5, -8
         add64 r7, 0
         callx r5
-        return",
+        exit",
         [],
         TestContextObject::new(5),
         ProgramResult::Err(EbpfError::CallOutsideTextSegment),
