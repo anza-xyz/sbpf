@@ -33,7 +33,7 @@ impl SBPFVersion {
 
     /// Enable SIMD-0174: SBPF arithmetics improvements
     pub fn enable_pqr(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
     /// ... SIMD-0174
     pub fn explicit_sign_extension_of_results(self) -> bool {
@@ -41,28 +41,28 @@ impl SBPFVersion {
     }
     /// ... SIMD-0174
     pub fn swap_sub_reg_imm_operands(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
     /// ... SIMD-0174
     pub fn disable_neg(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
 
     /// Enable SIMD-0173: SBPF instruction encoding improvements
     pub fn callx_uses_src_reg(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
     /// ... SIMD-0173
     pub fn disable_lddw(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
     /// ... SIMD-0173
     pub fn disable_le(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
     /// ... SIMD-0173
     pub fn move_memory_instruction_classes(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
 
     /// Enable SIMD-0178: SBPF Static Syscalls
