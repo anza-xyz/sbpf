@@ -269,16 +269,14 @@ pub fn disassemble_instruction<C: ContextObject>(
             let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
             let mut name = "call";
             let mut function_name = function_registry.lookup_by_key(key).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
-            if !sbpf_version.static_syscalls() && function_name.is_none() {
+            if (function_name.is_none() && !sbpf_version.static_syscalls()) || insn.src == 0 {
                 name = "syscall";
                 function_name = loader.get_function_registry().lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
             }
-            desc = format!("{} {}", name, function_name.unwrap_or_else(|| "[invalid]".to_string()));
+            desc = format!("{} {}", name, function_name.unwrap_or_else(|| format!("{}", insn.imm)));
         },
         ebpf::CALL_REG   => { name = "callx"; desc = format!("{} r{}", name, if sbpf_version.callx_uses_src_reg() { insn.src } else { insn.imm as u8 }); },
-        ebpf::EXIT     if !sbpf_version.static_syscalls() => { name = "exit"; desc = name.to_string(); },
-        ebpf::RETURN   if sbpf_version.static_syscalls() =>  { name = "return"; desc = name.to_string(); },
-        ebpf::SYSCALL  if sbpf_version.static_syscalls() =>  { desc = format!("syscall {}", insn.imm); },
+        ebpf::EXIT       => { name = "exit"; desc = name.to_string(); },
 
         _                => { name = "unknown"; desc = format!("{} opcode={:#x}", name, insn.opc); },
     };

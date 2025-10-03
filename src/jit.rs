@@ -794,7 +794,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                         .executable
                         .get_sbpf_version()
                         .calculate_call_imm_target_pc(self.pc, insn.imm);
-                    if self.executable.get_sbpf_version().static_syscalls() {
+                    if self.executable.get_sbpf_version().static_syscalls() && insn.src == 1 {
                         // BPF to BPF call
                         self.emit_internal_call(Value::Constant64(key as i64, true));
                     } else if let Some((_, function)) =
@@ -812,13 +812,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION, 5)));
                     }
                 },
-                ebpf::SYSCALL if self.executable.get_sbpf_version().static_syscalls() => {
-                    if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
-                        self.emit_syscall_dispatch(function);
-                    } else {
-                        debug_assert!(false, "Invalid syscall should have been detected in the verifier.")
-                    }
-                },
                 ebpf::CALL_REG  => {
                     let target_pc = if self.executable.get_sbpf_version().callx_uses_src_reg() {
                         src
@@ -827,12 +820,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     };
                     self.emit_internal_call(Value::Register(target_pc));
                 },
-                ebpf::RETURN
-                | ebpf::EXIT      => {
-                    if (insn.opc == ebpf::EXIT && self.executable.get_sbpf_version().static_syscalls())
-                        || (insn.opc == ebpf::RETURN && !self.executable.get_sbpf_version().static_syscalls()) {
-                        return Err(EbpfError::UnsupportedInstruction);
-                    }
+                ebpf::EXIT      => {
                     self.emit_validate_and_profile_instruction_count(Some(0));
 
                     let call_depth_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::CallDepth));

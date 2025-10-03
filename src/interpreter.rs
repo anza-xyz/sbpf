@@ -262,8 +262,8 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                                 self.reg[dst] = self.sign_extension((self.reg[dst] as i32).wrapping_sub(insn.imm as i32))
             },
             ebpf::SUB32_REG  => self.reg[dst] = self.sign_extension((self.reg[dst] as i32).wrapping_sub(self.reg[src] as i32)),
-            ebpf::MUL32_IMM  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] = (self.reg[dst] as i32).wrapping_mul(insn.imm as i32)      as u64,
-            ebpf::MUL32_REG  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] = (self.reg[dst] as i32).wrapping_mul(self.reg[src] as i32) as u64,
+            ebpf::MUL32_IMM  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] = self.sign_extension((self.reg[dst] as i32).wrapping_mul(insn.imm as i32)     ),
+            ebpf::MUL32_REG  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] = self.sign_extension((self.reg[dst] as i32).wrapping_mul(self.reg[src] as i32)),
             ebpf::LD_1B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[src] as i64).wrapping_add(insn.off as i64) as u64;
                 self.reg[dst] = translate_memory_access!(self, load, vm_addr, u8);
@@ -524,7 +524,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                     .executable
                     .get_sbpf_version()
                     .calculate_call_imm_target_pc(self.reg[11] as usize, insn.imm);
-                if self.executable.get_sbpf_version().static_syscalls() {
+                if self.executable.get_sbpf_version().static_syscalls() && insn.src == 1 {
                     // make BPF to BPF call
                     if !self.push_frame(config) {
                         return false;
@@ -549,24 +549,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                     throw_error!(self, EbpfError::UnsupportedInstruction);
                 }
             }
-            ebpf::SYSCALL if self.executable.get_sbpf_version().static_syscalls() => {
-                if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
-                    // SBPFv3 syscall
-                    self.reg[0] = match self.dispatch_syscall(function) {
-                        ProgramResult::Ok(value) => *value,
-                        ProgramResult::Err(_err) => return false,
-                    };
-                } else {
-                    debug_assert!(false, "Invalid syscall should have been detected in the verifier.");
-                }
-            },
-            ebpf::RETURN
-            | ebpf::EXIT       => {
-                if (insn.opc == ebpf::EXIT && self.executable.get_sbpf_version().static_syscalls())
-                    || (insn.opc == ebpf::RETURN && !self.executable.get_sbpf_version().static_syscalls()) {
-                    throw_error!(self, EbpfError::UnsupportedInstruction);
-                }
-
+            ebpf::EXIT       => {
                 if self.vm.call_depth == 0 {
                     if config.enable_instruction_meter && self.vm.due_insn_count > self.vm.previous_instruction_meter {
                         throw_error!(self, EbpfError::ExceededMaxInstructions);
