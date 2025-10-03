@@ -524,7 +524,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                     .executable
                     .get_sbpf_version()
                     .calculate_call_imm_target_pc(self.reg[11] as usize, insn.imm);
-                if self.executable.get_sbpf_version().static_syscalls() {
+                if self.executable.get_sbpf_version().static_syscalls() && insn.src == 1 {
                     // make BPF to BPF call
                     if !self.push_frame(config) {
                         return false;
@@ -549,24 +549,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                     throw_error!(self, EbpfError::UnsupportedInstruction);
                 }
             }
-            ebpf::SYSCALL if self.executable.get_sbpf_version().static_syscalls() => {
-                if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
-                    // SBPFv3 syscall
-                    self.reg[0] = match self.dispatch_syscall(function) {
-                        ProgramResult::Ok(value) => *value,
-                        ProgramResult::Err(_err) => return false,
-                    };
-                } else {
-                    debug_assert!(false, "Invalid syscall should have been detected in the verifier.");
-                }
-            },
-            ebpf::RETURN
-            | ebpf::EXIT       => {
-                if (insn.opc == ebpf::EXIT && self.executable.get_sbpf_version().static_syscalls())
-                    || (insn.opc == ebpf::RETURN && !self.executable.get_sbpf_version().static_syscalls()) {
-                    throw_error!(self, EbpfError::UnsupportedInstruction);
-                }
-
+            ebpf::EXIT       => {
                 if self.vm.call_depth == 0 {
                     if config.enable_instruction_meter && self.vm.due_insn_count > self.vm.previous_instruction_meter {
                         throw_error!(self, EbpfError::ExceededMaxInstructions);

@@ -112,28 +112,13 @@ fn make_instruction_map(sbpf_version: SBPFVersion) -> HashMap<String, (Instructi
             result.insert(name.to_string(), (inst_type, opc))
         };
 
-        if sbpf_version == SBPFVersion::V0 {
-            entry("exit", NoOperand, ebpf::EXIT);
-            entry("return", NoOperand, ebpf::EXIT);
-        } else {
-            entry("exit", NoOperand, ebpf::RETURN);
-            entry("return", NoOperand, ebpf::RETURN);
-        }
-
         // Miscellaneous.
+        entry("lddw", LoadDwImm, ebpf::LD_DW_IMM);
         entry("ja", JumpUnconditional, ebpf::JA);
-        entry(
-            "syscall",
-            Syscall,
-            if sbpf_version == SBPFVersion::V0 {
-                ebpf::CALL_IMM
-            } else {
-                ebpf::SYSCALL
-            },
-        );
+        entry("syscall", Syscall, ebpf::CALL_IMM);
         entry("call", CallImm, ebpf::CALL_IMM);
         entry("callx", CallReg, ebpf::CALL_REG);
-        entry("lddw", LoadDwImm, ebpf::LD_DW_IMM);
+        entry("exit", NoOperand, ebpf::EXIT);
 
         // AluUnary.
         entry("neg", AluUnary, ebpf::NEG64);
@@ -312,7 +297,7 @@ fn resolve_label(
 /// #              0xbf, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 /// #              0xdc, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00,
 /// #              0x87, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-/// #              0x9d, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+/// #              0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
 /// ```
 ///
 /// This will produce the following output:
@@ -425,11 +410,6 @@ pub fn assemble<C: ContextObject>(
                                 insn(opc, 0, 0, resolve_label(insn_ptr, &labels, label)?, 0)
                             }
                             (CallImm, [Integer(imm)]) => {
-                                let instr_imm = if sbpf_version.static_syscalls() {
-                                    *imm
-                                } else {
-                                    *imm + insn_ptr as i64 + 1
-                                };
                                 let target_pc = *imm + insn_ptr as i64 + 1;
                                 let label = format!("function_{}", target_pc as usize);
                                 function_registry
@@ -439,8 +419,32 @@ pub fn assemble<C: ContextObject>(
                                         target_pc as usize,
                                     )
                                     .map_err(|_| format!("Label hash collision {name}"))?;
-                                insn(opc, 0, 0, 0, instr_imm)
+                                let instr_imm = if sbpf_version.static_syscalls() {
+                                    *imm
+                                } else {
+                                    target_pc
+                                };
+                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, instr_imm)
                             }
+                            (CallImm, [Label(label)]) => {
+                                let label: &str = label;
+                                let mut target_pc = *labels
+                                    .get(label)
+                                    .ok_or_else(|| format!("Label not found {label}"))?
+                                    as i64;
+                                if sbpf_version.static_syscalls() {
+                                    target_pc = target_pc - insn_ptr as i64 - 1;
+                                }
+                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, target_pc)
+                            }
+                            (Syscall, [Label(label)]) => insn(
+                                opc,
+                                0,
+                                0,
+                                0,
+                                ebpf::hash_symbol_name(label.as_bytes()) as i32 as i64,
+                            ),
+                            (Syscall, [Integer(imm)]) => insn(opc, 0, 0, 0, *imm),
                             (CallReg, [Register(dst)]) => {
                                 if sbpf_version.callx_uses_src_reg() {
                                     insn(opc, 0, *dst, 0, 0)
@@ -464,25 +468,6 @@ pub fn assemble<C: ContextObject>(
                                 resolve_label(insn_ptr, &labels, label)?,
                                 *imm,
                             ),
-                            (Syscall, [Label(label)]) => insn(
-                                opc,
-                                0,
-                                0,
-                                0,
-                                ebpf::hash_symbol_name(label.as_bytes()) as i32 as i64,
-                            ),
-                            (Syscall, [Integer(imm)]) => insn(opc, 0, 0, 0, *imm),
-                            (CallImm, [Label(label)]) => {
-                                let label: &str = label;
-                                let mut target_pc = *labels
-                                    .get(label)
-                                    .ok_or_else(|| format!("Label not found {label}"))?
-                                    as i64;
-                                if sbpf_version.static_syscalls() {
-                                    target_pc = target_pc - insn_ptr as i64 - 1;
-                                }
-                                insn(opc, 0, 1, 0, target_pc)
-                            }
                             (Endian(size), [Register(dst)]) => insn(opc, *dst, 0, 0, size),
                             (LoadDwImm, [Register(dst), Integer(imm)]) => {
                                 insn(opc, *dst, 0, 0, (*imm << 32) >> 32)
