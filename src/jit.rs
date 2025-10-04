@@ -762,7 +762,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 // BPF_JMP class
                 ebpf::JA         => {
                     self.emit_validate_and_profile_instruction_count(Some(target_pc));
-                    self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, target_pc as i64));
                     let jump_offset = self.relative_to_target_pc(target_pc, 5);
                     self.emit_ins(X86Instruction::jump_immediate(jump_offset));
                 },
@@ -1242,7 +1241,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         } else { // Arithmetic
             self.emit_ins(X86Instruction::cmp(OperandSize::S64, first_operand, second_operand, None));
         }
-        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, target_pc as i64));
         let jump_offset = self.relative_to_target_pc(target_pc, 6);
         self.emit_ins(X86Instruction::conditional_jump_immediate(op, jump_offset));
         self.emit_undo_profile_instruction_count(target_pc);
@@ -1262,7 +1260,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         } else { // Arithmetic
             self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S64, second_operand, immediate, None));
         }
-        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, target_pc as i64));
         let jump_offset = self.relative_to_target_pc(target_pc, 6);
         self.emit_ins(X86Instruction::conditional_jump_immediate(op, jump_offset));
         self.emit_undo_profile_instruction_count(target_pc);
