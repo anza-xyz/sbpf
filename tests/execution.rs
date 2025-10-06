@@ -3626,13 +3626,13 @@ fn test_callx_unsupported_instruction_and_exceeded_max_instructions() {
         "
         add64 r10, 0
         sub32 r7, r1
-        sub64 r5, 8
-        sub64 r7, 0
+        add64 r5, -8
+        add64 r7, 0
         callx r5
         return",
         [],
         TestContextObject::new(5),
-        ProgramResult::Err(EbpfError::UnsupportedInstruction),
+        ProgramResult::Err(EbpfError::CallOutsideTextSegment),
     );
 }
 
