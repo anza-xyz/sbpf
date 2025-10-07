@@ -277,6 +277,34 @@ impl<'a> Analysis<'a> {
                     self.cfg_nodes.entry(target_pc).or_default();
                     cfg_edges.insert(insn.ptr, (insn.opc, vec![target_pc]));
                 }
+                ebpf::JEQ32_IMM
+                | ebpf::JGT32_IMM
+                | ebpf::JGE32_IMM
+                | ebpf::JLT32_IMM
+                | ebpf::JLE32_IMM
+                | ebpf::JSET32_IMM
+                | ebpf::JNE32_IMM
+                | ebpf::JSGT32_IMM
+                | ebpf::JSGE32_IMM
+                | ebpf::JSLT32_IMM
+                | ebpf::JSLE32_IMM
+                | ebpf::JEQ32_REG
+                | ebpf::JGT32_REG
+                | ebpf::JGE32_REG
+                | ebpf::JLT32_REG
+                | ebpf::JLE32_REG
+                | ebpf::JSET32_REG
+                | ebpf::JNE32_REG
+                | ebpf::JSGT32_REG
+                | ebpf::JSGE32_REG
+                | ebpf::JSLT32_REG
+                | ebpf::JSLE32_REG
+                    if sbpf_version.enable_jmp32() =>
+                {
+                    self.cfg_nodes.entry(insn.ptr + 1).or_default();
+                    self.cfg_nodes.entry(target_pc).or_default();
+                    cfg_edges.insert(insn.ptr, (insn.opc, vec![insn.ptr + 1, target_pc]));
+                }
                 ebpf::JEQ64_IMM
                 | ebpf::JGT64_IMM
                 | ebpf::JGE64_IMM
