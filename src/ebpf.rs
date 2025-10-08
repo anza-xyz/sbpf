@@ -473,7 +473,7 @@ pub const JSLE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSLE;
 /// BPF opcode: `jsle32 dst, src, +off` /// `PC += off if dst <= src (signed)`.
 pub const JSLE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSLE;
 
-/// BPF opcode: `ja64 +off` /// `PC += off`.
+/// BPF opcode: `ja +off` /// `PC += off`.
 pub const JA: u8 = BPF_JMP64 | BPF_JA;
 /// BPF opcode: `jeq64 dst, imm, +off` /// `PC += off if dst == imm`.
 pub const JEQ64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JEQ;
