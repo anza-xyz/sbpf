@@ -64,8 +64,10 @@ pub const BPF_ST: u8 = 0x02;
 pub const BPF_STX: u8 = 0x03;
 /// BPF operation class: 32 bit arithmetic or load.
 pub const BPF_ALU32_LOAD: u8 = 0x04;
-/// BPF operation class: control flow.
-pub const BPF_JMP: u8 = 0x05;
+/// BPF operation class: 64 bit control flow.
+pub const BPF_JMP64: u8 = 0x05;
+/// BPF operation class: 32 bit control flow.
+pub const BPF_JMP32: u8 = 0x06;
 /// BPF operation class: product / quotient / remainder.
 pub const BPF_PQR: u8 = 0x06;
 /// BPF operation class: 64 bit arithmetic or store.
@@ -109,7 +111,7 @@ pub const BPF_MEM: u8 = 0x60;
 // [ 0xa0 reserved ]
 // [ 0xc0 reserved ]
 
-// For arithmetic (BPF_ALU/BPF_ALU64_STORE) and jump (BPF_JMP) instructions:
+// For arithmetic (BPF_ALU/BPF_ALU64_STORE) and jump (BPF_JMP64) instructions:
 // +----------------+--------+--------+
 // |     4 bits     |1 b.|   3 bits   |
 // | operation code | src| insn class |
@@ -173,7 +175,7 @@ pub const BPF_SDIV: u8 = 0xC0;
 /// BPF PQR operation code: signed division remainder.
 pub const BPF_SREM: u8 = 0xE0;
 
-// Operation codes -- BPF_JMP class:
+// Operation codes -- BPF_JMP32 and BPF_JMP64 classes:
 /// BPF JMP operation code: jump.
 pub const BPF_JA: u8 = 0x00;
 /// BPF JMP operation code: jump if equal.
@@ -426,59 +428,103 @@ pub const SREM64_IMM: u8 = BPF_PQR | BPF_B | BPF_K | BPF_SREM;
 /// BPF opcode: `srem64 dst, src` /// `dst %= src`.
 pub const SREM64_REG: u8 = BPF_PQR | BPF_B | BPF_X | BPF_SREM;
 
-/// BPF opcode: `ja +off` /// `PC += off`.
-pub const JA: u8 = BPF_JMP | BPF_JA;
-/// BPF opcode: `jeq dst, imm, +off` /// `PC += off if dst == imm`.
-pub const JEQ_IMM: u8 = BPF_JMP | BPF_K | BPF_JEQ;
-/// BPF opcode: `jeq dst, src, +off` /// `PC += off if dst == src`.
-pub const JEQ_REG: u8 = BPF_JMP | BPF_X | BPF_JEQ;
-/// BPF opcode: `jgt dst, imm, +off` /// `PC += off if dst > imm`.
-pub const JGT_IMM: u8 = BPF_JMP | BPF_K | BPF_JGT;
-/// BPF opcode: `jgt dst, src, +off` /// `PC += off if dst > src`.
-pub const JGT_REG: u8 = BPF_JMP | BPF_X | BPF_JGT;
-/// BPF opcode: `jge dst, imm, +off` /// `PC += off if dst >= imm`.
-pub const JGE_IMM: u8 = BPF_JMP | BPF_K | BPF_JGE;
-/// BPF opcode: `jge dst, src, +off` /// `PC += off if dst >= src`.
-pub const JGE_REG: u8 = BPF_JMP | BPF_X | BPF_JGE;
-/// BPF opcode: `jlt dst, imm, +off` /// `PC += off if dst < imm`.
-pub const JLT_IMM: u8 = BPF_JMP | BPF_K | BPF_JLT;
-/// BPF opcode: `jlt dst, src, +off` /// `PC += off if dst < src`.
-pub const JLT_REG: u8 = BPF_JMP | BPF_X | BPF_JLT;
-/// BPF opcode: `jle dst, imm, +off` /// `PC += off if dst <= imm`.
-pub const JLE_IMM: u8 = BPF_JMP | BPF_K | BPF_JLE;
-/// BPF opcode: `jle dst, src, +off` /// `PC += off if dst <= src`.
-pub const JLE_REG: u8 = BPF_JMP | BPF_X | BPF_JLE;
-/// BPF opcode: `jset dst, imm, +off` /// `PC += off if dst & imm`.
-pub const JSET_IMM: u8 = BPF_JMP | BPF_K | BPF_JSET;
-/// BPF opcode: `jset dst, src, +off` /// `PC += off if dst & src`.
-pub const JSET_REG: u8 = BPF_JMP | BPF_X | BPF_JSET;
-/// BPF opcode: `jne dst, imm, +off` /// `PC += off if dst != imm`.
-pub const JNE_IMM: u8 = BPF_JMP | BPF_K | BPF_JNE;
-/// BPF opcode: `jne dst, src, +off` /// `PC += off if dst != src`.
-pub const JNE_REG: u8 = BPF_JMP | BPF_X | BPF_JNE;
-/// BPF opcode: `jsgt dst, imm, +off` /// `PC += off if dst > imm (signed)`.
-pub const JSGT_IMM: u8 = BPF_JMP | BPF_K | BPF_JSGT;
-/// BPF opcode: `jsgt dst, src, +off` /// `PC += off if dst > src (signed)`.
-pub const JSGT_REG: u8 = BPF_JMP | BPF_X | BPF_JSGT;
-/// BPF opcode: `jsge dst, imm, +off` /// `PC += off if dst >= imm (signed)`.
-pub const JSGE_IMM: u8 = BPF_JMP | BPF_K | BPF_JSGE;
-/// BPF opcode: `jsge dst, src, +off` /// `PC += off if dst >= src (signed)`.
-pub const JSGE_REG: u8 = BPF_JMP | BPF_X | BPF_JSGE;
-/// BPF opcode: `jslt dst, imm, +off` /// `PC += off if dst < imm (signed)`.
-pub const JSLT_IMM: u8 = BPF_JMP | BPF_K | BPF_JSLT;
-/// BPF opcode: `jslt dst, src, +off` /// `PC += off if dst < src (signed)`.
-pub const JSLT_REG: u8 = BPF_JMP | BPF_X | BPF_JSLT;
-/// BPF opcode: `jsle dst, imm, +off` /// `PC += off if dst <= imm (signed)`.
-pub const JSLE_IMM: u8 = BPF_JMP | BPF_K | BPF_JSLE;
-/// BPF opcode: `jsle dst, src, +off` /// `PC += off if dst <= src (signed)`.
-pub const JSLE_REG: u8 = BPF_JMP | BPF_X | BPF_JSLE;
+/// BPF opcode: `jeq32 dst, imm, +off` /// `PC += off if dst == imm`.
+pub const JEQ32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JEQ;
+/// BPF opcode: `jeq32 dst, src, +off` /// `PC += off if dst == src`.
+pub const JEQ32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JEQ;
+/// BPF opcode: `jgt32 dst, imm, +off` /// `PC += off if dst > imm`.
+pub const JGT32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JGT;
+/// BPF opcode: `jgt32 dst, src, +off` /// `PC += off if dst > src`.
+pub const JGT32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JGT;
+/// BPF opcode: `jge32 dst, imm, +off` /// `PC += off if dst >= imm`.
+pub const JGE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JGE;
+/// BPF opcode: `jge32 dst, src, +off` /// `PC += off if dst >= src`.
+pub const JGE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JGE;
+/// BPF opcode: `jlt32 dst, imm, +off` /// `PC += off if dst < imm`.
+pub const JLT32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JLT;
+/// BPF opcode: `jlt32 dst, src, +off` /// `PC += off if dst < src`.
+pub const JLT32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JLT;
+/// BPF opcode: `jle32 dst, imm, +off` /// `PC += off if dst <= imm`.
+pub const JLE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JLE;
+/// BPF opcode: `jle32 dst, src, +off` /// `PC += off if dst <= src`.
+pub const JLE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JLE;
+/// BPF opcode: `jset32 dst, imm, +off` /// `PC += off if dst & imm`.
+pub const JSET32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSET;
+/// BPF opcode: `jset32 dst, src, +off` /// `PC += off if dst & src`.
+pub const JSET32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSET;
+/// BPF opcode: `jne32 dst, imm, +off` /// `PC += off if dst != imm`.
+pub const JNE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JNE;
+/// BPF opcode: `jne32 dst, src, +off` /// `PC += off if dst != src`.
+pub const JNE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JNE;
+/// BPF opcode: `jsgt32 dst, imm, +off` /// `PC += off if dst > imm (signed)`.
+pub const JSGT32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSGT;
+/// BPF opcode: `jsgt32 dst, src, +off` /// `PC += off if dst > src (signed)`.
+pub const JSGT32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSGT;
+/// BPF opcode: `jsge32 dst, imm, +off` /// `PC += off if dst >= imm (signed)`.
+pub const JSGE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSGE;
+/// BPF opcode: `jsge32 dst, src, +off` /// `PC += off if dst >= src (signed)`.
+pub const JSGE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSGE;
+/// BPF opcode: `jslt32 dst, imm, +off` /// `PC += off if dst < imm (signed)`.
+pub const JSLT32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSLT;
+/// BPF opcode: `jslt32 dst, src, +off` /// `PC += off if dst < src (signed)`.
+pub const JSLT32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSLT;
+/// BPF opcode: `jsle32 dst, imm, +off` /// `PC += off if dst <= imm (signed)`.
+pub const JSLE32_IMM: u8 = BPF_JMP32 | BPF_K | BPF_JSLE;
+/// BPF opcode: `jsle32 dst, src, +off` /// `PC += off if dst <= src (signed)`.
+pub const JSLE32_REG: u8 = BPF_JMP32 | BPF_X | BPF_JSLE;
 
-/// BPF opcode: `call imm` /// syscall function call to syscall with key `imm`.
-pub const CALL_IMM: u8 = BPF_JMP | BPF_CALL;
-/// BPF opcode: tail call.
-pub const CALL_REG: u8 = BPF_JMP | BPF_X | BPF_CALL;
+/// BPF opcode: `ja +off` /// `PC += off`.
+pub const JA: u8 = BPF_JMP64 | BPF_JA;
+/// BPF opcode: `jeq64 dst, imm, +off` /// `PC += off if dst == imm`.
+pub const JEQ64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JEQ;
+/// BPF opcode: `jeq64 dst, src, +off` /// `PC += off if dst == src`.
+pub const JEQ64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JEQ;
+/// BPF opcode: `jgt64 dst, imm, +off` /// `PC += off if dst > imm`.
+pub const JGT64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JGT;
+/// BPF opcode: `jgt64 dst, src, +off` /// `PC += off if dst > src`.
+pub const JGT64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JGT;
+/// BPF opcode: `jge64 dst, imm, +off` /// `PC += off if dst >= imm`.
+pub const JGE64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JGE;
+/// BPF opcode: `jge64 dst, src, +off` /// `PC += off if dst >= src`.
+pub const JGE64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JGE;
+/// BPF opcode: `jlt64 dst, imm, +off` /// `PC += off if dst < imm`.
+pub const JLT64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JLT;
+/// BPF opcode: `jlt64 dst, src, +off` /// `PC += off if dst < src`.
+pub const JLT64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JLT;
+/// BPF opcode: `jle64 dst, imm, +off` /// `PC += off if dst <= imm`.
+pub const JLE64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JLE;
+/// BPF opcode: `jle64 dst, src, +off` /// `PC += off if dst <= src`.
+pub const JLE64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JLE;
+/// BPF opcode: `jset64 dst, imm, +off` /// `PC += off if dst & imm`.
+pub const JSET64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JSET;
+/// BPF opcode: `jset64 dst, src, +off` /// `PC += off if dst & src`.
+pub const JSET64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JSET;
+/// BPF opcode: `jne64 dst, imm, +off` /// `PC += off if dst != imm`.
+pub const JNE64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JNE;
+/// BPF opcode: `jne64 dst, src, +off` /// `PC += off if dst != src`.
+pub const JNE64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JNE;
+/// BPF opcode: `jsgt64 dst, imm, +off` /// `PC += off if dst > imm (signed)`.
+pub const JSGT64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JSGT;
+/// BPF opcode: `jsgt64 dst, src, +off` /// `PC += off if dst > src (signed)`.
+pub const JSGT64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JSGT;
+/// BPF opcode: `jsge64 dst, imm, +off` /// `PC += off if dst >= imm (signed)`.
+pub const JSGE64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JSGE;
+/// BPF opcode: `jsge64 dst, src, +off` /// `PC += off if dst >= src (signed)`.
+pub const JSGE64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JSGE;
+/// BPF opcode: `jslt64 dst, imm, +off` /// `PC += off if dst < imm (signed)`.
+pub const JSLT64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JSLT;
+/// BPF opcode: `jslt64 dst, src, +off` /// `PC += off if dst < src (signed)`.
+pub const JSLT64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JSLT;
+/// BPF opcode: `jsle64 dst, imm, +off` /// `PC += off if dst <= imm (signed)`.
+pub const JSLE64_IMM: u8 = BPF_JMP64 | BPF_K | BPF_JSLE;
+/// BPF opcode: `jsle64 dst, src, +off` /// `PC += off if dst <= src (signed)`.
+pub const JSLE64_REG: u8 = BPF_JMP64 | BPF_X | BPF_JSLE;
+/// BPF opcode: `call imm` /// syscall or function call to syscall with key `imm`.
+pub const CALL_IMM: u8 = BPF_JMP64 | BPF_CALL;
+/// BPF opcode: `call reg`
+pub const CALL_REG: u8 = BPF_JMP64 | BPF_X | BPF_CALL;
 /// BPF opcode: `exit` /// `return r0`.
-pub const EXIT: u8 = BPF_JMP | BPF_EXIT;
+pub const EXIT: u8 = BPF_JMP64 | BPF_EXIT;
 
 // Used in JIT
 /// Mask to extract the operation class from an operation code.

@@ -490,7 +490,11 @@ fn test_pqr_v0() {
     prog[17] = 1; // dst = R1
     prog[33] = 16; // src = R1
     prog[40] = ebpf::EXIT;
-    let loader = Arc::new(BuiltinProgram::new_mock());
+    let config = Config {
+        enable_register_tracing: true,
+        ..Config::default()
+    };
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
     for (opc, dst, src, expected_result) in [
         (ebpf::DIV32_IMM, 13u64, 4u64, 3u64),
         (ebpf::DIV64_IMM, 13u64, 4u64, 3u64),
@@ -583,7 +587,11 @@ fn test_pqr_v2() {
     prog[33] = 1; // dst = R1
     prog[41] = 16; // src = R1
     prog[48] = ebpf::EXIT;
-    let loader = Arc::new(BuiltinProgram::new_mock());
+    let config = Config {
+        enable_register_tracing: true,
+        ..Config::default()
+    };
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
     for (opc, dst, src, expected_result) in [
         (ebpf::UHMUL64_IMM, 13u64, 4u64, 0u64),
         (ebpf::UDIV32_IMM, 13u64, 4u64, 3u64),
@@ -749,7 +757,11 @@ fn test_err_pqr_divide_by_zero() {
     prog[1] = 10;
     prog[8] = ebpf::MOV32_IMM;
     prog[24] = ebpf::EXIT;
-    let loader = Arc::new(BuiltinProgram::new_mock());
+    let config = Config {
+        enable_register_tracing: true,
+        ..Config::default()
+    };
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
     for opc in [
         ebpf::UDIV32_REG,
         ebpf::UDIV64_REG,
@@ -1471,445 +1483,85 @@ fn test_ja() {
 }
 
 #[test]
-fn test_jeq_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 0xa
-        jeq r1, 0xb, +4
-        mov32 r0, 1
-        mov32 r1, 0xb
-        jeq r1, 0xb, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jeq_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 0xa
-        mov32 r2, 0xb
-        jeq r1, r2, +4
-        mov32 r0, 1
-        mov32 r1, 0xb
-        jeq r1, r2, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(9),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jge_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 0xa
-        jge r1, 0xb, +4
-        mov32 r0, 1
-        mov32 r1, 0xc
-        jge r1, 0xb, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jge_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 0xa
-        mov32 r2, 0xb
-        jge r1, r2, +4
-        mov32 r0, 1
-        mov32 r1, 0xb
-        jge r1, r2, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(9),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jle_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 5
-        jle r1, 4, +1
-        jle r1, 6, +1
-        exit
-        jle r1, 5, +1
-        exit
-        mov32 r0, 1
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jle_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov r0, 0
-        mov r1, 5
-        mov r2, 4
-        mov r3, 6
-        jle r1, r2, +2
-        jle r1, r1, +1
-        exit
-        jle r1, r3, +1
-        exit
-        mov r0, 1
-        exit",
-        [],
-        TestContextObject::new(10),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jgt_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 5
-        jgt r1, 6, +2
-        jgt r1, 5, +1
-        jgt r1, 4, +1
-        exit
-        mov32 r0, 1
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jgt_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov r0, 0
-        mov r1, 5
-        mov r2, 6
-        mov r3, 4
-        jgt r1, r2, +2
-        jgt r1, r1, +1
-        jgt r1, r3, +1
-        exit
-        mov r0, 1
-        exit",
-        [],
-        TestContextObject::new(10),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jlt_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 5
-        jlt r1, 4, +2
-        jlt r1, 5, +1
-        jlt r1, 6, +1
-        exit
-        mov32 r0, 1
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jlt_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov r0, 0
-        mov r1, 5
-        mov r2, 4
-        mov r3, 6
-        jlt r1, r2, +2
-        jlt r1, r1, +1
-        jlt r1, r3, +1
-        exit
-        mov r0, 1
-        exit",
-        [],
-        TestContextObject::new(10),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jne_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 0xb
-        jne r1, 0xb, +4
-        mov32 r0, 1
-        mov32 r1, 0xa
-        jne r1, 0xb, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jne_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 0xb
-        mov32 r2, 0xb
-        jne r1, r2, +4
-        mov32 r0, 1
-        mov32 r1, 0xa
-        jne r1, r2, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(9),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jset_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 0x7
-        jset r1, 0x8, +4
-        mov32 r0, 1
-        mov32 r1, 0x9
-        jset r1, 0x8, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jset_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov32 r1, 0x7
-        mov32 r2, 0x8
-        jset r1, r2, +4
-        mov32 r0, 1
-        mov32 r1, 0x9
-        jset r1, r2, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(9),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jsge_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov r1, -2
-        jsge r1, -1, +5
-        jsge r1, 0, +4
-        mov32 r0, 1
-        mov r1, -1
-        jsge r1, -1, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(9),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jsge_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov r1, -2
-        mov r2, -1
-        mov32 r3, 0
-        jsge r1, r2, +5
-        jsge r1, r3, +4
-        mov32 r0, 1
-        mov r1, r2
-        jsge r1, r2, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(11),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jsle_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov r1, -2
-        jsle r1, -3, +1
-        jsle r1, -1, +1
-        exit
-        mov32 r0, 1
-        jsle r1, -2, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jsle_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov r1, -1
-        mov r2, -2
-        mov32 r3, 0
-        jsle r1, r2, +1
-        jsle r1, r3, +1
-        exit
-        mov32 r0, 1
-        mov r1, r2
-        jsle r1, r2, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(11),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jsgt_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov r1, -2
-        jsgt r1, -1, +4
-        mov32 r0, 1
-        mov32 r1, 0
-        jsgt r1, -1, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jsgt_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov r1, -2
-        mov r2, -1
-        jsgt r1, r2, +4
-        mov32 r0, 1
-        mov32 r1, 0
-        jsgt r1, r2, +1
-        mov32 r0, 2
-        exit",
-        [],
-        TestContextObject::new(9),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jslt_imm() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov r1, -2
-        jslt r1, -3, +2
-        jslt r1, -2, +1
-        jslt r1, -1, +1
-        exit
-        mov32 r0, 1
-        exit",
-        [],
-        TestContextObject::new(8),
-        ProgramResult::Ok(0x1),
-    );
-}
-
-#[test]
-fn test_jslt_reg() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov32 r0, 0
-        mov r1, -2
-        mov r2, -3
-        mov r3, -1
-        jslt r1, r1, +2
-        jslt r1, r2, +1
-        jslt r1, r3, +1
-        exit
-        mov32 r0, 1
-        exit",
-        [],
-        TestContextObject::new(10),
-        ProgramResult::Ok(0x1),
-    );
+fn test_conditional_jumps() {
+    const THEN: u32 = 0x5448454E;
+    const ELSE: u32 = 0x454C5345;
+    let mut prog = [0; 80];
+    prog[0] = ebpf::ADD64_IMM;
+    prog[1] = 10;
+    prog[8] = ebpf::LD_DW_IMM;
+    prog[9] = 1; // dst = R1
+    prog[17] = 1; // dst = R1
+    prog[24] = ebpf::LD_DW_IMM;
+    prog[41] = 16; // src = R1
+    prog[42] = 2; // offset = +2
+    prog[48] = ebpf::MOV32_IMM;
+    LittleEndian::write_u32(&mut prog[52..], ELSE);
+    prog[56] = ebpf::EXIT;
+    prog[64] = ebpf::MOV32_IMM;
+    LittleEndian::write_u32(&mut prog[68..], THEN);
+    prog[72] = ebpf::EXIT;
+    let config = Config {
+        enable_register_tracing: true,
+        ..Config::default()
+    };
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    for (opc, dst, src, expected_result) in [
+        (ebpf::BPF_JEQ, 3, 3, THEN),
+        (ebpf::BPF_JEQ, 3, 7, ELSE),
+        (ebpf::BPF_JGT, 7, 3, THEN),
+        (ebpf::BPF_JGT, 3, 7, ELSE),
+        (ebpf::BPF_JGE, 3, 3, THEN),
+        (ebpf::BPF_JGE, 7, 3, THEN),
+        (ebpf::BPF_JGE, 3, 7, ELSE),
+        (ebpf::BPF_JLT, 3, 7, THEN),
+        (ebpf::BPF_JLT, 7, 3, ELSE),
+        (ebpf::BPF_JLE, 3, 3, THEN),
+        (ebpf::BPF_JLE, 3, 7, THEN),
+        (ebpf::BPF_JLE, 7, 3, ELSE),
+        (ebpf::BPF_JSET, 3, 7, THEN),
+        (ebpf::BPF_JSET, 2, 4, ELSE),
+        (ebpf::BPF_JNE, 3, 7, THEN),
+        (ebpf::BPF_JNE, 3, 3, ELSE),
+        (ebpf::BPF_JSGT, -3, -7, THEN),
+        (ebpf::BPF_JSGT, -7, -3, ELSE),
+        (ebpf::BPF_JSGE, -3, -3, THEN),
+        (ebpf::BPF_JSGE, -3, -7, THEN),
+        (ebpf::BPF_JSGE, -7, -3, ELSE),
+        (ebpf::BPF_JSLT, -7, -3, THEN),
+        (ebpf::BPF_JSLT, -3, -7, ELSE),
+        (ebpf::BPF_JSLE, -3, -3, THEN),
+        (ebpf::BPF_JSLE, -7, -3, THEN),
+        (ebpf::BPF_JSLE, -3, -7, ELSE),
+    ] {
+        LittleEndian::write_u32(&mut prog[12..], src as u32);
+        LittleEndian::write_u32(&mut prog[20..], (src as i64 >> 32) as u32);
+        LittleEndian::write_u32(&mut prog[28..], dst as u32);
+        LittleEndian::write_u32(&mut prog[36..], (dst as i64 >> 32) as u32);
+        LittleEndian::write_u32(&mut prog[44..], src as u32);
+        for op_class in [
+            ebpf::BPF_JMP32 | ebpf::BPF_K,
+            ebpf::BPF_JMP32 | ebpf::BPF_X,
+            ebpf::BPF_JMP64 | ebpf::BPF_K,
+            ebpf::BPF_JMP64 | ebpf::BPF_X,
+        ] {
+            prog[40] = op_class | opc;
+            #[allow(unused_mut)]
+            let mut executable = Executable::<TestContextObject>::from_text_bytes(
+                &prog,
+                loader.clone(),
+                SBPFVersion::V3,
+                FunctionRegistry::default(),
+            )
+            .unwrap();
+            test_interpreter_and_jit!(
+                executable,
+                [],
+                TestContextObject::new(6),
+                ProgramResult::Ok(expected_result as u64),
+            );
+        }
+    }
 }
 
 // Call Stack
@@ -2265,7 +1917,11 @@ fn test_err_mem_access_out_of_bound() {
     prog[8] = ebpf::LD_DW_IMM;
     prog[24] = ebpf::ST_B_IMM;
     prog[32] = ebpf::EXIT;
-    let loader = Arc::new(BuiltinProgram::new_mock());
+    let config = Config {
+        enable_register_tracing: true,
+        ..Config::default()
+    };
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
     for address in [0x2u64, 0x8002u64, 0x80000002u64, 0x8000000000000002u64] {
         LittleEndian::write_u32(&mut prog[12..], address as u32);
         LittleEndian::write_u32(&mut prog[20..], (address >> 32) as u32);

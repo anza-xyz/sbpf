@@ -525,7 +525,7 @@ impl Instruction for Jump<'_> {
     fn opt_code_byte(&self) -> u8 {
         let cmp: u8 = self.cond as u8;
         let src_bit = self.src_bit as u8;
-        cmp | src_bit | BPF_JMP
+        cmp | src_bit | BPF_JMP64
     }
 
     fn get_insn_mut(&mut self) -> &mut Insn {
@@ -587,7 +587,7 @@ impl<'i> FunctionCall<'i> {
 
 impl Instruction for FunctionCall<'_> {
     fn opt_code_byte(&self) -> u8 {
-        BPF_CALL | BPF_JMP
+        BPF_CALL | BPF_JMP64
     }
 
     fn get_insn_mut(&mut self) -> &mut Insn {
@@ -616,7 +616,7 @@ impl<'i> Exit<'i> {
 
 impl Instruction for Exit<'_> {
     fn opt_code_byte(&self) -> u8 {
-        BPF_EXIT | BPF_JMP
+        BPF_EXIT | BPF_JMP64
     }
 
     fn get_insn_mut(&mut self) -> &mut Insn {

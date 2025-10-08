@@ -207,7 +207,7 @@ impl<'a> Analysis<'a> {
         result.control_flow_graph_tarjan();
         result.control_flow_graph_dominance_hierarchy();
         result.label_basic_blocks();
-        let basic_block_outputs = result.intra_basic_block_data_flow();
+        let basic_block_outputs = result.intra_basic_block_data_flow(executable.get_sbpf_version());
         result.inter_basic_block_data_flow(basic_block_outputs);
         Ok(result)
     }
@@ -277,28 +277,56 @@ impl<'a> Analysis<'a> {
                     self.cfg_nodes.entry(target_pc).or_default();
                     cfg_edges.insert(insn.ptr, (insn.opc, vec![target_pc]));
                 }
-                ebpf::JEQ_IMM
-                | ebpf::JGT_IMM
-                | ebpf::JGE_IMM
-                | ebpf::JLT_IMM
-                | ebpf::JLE_IMM
-                | ebpf::JSET_IMM
-                | ebpf::JNE_IMM
-                | ebpf::JSGT_IMM
-                | ebpf::JSGE_IMM
-                | ebpf::JSLT_IMM
-                | ebpf::JSLE_IMM
-                | ebpf::JEQ_REG
-                | ebpf::JGT_REG
-                | ebpf::JGE_REG
-                | ebpf::JLT_REG
-                | ebpf::JLE_REG
-                | ebpf::JSET_REG
-                | ebpf::JNE_REG
-                | ebpf::JSGT_REG
-                | ebpf::JSGE_REG
-                | ebpf::JSLT_REG
-                | ebpf::JSLE_REG => {
+                ebpf::JEQ32_IMM
+                | ebpf::JGT32_IMM
+                | ebpf::JGE32_IMM
+                | ebpf::JLT32_IMM
+                | ebpf::JLE32_IMM
+                | ebpf::JSET32_IMM
+                | ebpf::JNE32_IMM
+                | ebpf::JSGT32_IMM
+                | ebpf::JSGE32_IMM
+                | ebpf::JSLT32_IMM
+                | ebpf::JSLE32_IMM
+                | ebpf::JEQ32_REG
+                | ebpf::JGT32_REG
+                | ebpf::JGE32_REG
+                | ebpf::JLT32_REG
+                | ebpf::JLE32_REG
+                | ebpf::JSET32_REG
+                | ebpf::JNE32_REG
+                | ebpf::JSGT32_REG
+                | ebpf::JSGE32_REG
+                | ebpf::JSLT32_REG
+                | ebpf::JSLE32_REG
+                    if sbpf_version.enable_jmp32() =>
+                {
+                    self.cfg_nodes.entry(insn.ptr + 1).or_default();
+                    self.cfg_nodes.entry(target_pc).or_default();
+                    cfg_edges.insert(insn.ptr, (insn.opc, vec![insn.ptr + 1, target_pc]));
+                }
+                ebpf::JEQ64_IMM
+                | ebpf::JGT64_IMM
+                | ebpf::JGE64_IMM
+                | ebpf::JLT64_IMM
+                | ebpf::JLE64_IMM
+                | ebpf::JSET64_IMM
+                | ebpf::JNE64_IMM
+                | ebpf::JSGT64_IMM
+                | ebpf::JSGE64_IMM
+                | ebpf::JSLT64_IMM
+                | ebpf::JSLE64_IMM
+                | ebpf::JEQ64_REG
+                | ebpf::JGT64_REG
+                | ebpf::JGE64_REG
+                | ebpf::JLT64_REG
+                | ebpf::JLE64_REG
+                | ebpf::JSET64_REG
+                | ebpf::JNE64_REG
+                | ebpf::JSGT64_REG
+                | ebpf::JSGE64_REG
+                | ebpf::JSLT64_REG
+                | ebpf::JSLE64_REG => {
                     self.cfg_nodes.entry(insn.ptr + 1).or_default();
                     self.cfg_nodes.entry(target_pc).or_default();
                     cfg_edges.insert(insn.ptr, (insn.opc, vec![insn.ptr + 1, target_pc]));
@@ -911,7 +939,10 @@ impl<'a> Analysis<'a> {
     }
 
     /// Connect the dependencies between the instructions inside of the basic blocks
-    pub fn intra_basic_block_data_flow(&mut self) -> BTreeMap<usize, HashMap<DataResource, usize>> {
+    pub fn intra_basic_block_data_flow(
+        &mut self,
+        sbpf_version: SBPFVersion,
+    ) -> BTreeMap<usize, HashMap<DataResource, usize>> {
         fn bind(
             state: &mut (
                 usize,
@@ -951,6 +982,90 @@ impl<'a> Analysis<'a> {
                 state.0 = *basic_block_start;
                 for insn in self.instructions[basic_block.instructions.clone()].iter() {
                     match insn.opc {
+                        ebpf::JEQ32_IMM
+                        | ebpf::JGT32_IMM
+                        | ebpf::JGE32_IMM
+                        | ebpf::JLT32_IMM
+                        | ebpf::JLE32_IMM
+                        | ebpf::JSET32_IMM
+                        | ebpf::JNE32_IMM
+                        | ebpf::JSGT32_IMM
+                        | ebpf::JSGE32_IMM
+                        | ebpf::JSLT32_IMM
+                        | ebpf::JSLE32_IMM
+                            if sbpf_version.enable_jmp32() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                        }
+                        ebpf::JEQ32_REG
+                        | ebpf::JGT32_REG
+                        | ebpf::JGE32_REG
+                        | ebpf::JLT32_REG
+                        | ebpf::JLE32_REG
+                        | ebpf::JSET32_REG
+                        | ebpf::JNE32_REG
+                        | ebpf::JSGT32_REG
+                        | ebpf::JSGE32_REG
+                        | ebpf::JSLT32_REG
+                        | ebpf::JSLE32_REG
+                            if sbpf_version.enable_jmp32() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.src));
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                        }
+                        ebpf::JEQ64_IMM
+                        | ebpf::JGT64_IMM
+                        | ebpf::JGE64_IMM
+                        | ebpf::JLT64_IMM
+                        | ebpf::JLE64_IMM
+                        | ebpf::JSET64_IMM
+                        | ebpf::JNE64_IMM
+                        | ebpf::JSGT64_IMM
+                        | ebpf::JSGE64_IMM
+                        | ebpf::JSLT64_IMM
+                        | ebpf::JSLE64_IMM => {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                        }
+                        ebpf::JEQ64_REG
+                        | ebpf::JGT64_REG
+                        | ebpf::JGE64_REG
+                        | ebpf::JLT64_REG
+                        | ebpf::JLE64_REG
+                        | ebpf::JSET64_REG
+                        | ebpf::JNE64_REG
+                        | ebpf::JSGT64_REG
+                        | ebpf::JSGE64_REG
+                        | ebpf::JSLT64_REG
+                        | ebpf::JSLE64_REG => {
+                            bind(&mut state, insn, false, DataResource::Register(insn.src));
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                        }
+                        ebpf::CALL_REG | ebpf::CALL_IMM => {
+                            if insn.opc == ebpf::CALL_REG
+                                && !(ebpf::FIRST_SCRATCH_REG
+                                    ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS)
+                                    .contains(&(insn.imm as usize))
+                            {
+                                bind(
+                                    &mut state,
+                                    insn,
+                                    false,
+                                    DataResource::Register(insn.imm as u8),
+                                );
+                            }
+                            bind(&mut state, insn, false, DataResource::Memory);
+                            bind(&mut state, insn, true, DataResource::Memory);
+                            for reg in (0..ebpf::FIRST_SCRATCH_REG).chain([10].iter().cloned()) {
+                                bind(&mut state, insn, false, DataResource::Register(reg as u8));
+                                bind(&mut state, insn, true, DataResource::Register(reg as u8));
+                            }
+                        }
+                        ebpf::EXIT => {
+                            bind(&mut state, insn, false, DataResource::Memory);
+                            for reg in (0..ebpf::FIRST_SCRATCH_REG).chain([10].iter().cloned()) {
+                                bind(&mut state, insn, false, DataResource::Register(reg as u8));
+                            }
+                        }
                         ebpf::LD_DW_IMM => {
                             bind(&mut state, insn, true, DataResource::Register(insn.dst));
                         }
@@ -1034,59 +1149,6 @@ impl<'a> Analysis<'a> {
                         ebpf::MOV32_REG | ebpf::MOV64_REG => {
                             bind(&mut state, insn, false, DataResource::Register(insn.src));
                             bind(&mut state, insn, true, DataResource::Register(insn.dst));
-                        }
-                        ebpf::JEQ_IMM
-                        | ebpf::JGT_IMM
-                        | ebpf::JGE_IMM
-                        | ebpf::JLT_IMM
-                        | ebpf::JLE_IMM
-                        | ebpf::JSET_IMM
-                        | ebpf::JNE_IMM
-                        | ebpf::JSGT_IMM
-                        | ebpf::JSGE_IMM
-                        | ebpf::JSLT_IMM
-                        | ebpf::JSLE_IMM => {
-                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
-                        }
-                        ebpf::JEQ_REG
-                        | ebpf::JGT_REG
-                        | ebpf::JGE_REG
-                        | ebpf::JLT_REG
-                        | ebpf::JLE_REG
-                        | ebpf::JSET_REG
-                        | ebpf::JNE_REG
-                        | ebpf::JSGT_REG
-                        | ebpf::JSGE_REG
-                        | ebpf::JSLT_REG
-                        | ebpf::JSLE_REG => {
-                            bind(&mut state, insn, false, DataResource::Register(insn.src));
-                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
-                        }
-                        ebpf::CALL_REG | ebpf::CALL_IMM => {
-                            if insn.opc == ebpf::CALL_REG
-                                && !(ebpf::FIRST_SCRATCH_REG
-                                    ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS)
-                                    .contains(&(insn.imm as usize))
-                            {
-                                bind(
-                                    &mut state,
-                                    insn,
-                                    false,
-                                    DataResource::Register(insn.imm as u8),
-                                );
-                            }
-                            bind(&mut state, insn, false, DataResource::Memory);
-                            bind(&mut state, insn, true, DataResource::Memory);
-                            for reg in (0..ebpf::FIRST_SCRATCH_REG).chain([10].iter().cloned()) {
-                                bind(&mut state, insn, false, DataResource::Register(reg as u8));
-                                bind(&mut state, insn, true, DataResource::Register(reg as u8));
-                            }
-                        }
-                        ebpf::EXIT => {
-                            bind(&mut state, insn, false, DataResource::Memory);
-                            for reg in (0..ebpf::FIRST_SCRATCH_REG).chain([10].iter().cloned()) {
-                                bind(&mut state, insn, false, DataResource::Register(reg as u8));
-                            }
                         }
                         _ => {}
                     }

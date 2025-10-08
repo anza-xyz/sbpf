@@ -81,6 +81,10 @@ impl SBPFVersion {
     pub fn enable_lower_bytecode_vaddr(self) -> bool {
         self >= SBPFVersion::V3
     }
+    /// ... SIMD-????
+    pub fn enable_jmp32(self) -> bool {
+        self >= SBPFVersion::V3
+    }
 
     /// Calculate the target program counter for a CALL_IMM instruction depending on
     /// the SBPF version.

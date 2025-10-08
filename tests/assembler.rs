@@ -113,11 +113,27 @@ fn test_ja() {
 fn test_jeq() {
     assert_eq!(
         asm("jeq r1, 4, +8"),
-        Ok(vec![insn(0, ebpf::JEQ_IMM, 1, 0, 8, 4)])
+        Ok(vec![insn(0, ebpf::JEQ64_IMM, 1, 0, 8, 4)])
     );
     assert_eq!(
         asm("jeq r1, r3, +8"),
-        Ok(vec![insn(0, ebpf::JEQ_REG, 1, 3, 8, 0)])
+        Ok(vec![insn(0, ebpf::JEQ64_REG, 1, 3, 8, 0)])
+    );
+    assert_eq!(
+        asm("jeq32 r1, 4, +8"),
+        Ok(vec![insn(0, ebpf::JEQ32_IMM, 1, 0, 8, 4)])
+    );
+    assert_eq!(
+        asm("jeq32 r1, r3, +8"),
+        Ok(vec![insn(0, ebpf::JEQ32_REG, 1, 3, 8, 0)])
+    );
+    assert_eq!(
+        asm("jeq64 r1, 4, +8"),
+        Ok(vec![insn(0, ebpf::JEQ64_IMM, 1, 0, 8, 4)])
+    );
+    assert_eq!(
+        asm("jeq64 r1, r3, +8"),
+        Ok(vec![insn(0, ebpf::JEQ64_REG, 1, 3, 8, 0)])
     );
 }
 
@@ -423,17 +439,17 @@ fn test_jump_conditional() {
              jslt r1, r2, +3
              jsle r1, r2, +3"),
         Ok(vec![
-            insn(0, ebpf::JEQ_REG, 1, 2, 3, 0),
-            insn(1, ebpf::JGT_REG, 1, 2, 3, 0),
-            insn(2, ebpf::JGE_REG, 1, 2, 3, 0),
-            insn(3, ebpf::JLT_REG, 1, 2, 3, 0),
-            insn(4, ebpf::JLE_REG, 1, 2, 3, 0),
-            insn(5, ebpf::JSET_REG, 1, 2, 3, 0),
-            insn(6, ebpf::JNE_REG, 1, 2, 3, 0),
-            insn(7, ebpf::JSGT_REG, 1, 2, 3, 0),
-            insn(8, ebpf::JSGE_REG, 1, 2, 3, 0),
-            insn(9, ebpf::JSLT_REG, 1, 2, 3, 0),
-            insn(10, ebpf::JSLE_REG, 1, 2, 3, 0)
+            insn(0, ebpf::JEQ64_REG, 1, 2, 3, 0),
+            insn(1, ebpf::JGT64_REG, 1, 2, 3, 0),
+            insn(2, ebpf::JGE64_REG, 1, 2, 3, 0),
+            insn(3, ebpf::JLT64_REG, 1, 2, 3, 0),
+            insn(4, ebpf::JLE64_REG, 1, 2, 3, 0),
+            insn(5, ebpf::JSET64_REG, 1, 2, 3, 0),
+            insn(6, ebpf::JNE64_REG, 1, 2, 3, 0),
+            insn(7, ebpf::JSGT64_REG, 1, 2, 3, 0),
+            insn(8, ebpf::JSGE64_REG, 1, 2, 3, 0),
+            insn(9, ebpf::JSLT64_REG, 1, 2, 3, 0),
+            insn(10, ebpf::JSLE64_REG, 1, 2, 3, 0)
         ])
     );
 
@@ -450,17 +466,17 @@ fn test_jump_conditional() {
              jslt r1, 2, +3
              jsle r1, 2, +3"),
         Ok(vec![
-            insn(0, ebpf::JEQ_IMM, 1, 0, 3, 2),
-            insn(1, ebpf::JGT_IMM, 1, 0, 3, 2),
-            insn(2, ebpf::JGE_IMM, 1, 0, 3, 2),
-            insn(3, ebpf::JLT_IMM, 1, 0, 3, 2),
-            insn(4, ebpf::JLE_IMM, 1, 0, 3, 2),
-            insn(5, ebpf::JSET_IMM, 1, 0, 3, 2),
-            insn(6, ebpf::JNE_IMM, 1, 0, 3, 2),
-            insn(7, ebpf::JSGT_IMM, 1, 0, 3, 2),
-            insn(8, ebpf::JSGE_IMM, 1, 0, 3, 2),
-            insn(9, ebpf::JSLT_IMM, 1, 0, 3, 2),
-            insn(10, ebpf::JSLE_IMM, 1, 0, 3, 2)
+            insn(0, ebpf::JEQ64_IMM, 1, 0, 3, 2),
+            insn(1, ebpf::JGT64_IMM, 1, 0, 3, 2),
+            insn(2, ebpf::JGE64_IMM, 1, 0, 3, 2),
+            insn(3, ebpf::JLT64_IMM, 1, 0, 3, 2),
+            insn(4, ebpf::JLE64_IMM, 1, 0, 3, 2),
+            insn(5, ebpf::JSET64_IMM, 1, 0, 3, 2),
+            insn(6, ebpf::JNE64_IMM, 1, 0, 3, 2),
+            insn(7, ebpf::JSGT64_IMM, 1, 0, 3, 2),
+            insn(8, ebpf::JSGE64_IMM, 1, 0, 3, 2),
+            insn(9, ebpf::JSLT64_IMM, 1, 0, 3, 2),
+            insn(10, ebpf::JSLE64_IMM, 1, 0, 3, 2)
         ])
     );
 }
