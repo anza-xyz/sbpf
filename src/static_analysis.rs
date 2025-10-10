@@ -132,6 +132,10 @@ impl ContextObject for DummyContextObject {
     fn get_remaining(&self) -> u64 {
         0
     }
+
+    fn get_nesting_level(&self) -> u32 {
+        0
+    }
 }
 
 /// Result of the executable analysis

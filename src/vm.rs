@@ -142,6 +142,8 @@ pub trait ContextObject {
     fn consume(&mut self, amount: u64);
     /// Get the number of remaining instructions allowed
     fn get_remaining(&self) -> u64;
+    /// Get the current nesting level
+    fn get_nesting_level(&self) -> u32;
 }
 
 /// Statistic of taken branches (from a recorded trace)
@@ -314,6 +316,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         stack_len: usize,
     ) -> Self {
         let config = loader.get_config();
+        let _nesting_level = context_object.get_nesting_level();
         let mut registers = [0u64; 12];
         registers[ebpf::FRAME_PTR_REG] =
             ebpf::MM_STACK_START.saturating_add(if sbpf_version.dynamic_stack_frames() {
@@ -342,7 +345,8 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             #[cfg(feature = "debugger")]
             debug_port: std::env::var("VM_DEBUG_PORT")
                 .ok()
-                .and_then(|v| v.parse::<u16>().ok()),
+                .and_then(|v| v.parse::<u16>().ok())
+                .map(|p| p + _nesting_level.saturating_sub(1) as u16), // Advance port with level
             register_trace: Vec::default(),
         }
     }
