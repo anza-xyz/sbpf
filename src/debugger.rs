@@ -10,7 +10,7 @@ use gdbstub::arch::lldb::{Encoding, Format, Generic, Register};
 use gdbstub::arch::RegId;
 
 use gdbstub::target;
-use gdbstub::target::{Target, TargetError, TargetResult};
+use gdbstub::target::{ext::monitor_cmd::MonitorCmd, Target, TargetError, TargetResult};
 
 use core::convert::TryInto;
 
@@ -44,6 +44,13 @@ fn wait_for_tcp(port: u16) -> DynResult<TcpStream> {
 
 /// Connect to the debugger and hand over the control of the interpreter
 pub fn execute<C: ContextObject>(interpreter: &mut Interpreter<C>, port: u16) {
+    if let Some(h) = interpreter.executable.get_pre_load_sha256() {
+        eprintln!(
+            "Debugging executable with (pre-load) SHA256: {}",
+            hex::encode(h)
+        )
+    }
+
     let connection: Box<dyn ConnectionExt<Error = std::io::Error>> =
         Box::new(wait_for_tcp(port).expect("Cannot connect to Debugger"));
     let mut dbg = GdbStub::new(connection)
@@ -145,6 +152,10 @@ impl<'a, 'b, C: ContextObject> Target for Interpreter<'a, 'b, C> {
         &mut self,
     ) -> Option<target::ext::lldb_register_info_override::LldbRegisterInfoOverrideOps<'_, Self>>
     {
+        Some(self)
+    }
+
+    fn support_monitor_cmd(&mut self) -> Option<target::ext::monitor_cmd::MonitorCmdOps<'_, Self>> {
         Some(self)
     }
 }
@@ -550,5 +561,24 @@ mod bpf_arch {
                 }
             }
         }
+    }
+}
+
+impl<'a, 'b, C: ContextObject> MonitorCmd for Interpreter<'a, 'b, C> {
+    fn handle_monitor_cmd(
+        &mut self,
+        cmd: &[u8],
+        mut out: target::ext::monitor_cmd::ConsoleOutput<'_>,
+    ) -> Result<(), Self::Error> {
+        match cmd {
+            b"executable_pre_load_sha256" => match self.executable.get_pre_load_sha256() {
+                Some(h) => out.write_raw(hex::encode(h).as_bytes()),
+                None => out.write_raw(b"no pre-load bytes"),
+            },
+            _ => {
+                out.write_raw(b"unknown monitor cmd");
+            }
+        }
+        Ok(())
     }
 }
