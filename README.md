@@ -24,7 +24,7 @@ although the JIT-compiler does not work with Windows at this time.
 
 ## SBPF feature description
 
-The Solana-versioned BPF, namely SBPF, has three versions, each with different 
+The Solana-versioned BPF, namely SBPF, has four versions, each with different 
 functionality. In the table below, we give an overview of which features are 
 available for each version.
 
