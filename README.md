@@ -22,6 +22,21 @@ an assembler, disassembler and verifier.
 The crate is supposed to compile and run on Linux, MacOS X, and Windows,
 although the JIT-compiler does not work with Windows at this time.
 
+## SBPF feature description
+
+The Solana-versioned BPF, namely SBPF, has three versions, each with different 
+functionality. In the table below, we give an overview of which features are 
+available for each version.
+
+| Feature                          | v0 | v1  | v2  | v3  |
+|----------------------------------|----|-----|-----|-----|
+| Static syscalls                  | no | no  | no  | yes |
+| Dynamic stack frames             | no | yes | yes | yes |
+| PQR instructions                 | no | no  | yes | no  |
+| Explicit sign extension          | no | no  | yes | yes |
+| Compatibility with upstream eBPF | no | no  | no  | yes |
+
+
 ## Link to the crate
 
 This crate is available from [crates.io](https://crates.io/crates/solana-sbpf),
