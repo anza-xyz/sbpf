@@ -345,12 +345,7 @@ impl<C: ContextObject> Executable<C> {
         let entry_pc = if let Some((_name, pc)) = function_registry.lookup_by_name(b"entrypoint") {
             pc
         } else {
-            function_registry.register_function_hashed_legacy(
-                &loader,
-                !sbpf_version.static_syscalls(),
-                *b"entrypoint",
-                0,
-            )?;
+            function_registry.register_function_hashed_legacy(&loader, false, *b"entrypoint", 0)?;
             0
         };
         Ok(Self {
@@ -921,7 +916,9 @@ impl<C: ContextObject> Executable<C> {
                 let checked_slice = text_bytes
                     .get_mut(offset..offset.saturating_add(4))
                     .ok_or(ElfError::ValueOutOfBounds)?;
-                LittleEndian::write_u32(checked_slice, key);
+                if !loader.get_config().enable_static_syscalls {
+                    LittleEndian::write_u32(checked_slice, key);
+                }
             }
         }
 

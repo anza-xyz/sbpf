@@ -815,7 +815,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::JSLE64_REG   => self.emit_conditional_branch_reg(OperandSize::S64, 0x8e, false, src, dst, target_pc),
                 ebpf::CALL_IMM => {
                     // For JIT, external functions MUST be registered at compile time.
-                    if self.executable.get_sbpf_version().static_syscalls() {
+                    if self.config.enable_static_syscalls {
                         if insn.src == 1 {
                             // BPF to BPF call
                             let target_pc = (self.pc as i64).saturating_add(insn.imm).saturating_add(1);

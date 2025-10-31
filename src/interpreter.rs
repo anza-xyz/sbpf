@@ -544,7 +544,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
             // Do not delegate the check to the verifier, since self.registered functions can be
             // changed after the program has been verified.
             ebpf::CALL_IMM => {
-                if self.executable.get_sbpf_version().static_syscalls() {
+                if config.enable_static_syscalls {
                     if insn.src == 1 {
                         // make BPF to BPF call
                         if !self.push_frame(config) {

@@ -65,10 +65,6 @@ impl SBPFVersion {
         self == SBPFVersion::V2
     }
 
-    /// Enable SIMD-0178: SBPF Static Syscalls
-    pub fn static_syscalls(self) -> bool {
-        self >= SBPFVersion::V3
-    }
     /// Enable SIMD-0179: SBPF stricter verification constraints
     pub fn enable_stricter_verification(self) -> bool {
         self >= SBPFVersion::V3
@@ -84,16 +80,6 @@ impl SBPFVersion {
     /// ... SIMD-????
     pub fn enable_jmp32(self) -> bool {
         self >= SBPFVersion::V3
-    }
-
-    /// Calculate the target program counter for a CALL_IMM instruction depending on
-    /// the SBPF version.
-    pub fn calculate_call_imm_target_pc(self, pc: usize, imm: i64) -> u32 {
-        if self.static_syscalls() {
-            (pc as i64).saturating_add(imm).saturating_add(1) as u32
-        } else {
-            imm as u32
-        }
     }
 }
 

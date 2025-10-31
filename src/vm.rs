@@ -83,6 +83,8 @@ pub struct Config {
     pub optimize_rodata: bool,
     /// Use aligned memory mapping
     pub aligned_memory_mapping: bool,
+    /// Enable SIMD-0178 (src field distinguishes call and syscall)
+    pub enable_static_syscalls: bool,
     /// Allowed [SBPFVersion]s
     pub enabled_sbpf_versions: std::ops::RangeInclusive<SBPFVersion>,
 }
@@ -112,6 +114,7 @@ impl Default for Config {
             sanitize_user_provided_values: true,
             optimize_rodata: true,
             aligned_memory_mapping: true,
+            enable_static_syscalls: true,
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
         }
     }
