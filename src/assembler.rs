@@ -434,7 +434,7 @@ pub fn assemble<C: ContextObject>(
                                 } else {
                                     target_pc
                                 };
-                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, instr_imm)
+                                insn(opc, 0, 1, 0, instr_imm)
                             }
                             (CallImm, [Label(label)]) => {
                                 let label: &str = label;
@@ -445,7 +445,7 @@ pub fn assemble<C: ContextObject>(
                                 if sbpf_version.static_syscalls() {
                                     target_pc = target_pc - insn_ptr as i64 - 1;
                                 }
-                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, target_pc)
+                                insn(opc, 0, 1, 0, target_pc)
                             }
                             (Syscall, [Label(label)]) => insn(
                                 opc,
