@@ -224,16 +224,17 @@ const ANCHOR_THROW_EXCEPTION_UNCHECKED: usize = 3;
 const ANCHOR_EXIT: usize = 4;
 const ANCHOR_THROW_EXCEPTION: usize = 5;
 const ANCHOR_CALL_DEPTH_EXCEEDED: usize = 6;
-const ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT: usize = 7;
-const ANCHOR_DIV_BY_ZERO: usize = 8;
-const ANCHOR_DIV_OVERFLOW: usize = 9;
-const ANCHOR_CALL_REG_UNSUPPORTED_INSTRUCTION: usize = 10;
-const ANCHOR_CALL_UNSUPPORTED_INSTRUCTION: usize = 11;
-const ANCHOR_EXTERNAL_FUNCTION_CALL: usize = 12;
-const ANCHOR_INTERNAL_FUNCTION_CALL_PROLOGUE: usize = 13;
-const ANCHOR_INTERNAL_FUNCTION_CALL_REG: usize = 14;
-const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 21;
-const ANCHOR_COUNT: usize = 34; // Update me when adding or removing anchors
+const ANCHOR_CALL_REG_OUTSIDE_TEXT_SEGMENT: usize = 7;
+const ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT: usize = 8;
+const ANCHOR_DIV_BY_ZERO: usize = 9;
+const ANCHOR_DIV_OVERFLOW: usize = 10;
+const ANCHOR_CALL_REG_UNSUPPORTED_INSTRUCTION: usize = 11;
+const ANCHOR_CALL_UNSUPPORTED_INSTRUCTION: usize = 12;
+const ANCHOR_EXTERNAL_FUNCTION_CALL: usize = 13;
+const ANCHOR_INTERNAL_FUNCTION_CALL_PROLOGUE: usize = 14;
+const ANCHOR_INTERNAL_FUNCTION_CALL_REG: usize = 15;
+const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 22;
+const ANCHOR_COUNT: usize = 35; // Update me when adding or removing anchors
 
 const REGISTER_MAP: [X86Register; 11] = [
     CALLER_SAVED_REGISTERS[0], // RAX
@@ -814,13 +815,37 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::JSLE64_REG   => self.emit_conditional_branch_reg(OperandSize::S64, 0x8e, false, src, dst, target_pc),
                 ebpf::CALL_IMM => {
                     // For JIT, external functions MUST be registered at compile time.
-                    let key = self
-                        .executable
-                        .get_sbpf_version()
-                        .calculate_call_imm_target_pc(self.pc, insn.imm);
-                    if self.executable.get_sbpf_version().static_syscalls() && insn.src == 1 {
-                        // BPF to BPF call
-                        self.emit_internal_call(Value::Constant64(key as i64, true));
+                    if self.executable.get_sbpf_version().static_syscalls() {
+                        if insn.src == 1 {
+                            // BPF to BPF call
+                            let target_pc = (self.pc as i64).saturating_add(insn.imm).saturating_add(1);
+                            if (target_pc as usize)
+                                .checked_mul(ebpf::INSN_SIZE)
+                                .and_then(|offset| {
+                                    self
+                                        .program
+                                        .get(offset..offset.saturating_add(ebpf::INSN_SIZE))
+                                })
+                                .is_some()
+                            {
+                                self.emit_internal_call(Value::Constant64(target_pc as i64, true));
+                            } else {
+                                self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
+                                self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT, 5)));
+                            }
+                        } else if insn.src == 0 {
+                            if let Some((_, function)) =
+                                self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
+                                // Static syscall
+                                self.emit_syscall_dispatch(function);
+                            } else {
+                                self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
+                                self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION, 5)));
+                            }
+                        } else {
+                            self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
+                            self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION, 5)));
+                        }
                     } else if let Some((_, function)) =
                             self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
                         // SBPFv0 syscall
@@ -828,7 +853,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     } else if let Some((_function_name, target_pc)) =
                             self.executable
                                 .get_function_registry()
-                                .lookup_by_key(key) {
+                                .lookup_by_key(insn.imm as u32) {
                         // BPF to BPF call
                         self.emit_internal_call(Value::Constant64(target_pc as i64, true));
                     } else {
@@ -1491,10 +1516,12 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_set_exception_kind(EbpfError::CallDepthExceeded);
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 5)));
 
-        // Handler for EbpfError::CallOutsideTextSegment
+        // Handler for EbpfError::CallOutsideTextSegment from callx
+        self.set_anchor(ANCHOR_CALL_REG_OUTSIDE_TEXT_SEGMENT);
+        self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, REGISTER_SCRATCH, X86IndirectAccess::OffsetIndexShift(-8, RSP, 0)));
+        // Handler for EbpfError::CallOutsideTextSegment from call
         self.set_anchor(ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT);
         self.emit_set_exception_kind(EbpfError::CallOutsideTextSegment);
-        self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, REGISTER_SCRATCH, X86IndirectAccess::OffsetIndexShift(-8, RSP, 0)));
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 5)));
 
         // Handler for EbpfError::DivideByZero
@@ -1588,7 +1615,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // if(guest_target_pc >= number_of_instructions * INSN_SIZE) throw CALL_OUTSIDE_TEXT_SEGMENT;
         let number_of_instructions = self.result.pc_section.len();
         self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S64, REGISTER_SCRATCH, (number_of_instructions * INSN_SIZE) as i64, None)); // guest_target_pc.cmp(number_of_instructions * INSN_SIZE)
-        self.emit_ins(X86Instruction::conditional_jump_immediate(0x83, self.relative_to_anchor(ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT, 6)));
+        self.emit_ins(X86Instruction::conditional_jump_immediate(0x83, self.relative_to_anchor(ANCHOR_CALL_REG_OUTSIDE_TEXT_SEGMENT, 6)));
         // Calculate the guest_target_pc (dst / INSN_SIZE) to update REGISTER_INSTRUCTION_METER
         // and as target_pc for potential ANCHOR_CALL_REG_UNSUPPORTED_INSTRUCTION
         let shift_amount = INSN_SIZE.trailing_zeros();

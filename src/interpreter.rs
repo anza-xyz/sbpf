@@ -544,16 +544,27 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
             // Do not delegate the check to the verifier, since self.registered functions can be
             // changed after the program has been verified.
             ebpf::CALL_IMM => {
-                let key = self
-                    .executable
-                    .get_sbpf_version()
-                    .calculate_call_imm_target_pc(self.reg[11] as usize, insn.imm);
-                if self.executable.get_sbpf_version().static_syscalls() && insn.src == 1 {
-                    // make BPF to BPF call
-                    if !self.push_frame(config) {
-                        return false;
+                if self.executable.get_sbpf_version().static_syscalls() {
+                    if insn.src == 1 {
+                        // make BPF to BPF call
+                        if !self.push_frame(config) {
+                            return false;
+                        }
+                        let target_pc = (self.reg[11] as i64).saturating_add(insn.imm).saturating_add(1);
+                        check_pc!(self, next_pc, target_pc as u64);
+                    } else if insn.src == 0 {
+                        // Static syscall
+                        if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
+                            self.reg[0] = match self.dispatch_syscall(function) {
+                                ProgramResult::Ok(value) => *value,
+                                ProgramResult::Err(_err) => return false,
+                            };
+                        } else {
+                            throw_error!(self, EbpfError::UnsupportedInstruction);
+                        }
+                    } else {
+                        throw_error!(self, EbpfError::UnsupportedInstruction);
                     }
-                    check_pc!(self, next_pc, key as u64);
                 } else if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
                     // SBPFv0 syscall
                     self.reg[0] = match self.dispatch_syscall(function) {
@@ -563,7 +574,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                 } else if let Some((_, target_pc)) =
                     self.executable
                     .get_function_registry()
-                    .lookup_by_key(key) {
+                    .lookup_by_key(insn.imm as u32) {
                     // make BPF to BPF call
                     if !self.push_frame(config) {
                         return false;
