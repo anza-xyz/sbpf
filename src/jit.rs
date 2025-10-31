@@ -814,13 +814,37 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::JSLE64_REG   => self.emit_conditional_branch_reg(OperandSize::S64, 0x8e, false, src, dst, target_pc),
                 ebpf::CALL_IMM => {
                     // For JIT, external functions MUST be registered at compile time.
-                    let key = self
-                        .executable
-                        .get_sbpf_version()
-                        .calculate_call_imm_target_pc(self.pc, insn.imm);
-                    if self.executable.get_sbpf_version().static_syscalls() && insn.src == 1 {
-                        // BPF to BPF call
-                        self.emit_internal_call(Value::Constant64(key as i64, true));
+                    if self.config.enable_static_syscalls {
+                        if insn.src == 1 {
+                            // BPF to BPF call
+                            let target_pc = (self.pc as i64).saturating_add(insn.imm).saturating_add(1);
+                            if (target_pc as usize)
+                                .checked_mul(ebpf::INSN_SIZE)
+                                .and_then(|offset| {
+                                    self
+                                        .program
+                                        .get(offset..offset.saturating_add(ebpf::INSN_SIZE))
+                                })
+                                .is_some()
+                            {
+                                self.emit_internal_call(Value::Constant64(target_pc as i64, true));
+                            } else {
+                                self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
+                                self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_OUTSIDE_TEXT_SEGMENT, 5)));
+                            }
+                        } else if insn.src == 0 {
+                            if let Some((_, function)) =
+                                self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
+                                // Static syscall
+                                self.emit_syscall_dispatch(function);
+                            } else {
+                                self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
+                                self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION, 5)));
+                            }
+                        } else {
+                            self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
+                            self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION, 5)));
+                        }
                     } else if let Some((_, function)) =
                             self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
                         // SBPFv0 syscall
@@ -828,7 +852,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     } else if let Some((_function_name, target_pc)) =
                             self.executable
                                 .get_function_registry()
-                                .lookup_by_key(key) {
+                                .lookup_by_key(insn.imm as u32) {
                         // BPF to BPF call
                         self.emit_internal_call(Value::Constant64(target_pc as i64, true));
                     } else {

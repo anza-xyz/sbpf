@@ -429,12 +429,12 @@ pub fn assemble<C: ContextObject>(
                                         target_pc as usize,
                                     )
                                     .map_err(|_| format!("Label hash collision {name}"))?;
-                                let instr_imm = if sbpf_version.static_syscalls() {
+                                let instr_imm = if loader.get_config().enable_static_syscalls {
                                     *imm
                                 } else {
                                     target_pc
                                 };
-                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, instr_imm)
+                                insn(opc, 0, 1, 0, instr_imm)
                             }
                             (CallImm, [Label(label)]) => {
                                 let label: &str = label;
@@ -442,10 +442,10 @@ pub fn assemble<C: ContextObject>(
                                     .get(label)
                                     .ok_or_else(|| format!("Label not found {label}"))?
                                     as i64;
-                                if sbpf_version.static_syscalls() {
+                                if loader.get_config().enable_static_syscalls {
                                     target_pc = target_pc - insn_ptr as i64 - 1;
                                 }
-                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, target_pc)
+                                insn(opc, 0, 1, 0, target_pc)
                             }
                             (Syscall, [Label(label)]) => insn(
                                 opc,
