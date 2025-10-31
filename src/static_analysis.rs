@@ -240,23 +240,24 @@ impl<'a> Analysis<'a> {
             self.cfg_nodes.entry(*pc).or_default();
         }
         let mut cfg_edges = BTreeMap::new();
-        for (pc, insn) in self.instructions.iter().enumerate() {
+        for insn in self.instructions.iter() {
             let target_pc = (insn.ptr as isize + insn.off as isize + 1) as usize;
             match insn.opc {
                 ebpf::CALL_IMM => {
-                    let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
-                    if let Some((_function_name, target_pc)) =
-                        self.executable.get_function_registry().lookup_by_key(key)
-                    {
-                        self.cfg_nodes.entry(insn.ptr + 1).or_default();
-                        self.cfg_nodes.entry(target_pc).or_default();
-                        let destinations = if flatten_call_graph {
-                            vec![insn.ptr + 1, target_pc]
-                        } else {
-                            vec![insn.ptr + 1]
-                        };
-                        cfg_edges.insert(insn.ptr, (insn.opc, destinations));
-                    }
+                    let target_pc = self
+                        .executable
+                        .get_function_registry()
+                        .lookup_by_key(insn.imm as u32)
+                        .map(|(_function_name, target_pc)| target_pc)
+                        .unwrap_or(target_pc);
+                    self.cfg_nodes.entry(insn.ptr + 1).or_default();
+                    self.cfg_nodes.entry(target_pc).or_default();
+                    let destinations = if flatten_call_graph {
+                        vec![insn.ptr + 1, target_pc]
+                    } else {
+                        vec![insn.ptr + 1]
+                    };
+                    cfg_edges.insert(insn.ptr, (insn.opc, destinations));
                 }
                 ebpf::CALL_REG => {
                     // Abnormal CFG edge
