@@ -268,7 +268,7 @@ impl<'a> Analysis<'a> {
                     };
                     cfg_edges.insert(insn.ptr, (insn.opc, destinations));
                 }
-                ebpf::EXIT if !sbpf_version.static_syscalls() => {
+                ebpf::EXIT => {
                     self.cfg_nodes.entry(insn.ptr + 1).or_default();
                     cfg_edges.insert(insn.ptr, (insn.opc, Vec::new()));
                 }
