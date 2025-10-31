@@ -228,7 +228,7 @@ pub struct RequisiteVerifier {}
 impl Verifier for RequisiteVerifier {
     /// Check the program against the verifier's rules
     #[rustfmt::skip]
-    fn verify<C: ContextObject>(prog: &[u8], _config: &Config, sbpf_version: SBPFVersion, _function_registry: &FunctionRegistry<usize>, syscall_registry: &FunctionRegistry<BuiltinFunction<C>>) -> Result<(), VerifierError> {
+    fn verify<C: ContextObject>(prog: &[u8], _config: &Config, sbpf_version: SBPFVersion, _function_registry: &FunctionRegistry<usize>, _syscall_registry: &FunctionRegistry<BuiltinFunction<C>>) -> Result<(), VerifierError> {
         check_prog_len(prog)?;
 
         let program_range = 0..prog.len() / ebpf::INSN_SIZE;
@@ -407,20 +407,7 @@ impl Verifier for RequisiteVerifier {
                 | ebpf::JSLT64_REG
                 | ebpf::JSLE64_IMM
                 | ebpf::JSLE64_REG   => { check_jmp_offset(prog, insn_ptr, &program_range)?; },
-                ebpf::CALL_IMM   if sbpf_version.static_syscalls() && insn.src == 1 => {
-                    let target_pc = sbpf_version.calculate_call_imm_target_pc(insn_ptr, insn.imm);
-                    if !program_range.contains(&(target_pc as usize)) ||
-                       !ebpf::get_insn(prog, target_pc as usize).is_function_start_marker() {
-                        return Err(VerifierError::InvalidFunction(target_pc as usize));
-                    }
-                },
-                ebpf::CALL_IMM   if sbpf_version.static_syscalls() && insn.src == 0 => {
-                    syscall_registry
-                        .lookup_by_key(insn.imm as u32)
-                        .map(|_| ())
-                        .ok_or(VerifierError::InvalidSyscall(insn.imm as u32))?;
-                },
-                ebpf::CALL_IMM  if !sbpf_version.static_syscalls() => {},
+                ebpf::CALL_IMM   => {},
                 ebpf::CALL_REG   => { check_callx_register(&insn, insn_ptr, sbpf_version)?; },
                 ebpf::EXIT       => {},
 

@@ -326,24 +326,6 @@ fn test_verifier_err_jmp_out_start() {
 }
 
 #[test]
-#[should_panic(expected = "InvalidSyscall(2432830685)")]
-fn test_verifier_unknown_syscall() {
-    let prog = &[
-        0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
-        0x85, 0x00, 0x00, 0x00, 0xDD, 0x0C, 0x02, 0x91, // syscall gather_bytes
-        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
-    ];
-    let executable = Executable::<TestContextObject>::from_text_bytes(
-        prog,
-        Arc::new(BuiltinProgram::new_mock()),
-        SBPFVersion::V4,
-        FunctionRegistry::default(),
-    )
-    .unwrap();
-    executable.verify::<RequisiteVerifier>().unwrap();
-}
-
-#[test]
 fn test_verifier_known_syscall() {
     let prog = &[
         0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
