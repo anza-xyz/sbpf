@@ -290,7 +290,11 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::JSLE64_IMM   => { name = "jsle"; desc = jmp_imm_str(name, insn, cfg_nodes); },
         ebpf::JSLE64_REG   => { name = "jsle"; desc = jmp_reg_str(name, insn, cfg_nodes); },
         ebpf::CALL_IMM   => {
-            let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
+            let key = if loader.get_config().enable_static_syscalls {
+                (pc as i64).saturating_add(insn.imm).saturating_add(1) as u32
+            } else {
+                insn.imm as u32
+            };
             let mut name = "call";
             let mut function_name = function_registry.lookup_by_key(key).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
             if insn.src == 0 {
