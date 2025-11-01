@@ -1094,8 +1094,19 @@ impl<C: ContextObject> Executable<C> {
                             as usize)
                             .checked_div(ebpf::INSN_SIZE)
                             .unwrap_or_default();
-                        function_registry
-                            .register_function_hashed_legacy(loader, true, name, target_pc)?
+                        let key = function_registry
+                            .register_function_hashed_legacy(loader, true, name, target_pc)?;
+                        if config.enable_static_syscalls {
+                            let insn_ptr = r_offset
+                                .saturating_sub(text_section.file_range().unwrap_or_default().start)
+                                .checked_div(ebpf::INSN_SIZE)
+                                .unwrap_or_default();
+                            (target_pc as u32)
+                                .saturating_sub(insn_ptr as u32)
+                                .saturating_sub(1)
+                        } else {
+                            key
+                        }
                     } else {
                         // Else it's a syscall
                         let hash = *syscall_cache
