@@ -560,6 +560,25 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                         ProgramResult::Ok(value) => *value,
                         ProgramResult::Err(_err) => return false,
                     };
+                } else if config.remove_function_registry {
+                    // make BPF to BPF call
+                    if !self.push_frame(config) {
+                        return false;
+                    }
+                    let target_pc = (self.reg[11] as i64).saturating_add(insn.imm).saturating_add(1) as u64;
+                    if (target_pc as usize)
+                        .checked_mul(ebpf::INSN_SIZE)
+                        .and_then(|offset| {
+                            self
+                                .program
+                                .get(offset..offset.saturating_add(ebpf::INSN_SIZE))
+                        })
+                        .is_some()
+                    {
+                        next_pc = target_pc;
+                    } else {
+                        throw_error!(self, EbpfError::UnsupportedInstruction);
+                    }
                 } else if let Some((_, target_pc)) =
                     self.executable
                     .get_function_registry()

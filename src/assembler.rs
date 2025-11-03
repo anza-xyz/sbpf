@@ -424,28 +424,21 @@ pub fn assemble<C: ContextObject>(
                                 let label = format!("function_{}", target_pc as usize);
                                 function_registry
                                     .register_function(
-                                        target_pc as u32,
+                                        *imm as u32,
                                         label.as_bytes(),
                                         target_pc as usize,
                                     )
                                     .map_err(|_| format!("Label hash collision {name}"))?;
-                                let instr_imm = if sbpf_version.static_syscalls() {
-                                    *imm
-                                } else {
-                                    target_pc
-                                };
-                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, instr_imm)
+                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, *imm)
                             }
                             (CallImm, [Label(label)]) => {
                                 let label: &str = label;
-                                let mut target_pc = *labels
+                                let target_pc = *labels
                                     .get(label)
                                     .ok_or_else(|| format!("Label not found {label}"))?
                                     as i64;
-                                if sbpf_version.static_syscalls() {
-                                    target_pc = target_pc - insn_ptr as i64 - 1;
-                                }
-                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, target_pc)
+                                let imm = target_pc - insn_ptr as i64 - 1;
+                                insn(opc, 0, sbpf_version.static_syscalls() as i64, 0, imm)
                             }
                             (Syscall, [Label(label)]) => insn(
                                 opc,

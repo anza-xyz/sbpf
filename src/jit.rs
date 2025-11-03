@@ -825,6 +825,23 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                             self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
                         // SBPFv0 syscall
                         self.emit_syscall_dispatch(function);
+                    } else if self.config.remove_function_registry {
+                        // BPF to BPF call
+                        let target_pc = (self.pc as i64).saturating_add(insn.imm).saturating_add(1) as u64;
+                        if (target_pc as usize)
+                            .checked_mul(ebpf::INSN_SIZE)
+                            .and_then(|offset| {
+                                self
+                                    .program
+                                    .get(offset..offset.saturating_add(ebpf::INSN_SIZE))
+                            })
+                            .is_some()
+                        {
+                            self.emit_internal_call(Value::Constant64(target_pc as i64, true));
+                        } else {
+                            self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
+                            self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION, 5)));
+                        }
                     } else if let Some((_function_name, target_pc)) =
                             self.executable
                                 .get_function_registry()

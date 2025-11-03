@@ -291,11 +291,11 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::JSLE64_REG   => { name = "jsle"; desc = jmp_reg_str(name, insn, cfg_nodes); },
         ebpf::CALL_IMM   => {
             let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
-            let mut name = "call";
-            let mut function_name = function_registry.lookup_by_key(key).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
-            if (function_name.is_none() && !sbpf_version.static_syscalls()) || insn.src == 0 {
-                name = "syscall";
-                function_name = loader.get_function_registry().lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
+            let mut function_name = loader.get_function_registry().lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
+            let mut name = "syscall";
+            if function_name.is_none() && (!sbpf_version.static_syscalls() || insn.src == 1) {
+                function_name = function_registry.lookup_by_key(key).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
+                name = "call";
             }
             desc = format!("{} {}", name, function_name.unwrap_or_else(|| format!("{}", insn.imm)));
         },
