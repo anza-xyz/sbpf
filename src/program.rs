@@ -37,7 +37,7 @@ impl SBPFVersion {
     }
     /// ... SIMD-0174
     pub fn explicit_sign_extension_of_results(self) -> bool {
-        self >= SBPFVersion::V2
+        self == SBPFVersion::V2
     }
     /// ... SIMD-0174
     pub fn swap_sub_reg_imm_operands(self) -> bool {
