@@ -349,13 +349,11 @@ Verification
 - `hor64` is allowed
 - `callx` target is encoded in the src field
 
-### until v3
-- The targets of `call` instructions (which includes `syscall` instructions) are checked at runtime not verification time
-- The offset of jump instructions must be limited to the range of the bytecode
+### until v2
+- `callx` target is encoded in the imm field
+
+### only in v2
+- `callx` target is encoded in the src field
 
 ### from v3
-- Every function must end in a `ja` or `exit` instruction
 - `callx` target is encoded in the dst field
-- The targets of `call` instructions must have been registered at verification time
-- The targets of `syscall` instructions must have been registered at verification time
-- The offset of jump instructions must be limited to the range of the current function
