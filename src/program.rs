@@ -85,6 +85,10 @@ impl SBPFVersion {
     pub fn enable_jmp32(self) -> bool {
         self >= SBPFVersion::V3
     }
+    /// ... SIMD-0377
+    pub fn callx_uses_dst_reg(self) -> bool {
+        self >= SBPFVersion::V3
+    }
 
     /// Calculate the target program counter for a CALL_IMM instruction depending on
     /// the SBPF version.

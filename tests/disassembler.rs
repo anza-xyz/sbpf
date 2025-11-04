@@ -387,3 +387,19 @@ fn test_large_immediate() {
     disasm!("entrypoint:\n    add64 r1, -1\n");
     disasm!("entrypoint:\n    add64 r1, -1\n");
 }
+
+#[test]
+fn test_callx() {
+    for version in [
+        SBPFVersion::V0,
+        SBPFVersion::V2,
+        SBPFVersion::V3,
+        SBPFVersion::V4,
+    ] {
+        let config = Config {
+            enabled_sbpf_versions: version..=version,
+            ..Config::default()
+        };
+        disasm!("entrypoint:\n    callx r8\n", config);
+    }
+}

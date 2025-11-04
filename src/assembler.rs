@@ -458,6 +458,8 @@ pub fn assemble<C: ContextObject>(
                             (CallReg, [Register(dst)]) => {
                                 if sbpf_version.callx_uses_src_reg() {
                                     insn(opc, 0, *dst, 0, 0)
+                                } else if sbpf_version.callx_uses_dst_reg() {
+                                    insn(opc, *dst, 0, 0, 0)
                                 } else {
                                     insn(opc, 0, 0, 0, *dst)
                                 }

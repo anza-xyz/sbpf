@@ -299,7 +299,7 @@ pub fn disassemble_instruction<C: ContextObject>(
             }
             desc = format!("{} {}", name, function_name.unwrap_or_else(|| format!("{}", insn.imm)));
         },
-        ebpf::CALL_REG   => { name = "callx"; desc = format!("{} r{}", name, if sbpf_version.callx_uses_src_reg() { insn.src } else { insn.imm as u8 }); },
+        ebpf::CALL_REG   => { name = "callx"; desc = format!("{} r{}", name, if sbpf_version.callx_uses_src_reg() { insn.src } else if sbpf_version.callx_uses_dst_reg() { insn.dst } else { insn.imm as u8 }); },
         ebpf::EXIT       => { name = "exit"; desc = name.to_string(); },
 
         _                => { name = "unknown"; desc = format!("{} opcode={:#x}", name, insn.opc); },

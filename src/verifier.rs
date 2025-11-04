@@ -209,6 +209,8 @@ fn check_callx_register(
 ) -> Result<(), VerifierError> {
     let reg = if sbpf_version.callx_uses_src_reg() {
         insn.src as i64
+    } else if sbpf_version.callx_uses_dst_reg() {
+        insn.dst as i64
     } else {
         insn.imm
     };

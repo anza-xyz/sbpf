@@ -528,6 +528,8 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
             ebpf::CALL_REG   => {
                 let target_pc = if self.executable.get_sbpf_version().callx_uses_src_reg() {
                     self.reg[src]
+                } else if self.executable.get_sbpf_version().callx_uses_dst_reg() {
+                    self.reg[dst]
                 } else {
                     self.reg[insn.imm as usize]
                 };

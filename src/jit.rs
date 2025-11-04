@@ -839,6 +839,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::CALL_REG  => {
                     let target_pc = if self.executable.get_sbpf_version().callx_uses_src_reg() {
                         src
+                    } else if self.executable.get_sbpf_version().callx_uses_dst_reg() {
+                        dst
                     } else {
                         REGISTER_MAP[insn.imm as usize]
                     };
