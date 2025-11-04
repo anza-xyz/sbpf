@@ -159,11 +159,7 @@ The following Rust equivalents assume that:
 | `A7` / `10100111`  | all         | `xor64 dst, imm`   | `dst = dst.xor(imm)`
 | `AF` / `10101111`  | all         | `xor64 dst, src`   | `dst = dst.xor(src)`
 | `B7` / `10110111`  | all         | `mov64 dst, imm`   | `dst = imm as i32 as i64 as u64`
-| `BF` / `10111111`  | until v3    | `mov64 dst, src`   | `dst = src`
-| `BF` / `10111111`  | from v3     | `mov64 dst, src, off = 0`  | `dst = src`
-| `BF` / `10111111`  | from v3     | `mov64 dst, src, off = 8`  | `dst = src as i8 as i64 as u64`
-| `BF` / `10111111`  | from v3     | `mov64 dst, src, off = 16` | `dst = src as i16 as i64 as u64`
-| `BF` / `10111111`  | from v3     | `mov64 dst, src, off = 32` | `dst = src as i32 as i64 as u64`
+| `BF` / `10111111`  | all         | `mov64 dst, src`   | `dst = src`
 | `C7` / `11000111`  | all         | `ash64 dst, imm`   | `dst = (dst as i64).wrapping_shr(imm)`
 | `CF` / `11001111`  | all         | `ash64 dst, src`   | `dst = (dst as i64).wrapping_shr(src as u32)`
 | `D7` to `EF`       | all         | -- reserved --
@@ -233,10 +229,7 @@ The following Rust equivalents assume that:
 | `69` / `01101001`  | except v2   | `ldxh dst, [src + off]`
 | `71` / `01110001`  | except v2   | `ldxb dst, [src + off]`
 | `79` / `01111001`  | except v2   | `ldxdw dst, [src + off]`
-| `81` / `10000001`  | from v3     | `ldxws dst, [src + off]`
-| `89` / `10001001`  | from v3     | `ldxhs dst, [src + off]`
-| `91` / `10010001`  | from v3     | `ldxbs dst, [src + off]`
-| `99` to `F9`       | all         | -- reserved --
+| `81` to `F9`       | all         | -- reserved --
 
 | opcode (hex / bin) | feature set | assembler mnemonic
 | ------------------ | ----------- | ------------------
@@ -279,7 +272,7 @@ The `exit` (a.k.a. return) instruction does:
 | opcode (hex / bin) | feature set | assembler mnemonic   | condition Rust equivalent
 | ------------------ | ----------- | -------------------- | -------------------------
 | `05` / `00000101`  | all         | `ja off`             | `true`
-| `0D` / `00001101`  | from v3     | `jx dst`             | `true`
+| `0D` / `00001101`  | all         | -- reserved --
 | `15` / `00010101`  | all         | `jeq dst, imm, off`  | `dst == (imm as i32 as i64 as u64)`
 | `1D` / `00011101`  | all         | `jeq dst, src, off`  | `dst == src`
 | `25` / `00100101`  | all         | `jgt dst, imm, off`  | `dst > (imm as i32 as i64 as u64)`
