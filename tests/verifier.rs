@@ -314,20 +314,6 @@ fn test_verifier_err_callx_cannot_use_r10() {
 }
 
 #[test]
-#[should_panic(expected = "InvalidFunction(0)")]
-fn test_verifier_err_function_fallthrough() {
-    let executable = assemble::<TestContextObject>(
-        "
-        mov r0, r1
-        function_foo:
-        exit",
-        Arc::new(BuiltinProgram::new_mock()),
-    )
-    .unwrap();
-    executable.verify::<RequisiteVerifier>().unwrap();
-}
-
-#[test]
 #[should_panic(expected = "JumpOutOfCode(4, 1)")]
 fn test_verifier_err_jmp_out() {
     let executable = assemble::<TestContextObject>(
@@ -518,21 +504,4 @@ fn exit() {
     .unwrap();
     let result = executable.verify::<RequisiteVerifier>();
     assert!(result.is_ok());
-}
-
-#[test]
-fn function_without_exit() {
-    let executable = assemble::<TestContextObject>(
-        "
-        add64 r10, 0
-        mov r0, 2
-        add64 r0, 5",
-        Arc::new(BuiltinProgram::new_loader(Config {
-            enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V4,
-            ..Config::default()
-        })),
-    )
-    .unwrap();
-    let result = executable.verify::<RequisiteVerifier>();
-    assert_error!(result, "VerifierError(InvalidFunction(2))");
 }

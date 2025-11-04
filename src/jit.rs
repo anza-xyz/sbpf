@@ -432,10 +432,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             }
             let mut insn = ebpf::get_insn_unchecked(self.program, self.pc);
             self.result.pc_section[self.pc] = self.offset_in_text_section as u32;
-            if self.executable.get_sbpf_version().enable_stricter_verification() &&
-               !insn.is_function_start_marker() {
-                self.result.pc_section[self.pc] |= 1 << 31;
-            }
 
             // Regular instruction meter checkpoints to prevent long linear runs from exceeding their budget
             if self.last_instruction_meter_validation_pc + self.config.instruction_meter_checkpoint_distance <= self.pc {

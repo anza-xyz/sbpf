@@ -17,7 +17,7 @@ pub enum SBPFVersion {
     V1,
     /// SIMD-0174, SIMD-0173
     V2,
-    /// SIMD-0178, SIMD-0179, SIMD-0189
+    /// SIMD-0178, SIMD-0189, SIMD-0377
     V3,
     /// SIMD-0177
     V4,
@@ -69,10 +69,6 @@ impl SBPFVersion {
     pub fn static_syscalls(self) -> bool {
         self >= SBPFVersion::V3
     }
-    /// Enable SIMD-0179: SBPF stricter verification constraints
-    pub fn enable_stricter_verification(self) -> bool {
-        self >= SBPFVersion::V3
-    }
     /// Enable SIMD-0189: SBPF stricter ELF headers
     pub fn enable_stricter_elf_headers(self) -> bool {
         self >= SBPFVersion::V3
@@ -81,7 +77,7 @@ impl SBPFVersion {
     pub fn enable_lower_bytecode_vaddr(self) -> bool {
         self >= SBPFVersion::V3
     }
-    /// ... SIMD-????
+    /// ... SIMD-0377
     pub fn enable_jmp32(self) -> bool {
         self >= SBPFVersion::V3
     }

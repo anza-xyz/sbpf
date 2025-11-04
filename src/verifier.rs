@@ -151,12 +151,12 @@ fn check_load_dw(prog: &[u8], insn_ptr: usize) -> Result<(), VerifierError> {
 fn check_jmp_offset(
     prog: &[u8],
     insn_ptr: usize,
-    function_range: &std::ops::Range<usize>,
+    program_range: &std::ops::Range<usize>,
 ) -> Result<(), VerifierError> {
     let insn = ebpf::get_insn(prog, insn_ptr);
 
     let dst_insn_ptr = insn_ptr as isize + 1 + insn.off as isize;
-    if dst_insn_ptr < 0 || !function_range.contains(&(dst_insn_ptr as usize)) {
+    if dst_insn_ptr < 0 || !program_range.contains(&(dst_insn_ptr as usize)) {
         return Err(VerifierError::JumpOutOfCode(
             dst_insn_ptr as usize,
             insn_ptr,
@@ -228,31 +228,10 @@ impl Verifier for RequisiteVerifier {
         check_prog_len(prog)?;
 
         let program_range = 0..prog.len() / ebpf::INSN_SIZE;
-        let mut function_range = program_range.start..program_range.end;
         let mut insn_ptr: usize = 0;
-        if sbpf_version.enable_stricter_verification() && !ebpf::get_insn(prog, insn_ptr).is_function_start_marker() {
-            return Err(VerifierError::InvalidFunction(0));
-        }
         while (insn_ptr + 1) * ebpf::INSN_SIZE <= prog.len() {
             let insn = ebpf::get_insn(prog, insn_ptr);
             let mut store = false;
-
-            if sbpf_version.enable_stricter_verification() && insn.is_function_start_marker() {
-                function_range = insn_ptr..insn_ptr.saturating_add(1);
-                while function_range.end < program_range.end &&
-                    !ebpf::get_insn(prog, function_range.end).is_function_start_marker() {
-                    function_range.end = function_range.end.saturating_add(1);
-                }
-                let insn = ebpf::get_insn(prog, function_range.end.saturating_sub(1));
-                match insn.opc {
-                    ebpf::JA | ebpf::EXIT => {},
-                    _ => {
-                        return Err(VerifierError::InvalidFunction(
-                            function_range.end.saturating_sub(1),
-                        ))
-                    },
-                }
-            }
 
             match insn.opc {
                 ebpf::LD_DW_IMM if !sbpf_version.disable_lddw() => {
@@ -398,7 +377,7 @@ impl Verifier for RequisiteVerifier {
                 | ebpf::JSLT32_IMM
                 | ebpf::JSLT32_REG
                 | ebpf::JSLE32_IMM
-                | ebpf::JSLE32_REG if sbpf_version.enable_jmp32() => { check_jmp_offset(prog, insn_ptr, &function_range)?; },
+                | ebpf::JSLE32_REG if sbpf_version.enable_jmp32() => { check_jmp_offset(prog, insn_ptr, &program_range)?; },
 
                 // BPF_JMP64 class
                 ebpf::JA
@@ -423,7 +402,7 @@ impl Verifier for RequisiteVerifier {
                 | ebpf::JSLT64_IMM
                 | ebpf::JSLT64_REG
                 | ebpf::JSLE64_IMM
-                | ebpf::JSLE64_REG   => { check_jmp_offset(prog, insn_ptr, &function_range)?; },
+                | ebpf::JSLE64_REG   => { check_jmp_offset(prog, insn_ptr, &program_range)?; },
                 ebpf::CALL_IMM   if sbpf_version.static_syscalls() && insn.src == 1 => {
                     let target_pc = sbpf_version.calculate_call_imm_target_pc(insn_ptr, insn.imm);
                     if !program_range.contains(&(target_pc as usize)) ||
