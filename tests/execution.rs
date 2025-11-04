@@ -79,7 +79,7 @@ fn test_mov32_reg() {
         exit",
         [],
         TestContextObject::new(4),
-        ProgramResult::Ok(0xffffffffffffffff),
+        ProgramResult::Ok(0xffffffff),
     );
 }
 
