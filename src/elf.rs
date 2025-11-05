@@ -251,12 +251,21 @@ pub struct Executable<C: ContextObject> {
     /// Compiled program and argument
     #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
     compiled_program: Option<JitProgram>,
+    /// Executable pre-load SHA256
+    #[cfg(feature = "debugger")]
+    pre_load_sha256: Option<Vec<u8>>,
 }
 
 impl<C: ContextObject> Executable<C> {
     /// Get the configuration settings
     pub fn get_config(&self) -> &Config {
         self.loader.get_config()
+    }
+
+    /// Get the hash of the non-relocated executable
+    #[cfg(feature = "debugger")]
+    pub fn get_pre_load_sha256(&self) -> Option<&[u8]> {
+        self.pre_load_sha256.as_deref()
     }
 
     /// Get the executable sbpf_version
@@ -368,6 +377,8 @@ impl<C: ContextObject> Executable<C> {
             loader,
             #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None,
+            #[cfg(feature = "debugger")]
+            pre_load_sha256: None,
         })
     }
 
@@ -579,6 +590,8 @@ impl<C: ContextObject> Executable<C> {
             loader,
             #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None,
+            #[cfg(feature = "debugger")]
+            pre_load_sha256: Some(compute_sha256(bytes)),
         })
     }
 
@@ -657,6 +670,8 @@ impl<C: ContextObject> Executable<C> {
             loader,
             #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None,
+            #[cfg(feature = "debugger")]
+            pre_load_sha256: Some(compute_sha256(bytes)),
         })
     }
 
@@ -1173,4 +1188,11 @@ pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
     // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
     // will be unmappable, see MemoryRegion::vm_to_host.
     MemoryRegion::new_readonly(ro_data, offset as u64)
+}
+
+/// Compute the SHA256 for this slice of bytes.
+#[cfg(feature = "debugger")]
+fn compute_sha256(bytes: &[u8]) -> Vec<u8> {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).to_vec()
 }
