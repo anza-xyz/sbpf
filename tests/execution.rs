@@ -2647,7 +2647,7 @@ fn test_syscall_static() {
         (
             "log" => syscalls::SyscallString::vm,
         ),
-        TestContextObject::new(6),
+        TestContextObject::new(4),
         ProgramResult::Ok(0),
     );
 }
@@ -2751,7 +2751,7 @@ fn test_reloc_64_relative_data() {
         config,
         [],
         (),
-        TestContextObject::new(4),
+        TestContextObject::new(3),
         ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
