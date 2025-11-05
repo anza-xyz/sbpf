@@ -410,7 +410,7 @@ impl<C: ContextObject> Executable<C> {
         loader: Arc<BuiltinProgram<C>>,
     ) -> Result<Self, ElfParserError> {
         use crate::elf_parser::{
-            consts::{ELFMAG, EV_CURRENT, PF_R, PF_W, PF_X, PT_LOAD, SHN_UNDEF, STT_FUNC},
+            consts::{ELFMAG, EV_CURRENT, PF_R, PF_X, PT_LOAD, SHN_UNDEF, STT_FUNC},
             types::{Elf64Ehdr, Elf64Shdr, Elf64Sym},
         };
 
@@ -429,8 +429,8 @@ impl<C: ContextObject> Executable<C> {
             || file_header.e_ident.ei_osabi != ELFOSABI_NONE
             || file_header.e_ident.ei_abiversion != 0x00
             || file_header.e_ident.ei_pad != [0x00; 7]
-            || file_header.e_type != ET_DYN
-            || file_header.e_machine != EM_SBPF
+            // file_header.e_type
+            || file_header.e_machine != EM_BPF
             || file_header.e_version != EV_CURRENT
             // file_header.e_entry
             || file_header.e_phoff != mem::size_of::<Elf64Ehdr>() as u64
@@ -439,7 +439,7 @@ impl<C: ContextObject> Executable<C> {
             || file_header.e_ehsize != mem::size_of::<Elf64Ehdr>() as u16
             || file_header.e_phentsize != mem::size_of::<Elf64Phdr>() as u16
             || file_header.e_phnum < EXPECTED_PROGRAM_HEADERS.len() as u16
-            || program_header_table_range.end >= elf_bytes.len()
+            || program_header_table_range.end > elf_bytes.len()
             || file_header.e_shentsize != mem::size_of::<Elf64Shdr>() as u16
             // file_header.e_shnum
             || file_header.e_shstrndx >= file_header.e_shnum
@@ -447,31 +447,25 @@ impl<C: ContextObject> Executable<C> {
             return Err(ElfParserError::InvalidFileHeader);
         }
 
-        const EXPECTED_PROGRAM_HEADERS: [(u32, u64); 4] = [
-            (PF_X, ebpf::MM_RODATA_START),       // byte code
-            (PF_R, ebpf::MM_BYTECODE_START),     // read only data
-            (PF_R | PF_W, ebpf::MM_STACK_START), // stack
-            (PF_R | PF_W, ebpf::MM_HEAP_START),  // heap
+        const EXPECTED_PROGRAM_HEADERS: [(u32, u64); 2] = [
+            (PF_R, ebpf::MM_RODATA_START),   // read only data
+            (PF_X, ebpf::MM_BYTECODE_START), // byte code
         ];
         let program_header_table =
             Elf64::slice_from_bytes::<Elf64Phdr>(elf_bytes, program_header_table_range.clone())?;
+        let mut expected_offset = program_header_table_range.end as u64;
         for (program_header, (p_flags, p_vaddr)) in program_header_table
             .iter()
             .zip(EXPECTED_PROGRAM_HEADERS.iter())
         {
-            let p_filesz = if (*p_flags & PF_W) != 0 {
-                0
-            } else {
-                program_header.p_memsz
-            };
             if program_header.p_type != PT_LOAD
                 || program_header.p_flags != *p_flags
-                || program_header.p_offset < program_header_table_range.end as u64
+                || program_header.p_offset != expected_offset
                 || program_header.p_offset >= elf_bytes.len() as u64
                 || program_header.p_offset.checked_rem(ebpf::INSN_SIZE as u64) != Some(0)
                 || program_header.p_vaddr != *p_vaddr
                 || program_header.p_paddr != *p_vaddr
-                || program_header.p_filesz != p_filesz
+                || program_header.p_filesz != program_header.p_memsz
                 || program_header.p_filesz
                     > (elf_bytes.len() as u64).saturating_sub(program_header.p_offset)
                 || program_header.p_filesz.checked_rem(ebpf::INSN_SIZE as u64) != Some(0)
@@ -479,10 +473,11 @@ impl<C: ContextObject> Executable<C> {
             {
                 return Err(ElfParserError::InvalidProgramHeader);
             }
+            expected_offset = expected_offset.saturating_add(program_header.p_filesz);
         }
 
-        let bytecode_header = &program_header_table[0];
-        let rodata_header = &program_header_table[1];
+        let rodata_header = &program_header_table[0];
+        let bytecode_header = &program_header_table[1];
         let text_section_vaddr = bytecode_header.p_vaddr;
         let text_section_range = bytecode_header.file_range().unwrap_or_default();
         let ro_section = Section::Borrowed(
@@ -504,10 +499,6 @@ impl<C: ContextObject> Executable<C> {
             .saturating_sub(bytecode_header.p_vaddr)
             .checked_div(ebpf::INSN_SIZE as u64)
             .unwrap_or_default() as usize;
-        let entry_insn = ebpf::get_insn(&elf_bytes[text_section_range.clone()], entry_pc);
-        if !entry_insn.is_function_start_marker() {
-            return Err(ElfParserError::InvalidFileHeader);
-        }
 
         let mut function_registry = FunctionRegistry::<usize>::default();
         let config = loader.get_config();
