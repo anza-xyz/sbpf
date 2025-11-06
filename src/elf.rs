@@ -627,6 +627,7 @@ impl<C: ContextObject> Executable<C> {
             return Err(ElfError::InvalidEntrypoint);
         }
         let entry_pc = if let Some(entry_pc) = (offset as usize).checked_div(ebpf::INSN_SIZE) {
+            function_registry.unregister_function(ebpf::hash_symbol_name(b"entrypoint"));
             function_registry.register_function_hashed_legacy(
                 &loader,
                 true,
