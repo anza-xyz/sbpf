@@ -112,7 +112,7 @@ impl Default for Config {
             sanitize_user_provided_values: true,
             optimize_rodata: true,
             aligned_memory_mapping: false,
-            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
+            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V3,
         }
     }
 }
