@@ -141,11 +141,8 @@ fn test_code_length_estimate() {
             };
             let mut executable = create_mockup_executable(config, &prog);
             let result = Executable::<TestContextObject>::jit_compile(&mut executable);
-            if result.is_err() {
-                assert!(matches!(
-                    result.unwrap_err(),
-                    EbpfError::UnsupportedInstruction
-                ));
+            if let Err(err) = result {
+                assert!(matches!(err, EbpfError::UnsupportedInstruction));
                 continue;
             }
             let machine_code_length = executable
