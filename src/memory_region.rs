@@ -360,17 +360,27 @@ impl<'a> AlignedMemoryMapping<'a> {
         sbpf_version: SBPFVersion,
         access_violation_handler: AccessViolationHandler,
     ) -> Result<Self, EbpfError> {
-        regions.insert(0, MemoryRegion::new_readonly(&[], 0));
         regions.sort();
-        for (index, region) in regions.iter().enumerate() {
-            if region
+        let mut expected_region_index = 0;
+        while expected_region_index < regions.len() {
+            let actual_region_index = regions
+                .get(expected_region_index)
+                .unwrap()
                 .vm_addr
                 .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
-                .unwrap_or(0)
-                != index as u64
-            {
-                return Err(EbpfError::InvalidMemoryRegion(index));
+                .unwrap_or(0) as usize;
+            if actual_region_index > expected_region_index {
+                regions.insert(
+                    expected_region_index,
+                    MemoryRegion::new_readonly(
+                        &[],
+                        (expected_region_index as u64).saturating_mul(ebpf::MM_REGION_SIZE),
+                    ),
+                );
+            } else if actual_region_index < expected_region_index {
+                return Err(EbpfError::InvalidMemoryRegion(actual_region_index));
             }
+            expected_region_index = expected_region_index.saturating_add(1);
         }
         Ok(Self {
             common: CommonMemoryMapping {
@@ -386,7 +396,7 @@ impl<'a> AlignedMemoryMapping<'a> {
     #[inline]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
-        if (1..self.common.regions.len()).contains(&index) {
+        if index < self.common.regions.len() {
             // Safety: bounds check above
             let region = unsafe { self.common.regions.get_unchecked(index) };
             return Some((index, region));
@@ -930,7 +940,7 @@ mod test {
             SBPFVersion::V4,
         )
         .unwrap();
-        assert!(m.find_region(ebpf::MM_REGION_SIZE - 1).is_none());
+        assert_eq!(m.find_region(ebpf::MM_REGION_SIZE - 1).unwrap().1.len, 0);
         assert_eq!(
             m.find_region(ebpf::MM_REGION_SIZE).unwrap().1.host_addr,
             mem1.as_ptr() as u64

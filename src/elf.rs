@@ -646,6 +646,20 @@ impl<C: ContextObject> Executable<C> {
                 .map(|s| (elf.section_name(s.sh_name).ok(), s)),
             elf_bytes.as_slice(),
         )?;
+        let ro_section_vaddr = match &ro_section {
+            Section::Owned(offset, _data) => *offset,
+            Section::Borrowed(offset, _byte_range) => *offset,
+        } as u64;
+        if config.optimize_rodata {
+            let ro_section_index = ro_section_vaddr
+                .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
+                .unwrap_or(0);
+            if ro_section_index != 1 {
+                return Err(ElfError::ValueOutOfBounds);
+            }
+        } else {
+            debug_assert_eq!(ro_section_vaddr, ebpf::MM_RODATA_START);
+        }
 
         Ok(Self {
             elf_bytes,
