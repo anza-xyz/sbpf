@@ -85,6 +85,10 @@ impl SBPFVersion {
     pub fn callx_uses_dst_reg(self) -> bool {
         self >= SBPFVersion::V3
     }
+    /// ... SIMD-0377
+    pub fn init_stack_at_bottom(self) -> bool {
+        self >= SBPFVersion::V3
+    }
 
     /// Calculate the target program counter for a CALL_IMM instruction depending on
     /// the SBPF version.

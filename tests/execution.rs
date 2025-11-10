@@ -1570,7 +1570,7 @@ fn test_conditional_jumps() {
 fn test_stack1() {
     test_interpreter_and_jit_asm!(
         "
-        add64 r10, 0
+        add64 r10, 64
         mov r1, 51
         stdw [r10-16], 0xab
         stdw [r10-8], 0xcd
@@ -1590,7 +1590,7 @@ fn test_stack1() {
 fn test_stack2() {
     test_syscall_asm!(
         "
-        add64 r10, 0
+        add64 r10, 64
         stb [r10-4], 0x01
         stb [r10-3], 0x02
         stb [r10-2], 0x03
@@ -1621,7 +1621,7 @@ fn test_stack2() {
 fn test_string_stack() {
     test_syscall_asm!(
         "
-        add64 r10, 0
+        add64 r10, 64
         mov r1, 0x78636261
         stxw [r10-8], r1
         mov r6, 0x0
@@ -1667,13 +1667,13 @@ fn test_err_dynamic_stack_out_of_bound() {
         ..Config::default()
     };
 
-    // The stack goes from MM_STACK_START + config.stack_size() to MM_STACK_START
+    // The stack goes from MM_STACK_START to MM_STACK_START + config.stack_size()
 
     // Check that accessing MM_STACK_START - 1 fails
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        stb [r10-0x3001], 0
+        stb [r10-1], 0
         exit",
         config.clone(),
         [],
@@ -1690,7 +1690,7 @@ fn test_err_dynamic_stack_out_of_bound() {
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        stb [r10], 0
+        stb [r10+0x3000], 0
         exit",
         config.clone(),
         [],
@@ -1727,7 +1727,7 @@ fn test_err_dynamic_stack_ptr_overflow() {
         call function_stage4
         exit
         function_stage4:
-        add r10, -0x40440
+        add r10, -0x440
         call function_final
         exit
         function_final:
@@ -1762,7 +1762,7 @@ fn test_dynamic_stack_frames_empty() {
         config.clone(),
         [],
         TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
+        ProgramResult::Ok(ebpf::MM_STACK_START),
     );
 }
 
@@ -1773,10 +1773,10 @@ fn test_dynamic_frame_ptr() {
     // Check that changes to r10 are immediately visible
     test_interpreter_and_jit_asm!(
         "
-        add r10, -64
-        stxdw [r10+8], r10
+        add r10, 64
+        stxdw [r10-8], r10
         call function_foo
-        ldxdw r0, [r10+8]
+        ldxdw r0, [r10-8]
         exit
         function_foo:
         add r10, 0
@@ -1784,13 +1784,13 @@ fn test_dynamic_frame_ptr() {
         config.clone(),
         [],
         TestContextObject::new(7),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
+        ProgramResult::Ok(ebpf::MM_STACK_START + 64),
     );
 
     // Check that changes to r10 continue to be visible in a callee
     test_interpreter_and_jit_asm!(
         "
-        add r10, -64
+        add r10, 64
         call function_foo
         exit
         function_foo:
@@ -1800,7 +1800,7 @@ fn test_dynamic_frame_ptr() {
         config.clone(),
         [],
         TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
+        ProgramResult::Ok(ebpf::MM_STACK_START + 64),
     );
 
     // And check that changes to r10 are undone after returning
@@ -1811,13 +1811,13 @@ fn test_dynamic_frame_ptr() {
         mov r0, r10
         exit
         function_foo:
-        add r10, -64
+        add r10, 64
         exit
         ",
         config.clone(),
         [],
         TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
+        ProgramResult::Ok(ebpf::MM_STACK_START),
     );
 }
 
@@ -2013,7 +2013,7 @@ fn test_bpf_to_bpf_scratch_registers() {
 fn test_syscall_parameter_on_stack() {
     test_syscall_asm!(
         "
-        add64 r10, 0
+        add64 r10, 0x100
         mov64 r1, r10
         add64 r1, -0x100
         mov64 r2, 0x1
@@ -3833,7 +3833,7 @@ fn test_symbol_relocation() {
     // No relocation is necessary in SBFPv3
     test_syscall_asm!(
         "
-        add64 r10, 0
+        add64 r10, 64
         mov64 r1, r10
         add64 r1, -0x1
         mov64 r2, 0x1

@@ -316,11 +316,14 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         let config = loader.get_config();
         let mut registers = [0u64; 12];
         registers[ebpf::FRAME_PTR_REG] =
-            ebpf::MM_STACK_START.saturating_add(if sbpf_version.dynamic_stack_frames() {
+            ebpf::MM_STACK_START.saturating_add(if sbpf_version.init_stack_at_bottom() {
+                // within a frame the stack grows down, but frames are ascending dynamically
+                0
+            } else if sbpf_version.dynamic_stack_frames() {
                 // the stack is fully descending, frames start as empty and change size anytime r11 is modified
                 stack_len
             } else {
-                // within a frame the stack grows down, but frames are ascending
+                // within a frame the stack grows down, but frames are ascending statically
                 config.stack_frame_size
             } as u64);
         if !config.enable_address_translation {
