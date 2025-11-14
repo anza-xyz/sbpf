@@ -145,7 +145,7 @@ fn bench_jit_vs_interpreter_address_translation(bencher: &mut Bencher) {
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 static ADDRESS_TRANSLATION_STACK_CODE: &str = "
-    add64 r10, 0
+    add64 r10, 4096
     mov r1, r2
     and r1, 4095
     mov r3, r10
@@ -245,8 +245,8 @@ fn bench_jit_vs_interpreter_call_depth_dynamic(bencher: &mut Bencher) {
     jlt r6, 1024, -4
     exit
     function_foo:
-    add r10, -64
-    stw [r10+4], 0x11223344
+    add r10, 64
+    stw [r10-4], 0x11223344
     mov r6, r1
     jeq r6, 0, +3
     mov r1, r6
