@@ -81,6 +81,8 @@ pub struct Config {
     pub sanitize_user_provided_values: bool,
     /// Avoid copying read only sections when possible
     pub optimize_rodata: bool,
+    /// Allow a memory region at age zero in the aligned memory mapping
+    pub allow_memory_region_zero: bool,
     /// Use aligned memory mapping
     pub aligned_memory_mapping: bool,
     /// Allowed [SBPFVersion]s
@@ -111,6 +113,7 @@ impl Default for Config {
             #[cfg(feature = "jit")]
             sanitize_user_provided_values: true,
             optimize_rodata: true,
+            allow_memory_region_zero: true,
             aligned_memory_mapping: false,
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
         }
