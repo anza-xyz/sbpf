@@ -35,6 +35,10 @@ impl ContextObject for TestContextObject {
     fn get_remaining(&self) -> u64 {
         self.remaining
     }
+
+    fn get_nesting_level(&self) -> u32 {
+        0
+    }
 }
 
 impl TestContextObject {
