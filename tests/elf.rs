@@ -58,7 +58,12 @@ fn test_strict_header() {
     assert_eq!(err, ElfParserError::OutOfBounds);
 
     // Break the file header one byte at a time
-    let expected_results = std::iter::repeat_n(&Err(ElfParserError::InvalidFileHeader), 40)
+    let expected_results = std::iter::repeat_n(&Err(ElfParserError::InvalidFileHeader), 16)
+        .chain(std::iter::repeat_n(&Ok(()), 2))
+        .chain(std::iter::repeat_n(
+            &Err(ElfParserError::InvalidFileHeader),
+            22,
+        ))
         .chain(std::iter::repeat_n(&Ok(()), 12))
         .chain(std::iter::repeat_n(
             &Err(ElfParserError::InvalidFileHeader),
@@ -81,20 +86,9 @@ fn test_strict_header() {
         std::iter::repeat_n(&Err(ElfParserError::InvalidProgramHeader), 48)
             .chain(std::iter::repeat_n(&Ok(()), 8))
             .collect::<Vec<_>>();
-    let expected_results_writable =
-        std::iter::repeat_n(&Err(ElfParserError::InvalidProgramHeader), 40)
-            .chain(std::iter::repeat_n(&Ok(()), 4))
-            .chain(std::iter::repeat_n(
-                &Err(ElfParserError::InvalidProgramHeader),
-                4,
-            ))
-            .chain(std::iter::repeat_n(&Ok(()), 8))
-            .collect::<Vec<_>>();
     let expected_results = vec![
         expected_results_readonly.iter(),
         expected_results_readonly.iter(),
-        expected_results_writable.iter(),
-        expected_results_writable.iter(),
     ];
     for (header_index, expected_results) in expected_results.into_iter().enumerate() {
         for (offset, expected) in (std::mem::size_of::<Elf64Ehdr>()
@@ -114,18 +108,10 @@ fn test_strict_header() {
     // Check that an unaligned program header length fails
     {
         let mut elf_bytes = elf_bytes.clone();
-        elf_bytes[0x60] = 0x29;
-        elf_bytes[0x68] = 0x29;
+        elf_bytes[0x98] = 0x29;
+        elf_bytes[0xA0] = 0x29;
         let err = ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
         assert_eq!(err, ElfParserError::InvalidProgramHeader);
-    }
-
-    // Check that an entrypoint missing a function start marker fails
-    {
-        let mut elf_bytes = elf_bytes.clone();
-        elf_bytes[0x1B8] = 0x00;
-        let err = ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
-        assert_eq!(err, ElfParserError::InvalidFileHeader);
     }
 }
 

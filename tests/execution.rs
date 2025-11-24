@@ -2035,7 +2035,9 @@ fn test_callx() {
         "
         add64 r10, 0
         mov64 r0, 0x0
-        or64 r8, 0x28
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x38
         callx r8
         exit
         function_foo:
@@ -2043,7 +2045,7 @@ fn test_callx() {
         mov64 r0, 0x2A
         exit",
         [],
-        TestContextObject::new(8),
+        TestContextObject::new(10),
         ProgramResult::Ok(42),
     );
 }
@@ -2072,7 +2074,7 @@ fn test_err_callx_oob_high() {
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        lddw r0, 0x100000000
+        lddw r0, 0x200000000
         callx r0
         exit",
         [],
@@ -2163,11 +2165,13 @@ fn test_err_reg_stack_depth() {
         test_interpreter_and_jit_asm!(
             "
             add64 r10, 0
+            mov64 r0, 0x1
+            lsh64 r0, 0x20
             callx r0
             exit",
             config,
             [],
-            TestContextObject::new(2 * max_call_depth as u64),
+            TestContextObject::new(4 * max_call_depth as u64),
             ProgramResult::Err(EbpfError::CallDepthExceeded),
         );
     }
@@ -2423,7 +2427,9 @@ fn test_tight_infinite_recursion_callx() {
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        or64 r8, 0x20
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x30
         call function_foo
         exit
         function_foo:
@@ -2431,7 +2437,7 @@ fn test_tight_infinite_recursion_callx() {
         callx r8
         exit",
         [],
-        TestContextObject::new(7),
+        TestContextObject::new(9),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
 }
@@ -2542,7 +2548,9 @@ fn test_err_exit_capped() {
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        or64 r0, 0x20
+        mov64 r0, 0x1
+        lsh64 r0, 0x20
+        or64 r0, 0x30
         callx r0
         exit
         function_foo:
@@ -2550,13 +2558,15 @@ fn test_err_exit_capped() {
         exit
         ",
         [],
-        TestContextObject::new(5),
+        TestContextObject::new(7),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        or64 r0, 0x20
+        mov64 r0, 0x1
+        lsh64 r0, 0x20
+        or64 r0, 0x30
         callx r0
         exit
         function_foo:
@@ -2565,7 +2575,7 @@ fn test_err_exit_capped() {
         exit
         ",
         [],
-        TestContextObject::new(6),
+        TestContextObject::new(8),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
     test_interpreter_and_jit_asm!(
@@ -2599,11 +2609,13 @@ fn test_far_jumps() {
         exit
         function_c:
         add64 r10, 0
-        mov32 r1, 0x18
-        callx r1
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x18
+        callx r8
         exit",
         [],
-        TestContextObject::new(9),
+        TestContextObject::new(11),
         ProgramResult::Ok(0),
     );
 }
@@ -2647,7 +2659,7 @@ fn test_syscall_static() {
         (
             "log" => syscalls::SyscallString::vm,
         ),
-        TestContextObject::new(6),
+        TestContextObject::new(4),
         ProgramResult::Ok(0),
     );
 }
@@ -2680,7 +2692,7 @@ fn test_reloc_64_64_sbpfv0() {
         [],
         (),
         TestContextObject::new(2),
-        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x120),
+        ProgramResult::Ok(ebpf::MM_BYTECODE_START + 0x120),
     );
 }
 
@@ -2713,7 +2725,7 @@ fn test_reloc_64_relative_sbpfv0() {
         [],
         (),
         TestContextObject::new(2),
-        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x138),
+        ProgramResult::Ok(ebpf::MM_BYTECODE_START + 0x138),
     );
 }
 
@@ -2751,7 +2763,7 @@ fn test_reloc_64_relative_data() {
         config,
         [],
         (),
-        TestContextObject::new(4),
+        TestContextObject::new(3),
         ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
@@ -2779,7 +2791,7 @@ fn test_reloc_64_relative_data_sbpfv0() {
         [],
         (),
         TestContextObject::new(3),
-        ProgramResult::Ok(ebpf::MM_RODATA_START + 0x140),
+        ProgramResult::Ok(ebpf::MM_BYTECODE_START + 0x140),
     );
 }
 
@@ -3223,7 +3235,9 @@ fn test_capped_after_callx() {
         "
         add64 r10, 0
         mov64 r0, 0x0
-        or64 r8, 0x28
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x38
         callx r8
         exit
         function_foo:
@@ -3231,7 +3245,7 @@ fn test_capped_after_callx() {
         mov64 r0, 0x2A
         exit",
         [],
-        TestContextObject::new(4),
+        TestContextObject::new(6),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
 }

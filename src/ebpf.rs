@@ -39,10 +39,10 @@ pub const VIRTUAL_ADDRESS_BITS: usize = 32;
 
 /// Size (and alignment) of a memory region
 pub const MM_REGION_SIZE: u64 = 1 << VIRTUAL_ADDRESS_BITS;
-/// Virtual address of the bytecode region (in SBPFv3)
-pub const MM_BYTECODE_START: u64 = 0;
-/// Virtual address of the readonly data region (also contains the bytecode until SBPFv3)
-pub const MM_RODATA_START: u64 = MM_REGION_SIZE;
+/// Virtual address of the readonly data region (in SBPFv3)
+pub const MM_RODATA_START: u64 = 0;
+/// Virtual address of the bytecode region (also contains the rodata until SBPFv3)
+pub const MM_BYTECODE_START: u64 = MM_REGION_SIZE;
 /// Virtual address of the stack region
 pub const MM_STACK_START: u64 = MM_REGION_SIZE * 2;
 /// Virtual address of the heap region
