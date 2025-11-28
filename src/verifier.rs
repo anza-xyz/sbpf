@@ -184,7 +184,9 @@ fn check_registers(
 
     match (insn.dst, store) {
         (0..=9, _) | (10, true) => Ok(()),
-        (10, false) if sbpf_version.dynamic_stack_frames() && insn.opc == ebpf::ADD64_IMM => Ok(()),
+        (10, false) if sbpf_version.manual_stack_frame_bump() && insn.opc == ebpf::ADD64_IMM => {
+            Ok(())
+        }
         (10, false) => Err(VerifierError::CannotWriteR10(insn_ptr)),
         (_, _) => Err(VerifierError::InvalidDestinationRegister(insn_ptr)),
     }
@@ -293,7 +295,7 @@ impl Verifier for RequisiteVerifier {
                 ebpf::BE         => { check_imm_endian(&insn, insn_ptr)?; },
 
                 // BPF_ALU64_STORE class
-                ebpf::ADD64_IMM  if insn.dst == ebpf::FRAME_PTR_REG as u8 && sbpf_version.dynamic_stack_frames() => {
+                ebpf::ADD64_IMM  if insn.dst == ebpf::FRAME_PTR_REG as u8 && sbpf_version.manual_stack_frame_bump() => {
                     check_imm_aligned(&insn, insn_ptr, 64)?;
                 },
                 ebpf::ADD64_IMM  => {},

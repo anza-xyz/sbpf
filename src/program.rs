@@ -27,8 +27,17 @@ pub enum SBPFVersion {
 
 impl SBPFVersion {
     /// Enable SIMD-0166: SBPF dynamic stack frames
-    pub fn dynamic_stack_frames(self) -> bool {
+    ///
+    /// Allows usage of `add64 r10, imm`.
+    pub fn manual_stack_frame_bump(self) -> bool {
         self >= SBPFVersion::V1
+    }
+    /// ... SIMD-0377
+    ///
+    /// Initializes the stack at the bottom with one frame,
+    /// then add one frame at every `call` and `callx`.
+    pub fn automatic_stack_frame_bump(self) -> bool {
+        self != SBPFVersion::V1 && self != SBPFVersion::V2
     }
 
     /// Enable SIMD-0174: SBPF arithmetics improvements
@@ -83,10 +92,6 @@ impl SBPFVersion {
     }
     /// ... SIMD-0377
     pub fn callx_uses_dst_reg(self) -> bool {
-        self >= SBPFVersion::V3
-    }
-    /// ... SIMD-0377
-    pub fn init_stack_at_bottom(self) -> bool {
         self >= SBPFVersion::V3
     }
 

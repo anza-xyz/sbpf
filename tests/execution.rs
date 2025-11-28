@@ -1672,7 +1672,7 @@ fn test_err_dynamic_stack_out_of_bound() {
     // Check that accessing MM_STACK_START - 1 fails
     test_interpreter_and_jit_asm!(
         "
-        add64 r10, 0
+        add64 r10, -0x1000
         stb [r10-1], 0
         exit",
         config.clone(),
@@ -1689,7 +1689,7 @@ fn test_err_dynamic_stack_out_of_bound() {
     // Check that accessing MM_STACK_START + expected_stack_len fails
     test_interpreter_and_jit_asm!(
         "
-        add64 r10, 0
+        add64 r10, -0x1000
         stb [r10+0x3000], 0
         exit",
         config.clone(),
@@ -1727,7 +1727,7 @@ fn test_err_dynamic_stack_ptr_overflow() {
         call function_stage4
         exit
         function_stage4:
-        add r10, -0x440
+        add r10, -0x6440
         call function_final
         exit
         function_final:
@@ -1747,9 +1747,11 @@ fn test_err_dynamic_stack_ptr_overflow() {
 
 #[test]
 fn test_dynamic_stack_frames_empty() {
-    let config = Config::default();
-
-    // Check that unless explicitly resized the stack doesn't grow
+    // In SBPFv1 the stack starts at the top and does not grow automatically
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+        ..Config::default()
+    };
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
@@ -1762,7 +1764,24 @@ fn test_dynamic_stack_frames_empty() {
         config.clone(),
         [],
         TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START),
+        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
+    );
+
+    // In SBPFv1 the stack starts at the bottom and does grow automatically
+    let config = Config::default();
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        call function_foo
+        exit
+        function_foo:
+        add64 r10, 0
+        mov r0, r10
+        exit",
+        config,
+        [],
+        TestContextObject::new(6),
+        ProgramResult::Ok(ebpf::MM_STACK_START + 0x2000),
     );
 }
 
@@ -1784,7 +1803,7 @@ fn test_dynamic_frame_ptr() {
         config.clone(),
         [],
         TestContextObject::new(7),
-        ProgramResult::Ok(ebpf::MM_STACK_START + 64),
+        ProgramResult::Ok(ebpf::MM_STACK_START + 0x1040),
     );
 
     // Check that changes to r10 continue to be visible in a callee
@@ -1800,7 +1819,7 @@ fn test_dynamic_frame_ptr() {
         config.clone(),
         [],
         TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + 64),
+        ProgramResult::Ok(ebpf::MM_STACK_START + 0x2040),
     );
 
     // And check that changes to r10 are undone after returning
@@ -1817,7 +1836,7 @@ fn test_dynamic_frame_ptr() {
         config.clone(),
         [],
         TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START),
+        ProgramResult::Ok(ebpf::MM_STACK_START + 0x1000),
     );
 }
 

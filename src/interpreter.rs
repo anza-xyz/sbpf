@@ -146,11 +146,22 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
             throw_error!(self, EbpfError::CallDepthExceeded);
         }
 
-        if !self.executable.get_sbpf_version().dynamic_stack_frames() {
+        if self
+            .executable
+            .get_sbpf_version()
+            .automatic_stack_frame_bump()
+        {
             // With fixed frames we start the new frame at the next fixed offset
-            let stack_frame_size =
-                config.stack_frame_size * if config.enable_stack_frame_gaps { 2 } else { 1 };
-            self.reg[ebpf::FRAME_PTR_REG] += stack_frame_size as u64;
+            let stack_frame_size = config.stack_frame_size
+                * if !self.executable.get_sbpf_version().manual_stack_frame_bump()
+                    && config.enable_stack_frame_gaps
+                {
+                    2
+                } else {
+                    1
+                };
+            self.reg[ebpf::FRAME_PTR_REG] =
+                self.reg[ebpf::FRAME_PTR_REG].wrapping_add(stack_frame_size as u64);
         }
 
         true
