@@ -391,7 +391,7 @@ pub fn assemble<C: ContextObject>(
                                 insn(opc | ebpf::BPF_X, *dst, *src, 0, 0)
                             }
                             (AluBinary, [Register(10), Integer(imm)]) if opc == ebpf::ADD64_IMM => {
-                                if sbpf_version.dynamic_stack_frames() {
+                                if sbpf_version.manual_stack_frame_bump() {
                                     insn(opc | ebpf::BPF_K, 10, 0, 0, *imm)
                                 } else {
                                     insn(ebpf::OR64_IMM, 0, 0, 0, 0) // no-op

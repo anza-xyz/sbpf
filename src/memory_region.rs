@@ -194,7 +194,7 @@ impl CommonMemoryMapping<'_> {
             .saturating_sub(ebpf::MM_STACK_START as i64)
             .checked_div(self.config.stack_frame_size as i64)
             .unwrap_or(0);
-        if !self.sbpf_version.dynamic_stack_frames()
+        if !self.sbpf_version.manual_stack_frame_bump()
             && (-1..(self.config.max_call_depth as i64).saturating_add(1)).contains(&stack_frame)
         {
             ProgramResult::Err(EbpfError::StackAccessViolation(
