@@ -178,7 +178,7 @@ fn test_verifier_err_lddw_cannot_be_last() {
 
 #[test]
 fn test_verifier_err_invalid_reg_dst() {
-    // r11 is disabled when sbpf_version.manual_stack_frame_bump()=false, and only sub and add are
+    // r10 is disabled when sbpf_version.manual_stack_frame_bump()=false, and only sub and add are
     // allowed when sbpf_version.manual_stack_frame_bump()=true
     for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
         let executable = assemble::<TestContextObject>(
@@ -199,7 +199,7 @@ fn test_verifier_err_invalid_reg_dst() {
 
 #[test]
 fn test_verifier_err_invalid_reg_src() {
-    // r11 is disabled when sbpf_version.manual_stack_frame_bump()=false, and only sub and add are
+    // r10 is disabled when sbpf_version.manual_stack_frame_bump()=false, and only sub and add are
     // allowed when sbpf_version.manual_stack_frame_bump()=true
     for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
         let executable = assemble::<TestContextObject>(

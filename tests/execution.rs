@@ -1767,7 +1767,7 @@ fn test_dynamic_stack_frames_empty() {
         ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
     );
 
-    // In SBPFv1 the stack starts at the bottom and does grow automatically
+    // In SBPFv3 the stack starts at the bottom and does grow automatically
     let config = Config::default();
     test_interpreter_and_jit_asm!(
         "
