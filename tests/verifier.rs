@@ -177,45 +177,29 @@ fn test_verifier_err_lddw_cannot_be_last() {
 }
 
 #[test]
+#[should_panic(expected = "InvalidDestinationRegister(0)")]
 fn test_verifier_err_invalid_reg_dst() {
-    // r10 is disabled when sbpf_version.manual_stack_frame_bump()=false, and only sub and add are
-    // allowed when sbpf_version.manual_stack_frame_bump()=true
-    for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
-        let executable = assemble::<TestContextObject>(
-            "
-            add64 r10, 0
-            mov r11, 1
-            exit",
-            Arc::new(BuiltinProgram::new_loader(Config {
-                enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
-                ..Config::default()
-            })),
-        )
-        .unwrap();
-        let result = executable.verify::<RequisiteVerifier>();
-        assert_error!(result, "VerifierError(InvalidDestinationRegister(1))");
-    }
+    let executable = assemble::<TestContextObject>(
+        "
+        mov r11, 1
+        exit",
+        Arc::new(BuiltinProgram::new_mock()),
+    )
+    .unwrap();
+    executable.verify::<RequisiteVerifier>().unwrap();
 }
 
 #[test]
+#[should_panic(expected = "InvalidSourceRegister(0)")]
 fn test_verifier_err_invalid_reg_src() {
-    // r10 is disabled when sbpf_version.manual_stack_frame_bump()=false, and only sub and add are
-    // allowed when sbpf_version.manual_stack_frame_bump()=true
-    for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
-        let executable = assemble::<TestContextObject>(
-            "
-            add64 r10, 0
-            mov r0, r11
-            exit",
-            Arc::new(BuiltinProgram::new_loader(Config {
-                enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
-                ..Config::default()
-            })),
-        )
-        .unwrap();
-        let result = executable.verify::<RequisiteVerifier>();
-        assert_error!(result, "VerifierError(InvalidSourceRegister(1))");
-    }
+    let executable = assemble::<TestContextObject>(
+        "
+        mov r0, r11
+        exit",
+        Arc::new(BuiltinProgram::new_mock()),
+    )
+    .unwrap();
+    executable.verify::<RequisiteVerifier>().unwrap();
 }
 
 #[test]
@@ -375,6 +359,24 @@ fn test_verifier_known_syscall() {
         prog,
         Arc::new(loader),
         SBPFVersion::V4,
+        FunctionRegistry::default(),
+    )
+    .unwrap();
+    executable.verify::<RequisiteVerifier>().unwrap();
+}
+
+#[test]
+#[should_panic(expected = "CannotWriteR10(0)")]
+fn test_verifier_err_add_r10() {
+    let prog = &[
+        0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+    ];
+
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        prog,
+        Arc::new(BuiltinProgram::new_loader(Config::default())),
+        SBPFVersion::V0,
         FunctionRegistry::default(),
     )
     .unwrap();
