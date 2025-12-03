@@ -65,15 +65,7 @@ macro_rules! throw_error {
 
 macro_rules! check_pc {
     ($self:expr, $next_pc:ident, $target_pc:expr) => {
-        if ($target_pc as usize)
-            .checked_mul(ebpf::INSN_SIZE)
-            .and_then(|offset| {
-                $self
-                    .program
-                    .get(offset..offset.saturating_add(ebpf::INSN_SIZE))
-            })
-            .is_some()
-        {
+        if ebpf::is_pc_in_program($self.program, $target_pc as usize) {
             $next_pc = $target_pc;
         } else {
             throw_error!($self, EbpfError::CallOutsideTextSegment);
@@ -550,46 +542,39 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                 check_pc!(self, next_pc, target_pc.wrapping_sub(self.program_vm_addr) / ebpf::INSN_SIZE as u64);
             },
 
-            // Do not delegate the check to the verifier, since self.registered functions can be
-            // changed after the program has been verified.
             ebpf::CALL_IMM => {
+                let mut resolved = false;
+                // External syscall
+                if !self.executable.get_sbpf_version().static_syscalls() || insn.src == 0 {
+                    if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
+                        self.reg[0] = match self.dispatch_syscall(function) {
+                            ProgramResult::Ok(value) => *value,
+                            ProgramResult::Err(_err) => return false,
+                        };
+                        resolved = true;
+                    }
+                }
+                // Internal call
                 if self.executable.get_sbpf_version().static_syscalls() {
-                    if insn.src == 1 {
-                        // make BPF to BPF call
+                    let target_pc = (next_pc as i64).saturating_add(insn.imm);
+                    if insn.src == 1 && ebpf::is_pc_in_program(self.program, target_pc as usize) {
                         if !self.push_frame(config) {
                             return false;
                         }
-                        let target_pc = (self.reg[11] as i64).saturating_add(insn.imm).saturating_add(1);
-                        check_pc!(self, next_pc, target_pc as u64);
-                    } else if insn.src == 0 {
-                        // Static syscall
-                        if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
-                            self.reg[0] = match self.dispatch_syscall(function) {
-                                ProgramResult::Ok(value) => *value,
-                                ProgramResult::Err(_err) => return false,
-                            };
-                        } else {
-                            throw_error!(self, EbpfError::UnsupportedInstruction);
-                        }
-                    } else {
-                        throw_error!(self, EbpfError::UnsupportedInstruction);
+                        next_pc = target_pc as u64;
+                        resolved = true;
                     }
-                } else if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
-                    // SBPFv0 syscall
-                    self.reg[0] = match self.dispatch_syscall(function) {
-                        ProgramResult::Ok(value) => *value,
-                        ProgramResult::Err(_err) => return false,
-                    };
                 } else if let Some((_, target_pc)) =
                     self.executable
                     .get_function_registry()
                     .lookup_by_key(insn.imm as u32) {
-                    // make BPF to BPF call
                     if !self.push_frame(config) {
                         return false;
                     }
                     check_pc!(self, next_pc, target_pc as u64);
-                } else {
+                    resolved = true;
+                }
+                if !resolved {
                     throw_error!(self, EbpfError::UnsupportedInstruction);
                 }
             }

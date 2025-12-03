@@ -627,6 +627,10 @@ impl Insn {
     }
 }
 
+/// Bounds check of the program counter
+pub fn is_pc_in_program(prog: &[u8], pc: usize) -> bool {
+    pc.saturating_add(1).saturating_mul(INSN_SIZE) <= prog.len()
+}
 /// Get the instruction at `idx` of an eBPF program. `idx` is the index (number) of the
 /// instruction (not a byte offset). The first instruction has index 0.
 ///
@@ -664,7 +668,7 @@ pub fn get_insn(prog: &[u8], pc: usize) -> Insn {
     // size, and indexes should be fine in the interpreter/JIT. But this function is publicly
     // available and user can call it with any `pc`, so we have to check anyway.
     debug_assert!(
-        (pc + 1) * INSN_SIZE <= prog.len(),
+        is_pc_in_program(prog, pc),
         "cannot reach instruction at index {:?} in program containing {:?} bytes",
         pc,
         prog.len()
