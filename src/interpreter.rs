@@ -557,7 +557,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                 // Internal call
                 if self.executable.get_sbpf_version().static_syscalls() {
                     let target_pc = (next_pc as i64).saturating_add(insn.imm);
-                    if insn.src == 1 && ebpf::is_pc_in_program(self.program, target_pc as usize) {
+                    if ebpf::is_pc_in_program(self.program, target_pc as usize) && insn.src == 1 {
                         if !self.push_frame(config) {
                             return false;
                         }
