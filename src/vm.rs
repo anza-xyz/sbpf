@@ -364,17 +364,25 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
         if interpreted {
+            #[cold]
+            #[inline(never)]
             #[cfg(feature = "debugger")]
-            let debug_port = self.debug_port.clone();
-            let mut interpreter = Interpreter::new(self, executable, self.registers);
-            #[cfg(feature = "debugger")]
-            if let Some(debug_port) = debug_port {
-                crate::debugger::execute(&mut interpreter, debug_port);
-            } else {
+            fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
+                let debug_port = interpreter.vm.debug_port.clone();
+                if let Some(debug_port) = debug_port {
+                    crate::debugger::execute(&mut interpreter, debug_port);
+                } else {
+                    while interpreter.step() {}
+                }
+            }
+            #[cold]
+            #[inline(never)]
+            #[cfg(not(feature = "debugger"))]
+            fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
                 while interpreter.step() {}
             }
-            #[cfg(not(feature = "debugger"))]
-            while interpreter.step() {}
+            let interpreter = Interpreter::new(self, executable, self.registers);
+            run_interpreter(interpreter);
         } else {
             #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             {

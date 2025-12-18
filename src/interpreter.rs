@@ -175,6 +175,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
     ///
     /// Returns false if the program terminated or threw an error.
     #[rustfmt::skip]
+    #[inline(always)]
     pub fn step(&mut self) -> bool {
         let config = &self.executable.get_config();
 
