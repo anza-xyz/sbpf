@@ -671,6 +671,7 @@ pub fn get_insn(prog: &[u8], pc: usize) -> Insn {
     get_insn_unchecked(prog, pc)
 }
 /// Same as `get_insn` except not checked
+#[inline]
 pub fn get_insn_unchecked(prog: &[u8], pc: usize) -> Insn {
     Insn {
         ptr: pc,
