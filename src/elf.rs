@@ -438,7 +438,7 @@ impl<C: ContextObject> Executable<C> {
             // file_header.e_flags
             || file_header.e_ehsize != mem::size_of::<Elf64Ehdr>() as u16
             || file_header.e_phentsize != mem::size_of::<Elf64Phdr>() as u16
-            || file_header.e_phnum < EXPECTED_PROGRAM_HEADERS.len() as u16
+            || file_header.e_phnum == 0
             || program_header_table_range.end > elf_bytes.len()
             || file_header.e_shentsize != mem::size_of::<Elf64Shdr>() as u16
             // file_header.e_shnum
@@ -453,10 +453,15 @@ impl<C: ContextObject> Executable<C> {
         ];
         let program_header_table =
             Elf64::slice_from_bytes::<Elf64Phdr>(elf_bytes, program_header_table_range.clone())?;
+        let mut expected_program_headers = EXPECTED_PROGRAM_HEADERS.iter();
+        if program_header_table[0].p_flags != EXPECTED_PROGRAM_HEADERS[0].0 {
+            // If the first program header is not marked as PF_R (readonly),
+            // then expect to start at the second program header instead.
+            expected_program_headers.next();
+        }
         let mut expected_offset = program_header_table_range.end as u64;
-        for (program_header, (p_flags, p_vaddr)) in program_header_table
-            .iter()
-            .zip(EXPECTED_PROGRAM_HEADERS.iter())
+        for (program_header, (p_flags, p_vaddr)) in
+            program_header_table.iter().zip(expected_program_headers)
         {
             if program_header.p_type != PT_LOAD
                 || program_header.p_flags != *p_flags
