@@ -296,7 +296,7 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// ProgramResult inlined
     pub program_result: ProgramResult,
     /// MemoryMapping inlined
-    pub memory_mapping: MemoryMapping<'a>,
+    pub memory_mapping: MemoryMapping,
     /// Stack of CallFrames used by the Interpreter
     pub call_frames: Vec<CallFrame>,
     /// Loader built-in program
@@ -314,7 +314,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         loader: Arc<BuiltinProgram<C>>,
         sbpf_version: SBPFVersion,
         context_object: &'a mut C,
-        mut memory_mapping: MemoryMapping<'a>,
+        mut memory_mapping: MemoryMapping,
         stack_len: usize,
     ) -> Self {
         let config = loader.get_config();

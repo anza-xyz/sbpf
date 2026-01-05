@@ -207,7 +207,7 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
     heap: &'a mut AlignedMemory<{ HOST_ALIGN }>,
     additional_regions: Vec<MemoryRegion>,
     access_violation_handler: Option<AccessViolationHandler>,
-) -> Result<MemoryMapping<'a>, EbpfError> {
+) -> Result<MemoryMapping, EbpfError> {
     let config = executable.get_config();
     let sbpf_version = executable.get_sbpf_version();
     let regions: Vec<MemoryRegion> = vec![

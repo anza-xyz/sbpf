@@ -172,18 +172,20 @@ pub enum AccessType {
 }
 
 /// Common parts of [UnalignedMemoryMapping] and [AlignedMemoryMapping]
-pub struct CommonMemoryMapping<'a> {
+pub struct CommonMemoryMapping {
     /// Mapped memory regions
     regions: Box<[MemoryRegion]>,
     /// Access violation handler
     access_violation_handler: AccessViolationHandler,
     /// VM configuration
-    config: &'a Config,
+    allow_memory_region_zero: bool,
+    max_call_depth: i64,
+    stack_frame_size: i64,
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
 }
 
-impl CommonMemoryMapping<'_> {
+impl CommonMemoryMapping {
     fn generate_access_violation(
         &self,
         access_type: AccessType,
@@ -192,10 +194,10 @@ impl CommonMemoryMapping<'_> {
     ) -> ProgramResult {
         let stack_frame = (vm_addr as i64)
             .saturating_sub(ebpf::MM_STACK_START as i64)
-            .checked_div(self.config.stack_frame_size as i64)
+            .checked_div(self.stack_frame_size)
             .unwrap_or(0);
         if !self.sbpf_version.manual_stack_frame_bump()
-            && (-1..(self.config.max_call_depth as i64).saturating_add(1)).contains(&stack_frame)
+            && (-1..self.max_call_depth.saturating_add(1)).contains(&stack_frame)
         {
             ProgramResult::Err(EbpfError::StackAccessViolation(
                 access_type,
@@ -222,9 +224,9 @@ impl CommonMemoryMapping<'_> {
 }
 
 /// Memory mapping based on eytzinger search.
-pub struct UnalignedMemoryMapping<'a> {
+pub struct UnalignedMemoryMapping {
     /// Common parts
-    common: CommonMemoryMapping<'a>,
+    common: CommonMemoryMapping,
     /// Regions vm_addr fields in Eytzinger order
     region_addresses: Box<[u64]>,
     /// Converts the Eytzinger order back to the original order
@@ -233,7 +235,7 @@ pub struct UnalignedMemoryMapping<'a> {
     cache: UnsafeCell<MappingCache>,
 }
 
-impl fmt::Debug for UnalignedMemoryMapping<'_> {
+impl fmt::Debug for UnalignedMemoryMapping {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnalignedMemoryMapping")
             .field("regions", &self.common.regions)
@@ -242,7 +244,7 @@ impl fmt::Debug for UnalignedMemoryMapping<'_> {
     }
 }
 
-impl<'a> UnalignedMemoryMapping<'a> {
+impl<'a> UnalignedMemoryMapping {
     fn construct_eytzinger_order(&mut self, mut in_index: usize, out_index: usize) -> usize {
         if out_index >= self.common.regions.len() {
             return in_index;
@@ -281,7 +283,9 @@ impl<'a> UnalignedMemoryMapping<'a> {
             common: CommonMemoryMapping {
                 regions: regions.into_boxed_slice(),
                 access_violation_handler,
-                config,
+                allow_memory_region_zero: config.allow_memory_region_zero,
+                max_call_depth: config.max_call_depth as i64,
+                stack_frame_size: config.stack_frame_size as i64,
                 sbpf_version,
             },
             region_addresses: vec![0; number_of_regions].into_boxed_slice(),
@@ -341,12 +345,12 @@ impl<'a> UnalignedMemoryMapping<'a> {
 
 /// Memory mapping that uses the upper half of an address to identify the
 /// underlying memory region.
-pub struct AlignedMemoryMapping<'a> {
+pub struct AlignedMemoryMapping {
     /// Common parts
-    common: CommonMemoryMapping<'a>,
+    common: CommonMemoryMapping,
 }
 
-impl fmt::Debug for AlignedMemoryMapping<'_> {
+impl fmt::Debug for AlignedMemoryMapping {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("AlignedMemoryMapping")
             .field("regions", &self.common.regions)
@@ -354,11 +358,11 @@ impl fmt::Debug for AlignedMemoryMapping<'_> {
     }
 }
 
-impl<'a> AlignedMemoryMapping<'a> {
+impl AlignedMemoryMapping {
     /// Creates a new MemoryMapping structure from the given regions
     pub fn new_with_access_violation_handler(
         mut regions: Vec<MemoryRegion>,
-        config: &'a Config,
+        config: &Config,
         sbpf_version: SBPFVersion,
         access_violation_handler: AccessViolationHandler,
     ) -> Result<Self, EbpfError> {
@@ -403,7 +407,9 @@ impl<'a> AlignedMemoryMapping<'a> {
             common: CommonMemoryMapping {
                 regions: regions.into_boxed_slice(),
                 access_violation_handler,
-                config,
+                allow_memory_region_zero: config.allow_memory_region_zero,
+                max_call_depth: config.max_call_depth as i64,
+                stack_frame_size: config.stack_frame_size as i64,
                 sbpf_version,
             },
         })
@@ -413,8 +419,7 @@ impl<'a> AlignedMemoryMapping<'a> {
     #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
-        if index < self.common.regions.len()
-            && (index > 0 || self.common.config.allow_memory_region_zero)
+        if index < self.common.regions.len() && (index > 0 || self.common.allow_memory_region_zero)
         {
             // Safety: bounds check above
             let region = unsafe { self.common.regions.get_unchecked(index) };
@@ -445,17 +450,17 @@ impl<'a> AlignedMemoryMapping<'a> {
 
 /// Maps virtual memory to host memory.
 #[derive(Debug)]
-pub enum MemoryMapping<'a> {
+pub enum MemoryMapping {
     /// Used when address translation is disabled
     Identity,
     /// Aligned memory mapping which uses the upper half of an address to
     /// identify the underlying memory region.
-    Aligned(AlignedMemoryMapping<'a>),
+    Aligned(AlignedMemoryMapping),
     /// Memory mapping that allows mapping unaligned memory regions.
-    Unaligned(UnalignedMemoryMapping<'a>),
+    Unaligned(UnalignedMemoryMapping),
 }
 
-impl<'a> MemoryMapping<'a> {
+impl MemoryMapping {
     pub(crate) fn new_identity() -> Self {
         MemoryMapping::Identity
     }
@@ -466,7 +471,7 @@ impl<'a> MemoryMapping<'a> {
     /// `config.aligned_memory_mapping=true`.
     pub fn new_with_access_violation_handler(
         regions: Vec<MemoryRegion>,
-        config: &'a Config,
+        config: &Config,
         sbpf_version: SBPFVersion,
         access_violation_handler: AccessViolationHandler,
     ) -> Result<Self, EbpfError> {
@@ -494,7 +499,7 @@ impl<'a> MemoryMapping<'a> {
     /// `access_violation_handler` defaults to a function which always returns an error.
     pub fn new(
         regions: Vec<MemoryRegion>,
-        config: &'a Config,
+        config: &Config,
         sbpf_version: SBPFVersion,
     ) -> Result<Self, EbpfError> {
         Self::new_with_access_violation_handler(
