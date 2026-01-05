@@ -294,6 +294,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
 
     /// Returns the `MemoryRegion` which may contain the given address.
     #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         // Safety:
         // &mut references to the mapping cache are only created internally from methods that do not
@@ -330,6 +331,7 @@ impl<'a> UnalignedMemoryMapping<'a> {
     }
 
     /// Replaces the `MemoryRegion` at the given index
+    #[inline(always)]
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
         self.common.regions[index] = region;
         self.cache.get_mut().flush();
@@ -408,7 +410,7 @@ impl<'a> AlignedMemoryMapping<'a> {
     }
 
     /// Returns the `MemoryRegion` which may contain the given address.
-    #[inline]
+    #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
         if index < self.common.regions.len()
@@ -422,6 +424,7 @@ impl<'a> AlignedMemoryMapping<'a> {
     }
 
     /// Replaces the `MemoryRegion` at the given index
+    #[inline(always)]
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
         let begin_index = region
             .vm_addr
@@ -560,7 +563,6 @@ impl<'a> MemoryMapping<'a> {
     }
 
     /// Loads `size_of::<T>()` bytes from the given address.
-    #[inline]
     pub fn load<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> ProgramResult {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
@@ -587,6 +589,7 @@ impl<'a> MemoryMapping<'a> {
     }
 
     /// Returns the `MemoryRegion` which may contain the given address.
+    #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         match self {
             MemoryMapping::Identity => None,
@@ -596,6 +599,7 @@ impl<'a> MemoryMapping<'a> {
     }
 
     /// Returns the `MemoryRegion`s in this mapping.
+    #[inline(always)]
     pub fn get_regions(&self) -> &[MemoryRegion] {
         match self {
             MemoryMapping::Identity => &[],
@@ -605,6 +609,7 @@ impl<'a> MemoryMapping<'a> {
     }
 
     /// Replaces the `MemoryRegion` at the given index
+    #[inline(always)]
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
         let regions = self.get_regions();
         let next_region_start = regions
