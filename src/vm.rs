@@ -19,9 +19,9 @@ use crate::{
     interpreter::Interpreter,
     memory_region::MemoryMapping,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::{Analysis, RegisterTraceEntry},
+    static_analysis::{Analysis, DummyContextObject, RegisterTraceEntry},
 };
-use std::{collections::BTreeMap, fmt::Debug};
+use std::{collections::BTreeMap, fmt::Debug, mem::offset_of};
 
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;
@@ -195,27 +195,28 @@ pub struct CallFrame {
 /// Indices of slots inside [EbpfVm]
 pub enum RuntimeEnvironmentSlot {
     /// [EbpfVm::host_stack_pointer]
-    HostStackPointer = 0,
+    HostStackPointer = offset_of!(EbpfVm<DummyContextObject>, host_stack_pointer) as isize,
     /// [EbpfVm::call_depth]
-    CallDepth = 1,
+    CallDepth = offset_of!(EbpfVm<DummyContextObject>, call_depth) as isize,
     /// [EbpfVm::context_object_pointer]
-    ContextObjectPointer = 2,
+    ContextObjectPointer = offset_of!(EbpfVm<DummyContextObject>, context_object_pointer) as isize,
     /// [EbpfVm::previous_instruction_meter]
-    PreviousInstructionMeter = 3,
+    PreviousInstructionMeter =
+        offset_of!(EbpfVm<DummyContextObject>, previous_instruction_meter) as isize,
     /// [EbpfVm::due_insn_count]
-    DueInsnCount = 4,
+    DueInsnCount = offset_of!(EbpfVm<DummyContextObject>, due_insn_count) as isize,
     /// [EbpfVm::stopwatch_numerator]
-    StopwatchNumerator = 5,
+    StopwatchNumerator = offset_of!(EbpfVm<DummyContextObject>, stopwatch_numerator) as isize,
     /// [EbpfVm::stopwatch_denominator]
-    StopwatchDenominator = 6,
+    StopwatchDenominator = offset_of!(EbpfVm<DummyContextObject>, stopwatch_denominator) as isize,
     /// [EbpfVm::registers]
-    Registers = 7,
+    Registers = offset_of!(EbpfVm<DummyContextObject>, registers) as isize,
     /// [EbpfVm::program_result]
-    ProgramResult = 19,
+    ProgramResult = offset_of!(EbpfVm<DummyContextObject>, program_result) as isize,
     /// [EbpfVm::memory_mapping]
-    MemoryMapping = 27,
+    MemoryMapping = offset_of!(EbpfVm<DummyContextObject>, memory_mapping) as isize,
     /// [EbpfVm::register_trace]
-    RegisterTrace = 54,
+    RegisterTrace = offset_of!(EbpfVm<DummyContextObject>, register_trace) as isize,
 }
 
 /// A virtual machine to run eBPF programs.

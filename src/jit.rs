@@ -905,7 +905,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     fn slot_in_vm(&self, slot: RuntimeEnvironmentSlot) -> i32 {
-        8 * (slot as i32 - self.runtime_environment_key)
+        slot as i32 - 8 * self.runtime_environment_key
     }
 
     pub(crate) fn emit<T>(&mut self, data: T) {
@@ -1041,7 +1041,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 saved_registers.remove(dst);
             }
         }
-    
+
         // Save registers on stack
         for reg in saved_registers.iter() {
             self.emit_ins(X86Instruction::push(*reg, None));
@@ -1108,7 +1108,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 },
             }
         }
-    
+
         match target {
             Value::Register(reg) => {
                 self.emit_ins(X86Instruction::call_reg(reg, None));
@@ -1123,12 +1123,12 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 unreachable!();
             }
         }
-    
+
         // Save returned value in result register
         if let Some(reg) = result_reg {
             self.emit_ins(X86Instruction::mov(OperandSize::S64, RAX, reg));
         }
-    
+
         // Restore registers from stack
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP,
             if stack_arguments % 2 != 0 { stack_arguments + 1 } else { stack_arguments } * 8, None));
@@ -1703,7 +1703,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Relocate forward jumps
         for jump in &self.text_section_jumps {
             let destination = &self.result.text_section[self.result.pc_section[jump.target_pc] as usize & (i32::MAX as u32 as usize)] as *const u8;
-            let offset_value = 
+            let offset_value =
                 unsafe { destination.offset_from(jump.location) } as i32 // Relative jump
                 - mem::size_of::<i32>() as i32; // Jump from end of instruction
             unsafe { ptr::write_unaligned(jump.location as *mut i32, offset_value); }

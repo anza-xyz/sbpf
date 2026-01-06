@@ -124,7 +124,7 @@ impl Default for CfgNode {
     }
 }
 
-struct DummyContextObject {}
+pub(crate) struct DummyContextObject {}
 
 impl ContextObject for DummyContextObject {
     fn consume(&mut self, _amount: u64) {}

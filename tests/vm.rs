@@ -32,8 +32,8 @@ fn test_runtime_environment_slots() {
             assert_eq!(
                 unsafe {
                     std::ptr::addr_of!($env.$entry)
-                        .cast::<u64>()
-                        .offset_from(std::ptr::addr_of!($env).cast::<u64>()) as usize
+                        .cast::<u8>()
+                        .offset_from(std::ptr::addr_of!($env).cast::<u8>()) as usize
                 },
                 RuntimeEnvironmentSlot::$slot as usize,
             );
