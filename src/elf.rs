@@ -454,7 +454,9 @@ impl<C: ContextObject> Executable<C> {
         let program_header_table =
             Elf64::slice_from_bytes::<Elf64Phdr>(elf_bytes, program_header_table_range.clone())?;
         let mut expected_program_headers = EXPECTED_PROGRAM_HEADERS.iter();
-        if program_header_table[0].p_flags != EXPECTED_PROGRAM_HEADERS[0].0 {
+        let skip_rodata_program_header =
+            program_header_table[0].p_flags != EXPECTED_PROGRAM_HEADERS[0].0;
+        if skip_rodata_program_header {
             // If the first program header is not marked as PF_R (readonly),
             // then expect to start at the second program header instead.
             expected_program_headers.next();
@@ -481,14 +483,20 @@ impl<C: ContextObject> Executable<C> {
             expected_offset = expected_offset.saturating_add(program_header.p_filesz);
         }
 
-        let rodata_header = &program_header_table[0];
-        let bytecode_header = &program_header_table[1];
+        let (ro_section_range, bytecode_header) = if skip_rodata_program_header {
+            (
+                program_header_table_range.end..program_header_table_range.end,
+                &program_header_table[0],
+            )
+        } else {
+            (
+                program_header_table[0].file_range().unwrap_or_default(),
+                &program_header_table[1],
+            )
+        };
+        let ro_section = Section::Borrowed(ebpf::MM_RODATA_START as usize, ro_section_range);
         let text_section_vaddr = bytecode_header.p_vaddr;
         let text_section_range = bytecode_header.file_range().unwrap_or_default();
-        let ro_section = Section::Borrowed(
-            rodata_header.p_vaddr as usize,
-            rodata_header.file_range().unwrap_or_default(),
-        );
 
         if !bytecode_header.vm_range().contains(
             &file_header
