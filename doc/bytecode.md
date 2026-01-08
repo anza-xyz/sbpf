@@ -117,8 +117,8 @@ The following Rust equivalents assume that:
 | `B4` / `10110100`  | all         | `mov32 dst, imm`       | `dst = imm as u64`
 | `BC` / `10111100`  | except v2   | `mov32 dst, src`       | `dst = src as u32 as u64`
 | `BC` / `10111100`  | only in v2  | `mov32 dst, src`       | `dst = src as i32 as i64 as u64`
-| `C4` / `11000100`  | all         | `ash32 dst, imm`       | `dst = (dst as i32).wrapping_shr(imm) as u32 as u64`
-| `CC` / `11001100`  | all         | `ash32 dst, src`       | `dst = (dst as i32).wrapping_shr(src as u32) as u32 as u64`
+| `C4` / `11000100`  | all         | `arsh32 dst, imm`      | `dst = (dst as i32).wrapping_shr(imm) as u32 as u64`
+| `CC` / `11001100`  | all         | `arsh32 dst, src`      | `dst = (dst as i32).wrapping_shr(src as u32) as u32 as u64`
 | `D4` / `11010100`  | except v2   | `le dst, imm` | `dst = dst as u32 as u64`
 | `D4` / `11010100`  | only in v2  | -- reserved --
 | `DC` / `11011100`  | all         | `be dst, imm` | `dst = match imm { 16 => (dst as u16).swap_bytes() as u64, 32 => (dst as u32).swap_bytes() as u64, 64 => dst.swap_bytes() }`
@@ -160,8 +160,8 @@ The following Rust equivalents assume that:
 | `AF` / `10101111`  | all         | `xor64 dst, src`   | `dst = dst.xor(src)`
 | `B7` / `10110111`  | all         | `mov64 dst, imm`   | `dst = imm as i32 as i64 as u64`
 | `BF` / `10111111`  | all         | `mov64 dst, src`   | `dst = src`
-| `C7` / `11000111`  | all         | `ash64 dst, imm`   | `dst = (dst as i64).wrapping_shr(imm)`
-| `CF` / `11001111`  | all         | `ash64 dst, src`   | `dst = (dst as i64).wrapping_shr(src as u32)`
+| `C7` / `11000111`  | all         | `arsh64 dst, imm`  | `dst = (dst as i64).wrapping_shr(imm)`
+| `CF` / `11001111`  | all         | `arsh64 dst, src`  | `dst = (dst as i64).wrapping_shr(src as u32)`
 | `D7` to `EF`       | all         | -- reserved --
 | `F7` / `11110111`  | except v2   | -- reserved --
 | `F7` / `11110111`  | only in v2  | `hor64 dst, imm`   | `dst = dst.or((imm as u64).wrapping_shl(32))`
@@ -291,7 +291,7 @@ The `exit` (a.k.a. return) instruction does:
 | `8D` / `10001101`  | until v2    | `callx imm`
 | `8D` / `10001101`  | only in v2  | `callx src`
 | `8D` / `10001101`  | from v3     | `callx dst`
-| `95` / `10011101`  | all         | `exit`
+| `95` / `10010101`  | all         | `exit`
 | `A5` / `10100101`  | all         | `jlt dst, imm, off`  | `dst < imm as i32 as i64 as u64`
 | `AD` / `10101101`  | all         | `jlt dst, src, off`  | `dst < src`
 | `B5` / `10110101`  | all         | `jle dst, imm, off`  | `dst <= imm as i32 as i64 as u64`
