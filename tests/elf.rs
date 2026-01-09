@@ -67,13 +67,9 @@ fn test_strict_header() {
         .chain(std::iter::repeat_n(&Ok(()), 12))
         .chain(std::iter::repeat_n(
             &Err(ElfParserError::InvalidFileHeader),
-            8,
+            6,
         ))
-        .chain(std::iter::repeat_n(&Ok(()), 2))
-        .chain(std::iter::repeat_n(
-            &Err(ElfParserError::InvalidFileHeader),
-            2,
-        ));
+        .chain(std::iter::repeat_n(&Ok(()), 6));
     for (offset, expected) in (0..std::mem::size_of::<Elf64Ehdr>()).zip(expected_results) {
         let mut elf_bytes = elf_bytes.clone();
         elf_bytes[offset] = 0xAF;

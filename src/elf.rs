@@ -411,7 +411,7 @@ impl<C: ContextObject> Executable<C> {
     ) -> Result<Self, ElfParserError> {
         use crate::elf_parser::{
             consts::{ELFMAG, EV_CURRENT, PF_R, PF_X, PT_LOAD, SHN_UNDEF, STT_FUNC},
-            types::{Elf64Ehdr, Elf64Shdr, Elf64Sym},
+            types::{Elf64Ehdr, Elf64Sym},
         };
 
         let aligned_memory = AlignedMemory::<{ HOST_ALIGN }>::from_slice(bytes);
@@ -440,9 +440,9 @@ impl<C: ContextObject> Executable<C> {
             || file_header.e_phentsize != mem::size_of::<Elf64Phdr>() as u16
             || file_header.e_phnum == 0
             || program_header_table_range.end > elf_bytes.len()
-            || file_header.e_shentsize != mem::size_of::<Elf64Shdr>() as u16
-            // file_header.e_shnum
-            || file_header.e_shstrndx >= file_header.e_shnum
+        // file_header.e_shentsize
+        // file_header.e_shnum
+        // file_header.e_shstrndx
         {
             return Err(ElfParserError::InvalidFileHeader);
         }
