@@ -1995,7 +1995,7 @@ fn test_relative_call_sbpfv3() {
         config,
         [1],
         (),
-        TestContextObject::new(19),
+        TestContextObject::new(16),
         ProgramResult::Ok(3),
     );
 }
@@ -2723,7 +2723,7 @@ fn test_reloc_64_64() {
         "tests/elfs/reloc_64_64.so",
         [],
         (),
-        TestContextObject::new(3),
+        TestContextObject::new(2),
         ProgramResult::Ok(ebpf::MM_BYTECODE_START),
     );
 }
@@ -2892,7 +2892,7 @@ fn test_struct_func_pointer() {
         config,
         [],
         (),
-        TestContextObject::new(3),
+        TestContextObject::new(2),
         ProgramResult::Ok(0x102030405060708),
     );
 }
