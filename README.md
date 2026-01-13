@@ -45,7 +45,7 @@ so it should work out of the box by adding it as a dependency in your
 
 ```toml
 [dependencies]
-solana-sbpf = "0.13.0"
+solana-sbpf = "0.14.0"
 ```
 
 You can also use the development version from this GitHub repository. This
