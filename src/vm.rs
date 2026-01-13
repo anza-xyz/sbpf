@@ -12,16 +12,18 @@
 
 //! Virtual machine for eBPF programs.
 
-use crate::{
-    ebpf,
-    elf::Executable,
-    error::{EbpfError, ProgramResult},
-    interpreter::Interpreter,
-    memory_region::MemoryMapping,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::{Analysis, DummyContextObject, RegisterTraceEntry},
+use {
+    crate::{
+        ebpf,
+        elf::Executable,
+        error::{EbpfError, ProgramResult},
+        interpreter::Interpreter,
+        memory_region::MemoryMapping,
+        program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
+        static_analysis::{Analysis, DummyContextObject, RegisterTraceEntry},
+    },
+    std::{collections::BTreeMap, fmt::Debug, mem::offset_of},
 };
-use std::{collections::BTreeMap, fmt::Debug, mem::offset_of};
 
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;

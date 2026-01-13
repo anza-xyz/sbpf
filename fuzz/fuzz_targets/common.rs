@@ -1,8 +1,8 @@
-use std::mem::size_of;
-
-use arbitrary::{Arbitrary, Unstructured};
-
-use solana_sbpf::{program::SBPFVersion, vm::Config};
+use {
+    arbitrary::{Arbitrary, Unstructured},
+    solana_sbpf::{program::SBPFVersion, vm::Config},
+    std::mem::size_of,
+};
 
 #[derive(Debug)]
 pub struct ConfigTemplate {

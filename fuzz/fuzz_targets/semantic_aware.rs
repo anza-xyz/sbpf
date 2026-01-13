@@ -1,9 +1,10 @@
 #![allow(dead_code)]
 // based on: https://sourceware.org/binutils/docs/as/BPF-Opcodes.html
 
-use std::num::NonZeroI32;
-
-use solana_sbpf::insn_builder::{Arch, BpfCode, Cond, Endian, Instruction, MemSize, Move, Source};
+use {
+    solana_sbpf::insn_builder::{Arch, BpfCode, Cond, Endian, Instruction, MemSize, Move, Source},
+    std::num::NonZeroI32,
+};
 
 #[derive(arbitrary::Arbitrary, Debug, Eq, PartialEq, Copy, Clone)]
 pub struct Register(u8);

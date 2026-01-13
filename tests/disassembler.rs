@@ -9,12 +9,17 @@
 // copied, modified, or distributed except according to those terms.
 
 extern crate solana_sbpf;
-use solana_sbpf::program::SBPFVersion;
-use solana_sbpf::{
-    assembler::assemble, program::BuiltinProgram, static_analysis::Analysis, vm::Config,
+
+use {
+    solana_sbpf::{
+        assembler::assemble,
+        program::{BuiltinProgram, SBPFVersion},
+        static_analysis::Analysis,
+        vm::Config,
+    },
+    std::sync::Arc,
+    test_utils::TestContextObject,
 };
-use std::sync::Arc;
-use test_utils::TestContextObject;
 
 // Using a macro to keep actual line numbers in failure output
 macro_rules! disasm {

@@ -1,20 +1,24 @@
 #![allow(clippy::literal_string_with_formatting_args)]
 
-use byteorder::{ByteOrder, LittleEndian};
-use solana_sbpf::{
-    ebpf,
-    elf::{get_ro_region, ElfError, Executable, Section},
-    elf_parser::{
-        consts::{ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFOSABI_NONE, EM_BPF, ET_REL},
-        types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr},
-        Elf64, ElfParserError, SECTION_NAME_LENGTH_MAXIMUM,
+use {
+    byteorder::{ByteOrder, LittleEndian},
+    solana_sbpf::{
+        ebpf,
+        elf::{get_ro_region, ElfError, Executable, Section},
+        elf_parser::{
+            consts::{
+                ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFOSABI_NONE, EM_BPF, ET_REL,
+            },
+            types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr},
+            Elf64, ElfParserError, SECTION_NAME_LENGTH_MAXIMUM,
+        },
+        memory_region::{AccessType, MemoryMapping},
+        program::{BuiltinProgram, SBPFVersion},
+        vm::Config,
     },
-    memory_region::{AccessType, MemoryMapping},
-    program::{BuiltinProgram, SBPFVersion},
-    vm::Config,
+    std::{fs::File, io::Read, sync::Arc},
+    test_utils::{assert_error, syscalls, TestContextObject},
 };
-use std::{fs::File, io::Read, sync::Arc};
-use test_utils::{assert_error, syscalls, TestContextObject};
 
 type ElfExecutable = Executable<TestContextObject>;
 

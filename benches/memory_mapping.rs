@@ -10,13 +10,15 @@ extern crate rand;
 extern crate solana_sbpf;
 extern crate test;
 
-use rand::{rngs::SmallRng, Rng, SeedableRng};
-use solana_sbpf::{
-    memory_region::{AccessType, MemoryMapping, MemoryRegion},
-    program::SBPFVersion,
-    vm::Config,
+use {
+    rand::{rngs::SmallRng, Rng, SeedableRng},
+    solana_sbpf::{
+        memory_region::{AccessType, MemoryMapping, MemoryRegion},
+        program::SBPFVersion,
+        vm::Config,
+    },
+    test::Bencher,
 };
-use test::Bencher;
 
 fn generate_memory_regions(
     entries: usize,

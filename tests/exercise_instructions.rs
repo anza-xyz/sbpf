@@ -14,18 +14,20 @@ extern crate solana_sbpf;
 extern crate test_utils;
 extern crate thiserror;
 
-use rand::{rngs::SmallRng, RngCore, SeedableRng};
-use solana_sbpf::{
-    assembler::assemble,
-    ebpf,
-    memory_region::MemoryRegion,
-    program::{BuiltinProgram, SBPFVersion},
-    static_analysis::Analysis,
-    verifier::RequisiteVerifier,
-    vm::{Config, ContextObject},
+use {
+    rand::{rngs::SmallRng, RngCore, SeedableRng},
+    solana_sbpf::{
+        assembler::assemble,
+        ebpf,
+        memory_region::MemoryRegion,
+        program::{BuiltinProgram, SBPFVersion},
+        static_analysis::Analysis,
+        verifier::RequisiteVerifier,
+        vm::{Config, ContextObject},
+    },
+    std::sync::Arc,
+    test_utils::{compare_register_trace, create_vm, test_interpreter_and_jit, TestContextObject},
 };
-use std::sync::Arc;
-use test_utils::{compare_register_trace, create_vm, test_interpreter_and_jit, TestContextObject};
 
 // BPF_ALU32_LOAD : Arithmetic and Logic
 #[test]

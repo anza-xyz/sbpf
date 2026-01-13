@@ -7,22 +7,24 @@
 
 //! This module translates eBPF assembly language to binary.
 
-use self::InstructionType::{
-    AluBinary, AluUnary, CallImm, CallReg, Endian, JumpConditional, JumpUnconditional, LoadDwImm,
-    LoadReg, NoOperand, StoreImm, StoreReg, Syscall,
-};
-use crate::{
-    asm_parser::{
-        parse,
-        Operand::{Integer, Label, Memory, Register},
-        Statement,
+use {
+    self::InstructionType::{
+        AluBinary, AluUnary, CallImm, CallReg, Endian, JumpConditional, JumpUnconditional,
+        LoadDwImm, LoadReg, NoOperand, StoreImm, StoreReg, Syscall,
     },
-    ebpf::{self, Insn},
-    elf::Executable,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
-    vm::ContextObject,
+    crate::{
+        asm_parser::{
+            parse,
+            Operand::{Integer, Label, Memory, Register},
+            Statement,
+        },
+        ebpf::{self, Insn},
+        elf::Executable,
+        program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        vm::ContextObject,
+    },
+    std::collections::HashMap,
 };
-use std::collections::HashMap;
 
 #[cfg(not(feature = "shuttle-test"))]
 use std::sync::Arc;

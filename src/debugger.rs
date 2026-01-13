@@ -1,33 +1,32 @@
 //! Debugger for the virtual machines' interpreter.
 
-use std::net::{TcpListener, TcpStream};
-
-use gdbstub::common::Signal;
-use gdbstub::conn::ConnectionExt;
-use gdbstub::stub::{state_machine, GdbStub, SingleThreadStopReason};
-
-use gdbstub::arch::lldb::{Encoding, Format, Generic, Register};
-use gdbstub::arch::RegId;
-
-use gdbstub::target;
-use gdbstub::target::{Target, TargetError, TargetResult};
-
-use core::convert::TryInto;
-
-use bpf_arch::reg::id::BpfRegId;
-use bpf_arch::reg::BpfRegs;
-use bpf_arch::Bpf;
-use gdbstub::target::ext::base::singlethread::{SingleThreadBase, SingleThreadResume};
-use gdbstub::target::ext::lldb_register_info_override::{Callback, CallbackToken};
-use gdbstub::target::ext::section_offsets::Offsets;
-
-use crate::program::SBPFVersion;
-use crate::{
-    ebpf,
-    error::{EbpfError, ProgramResult},
-    interpreter::{DebugState, Interpreter},
-    memory_region::AccessType,
-    vm::ContextObject,
+use {
+    crate::{
+        ebpf,
+        error::{EbpfError, ProgramResult},
+        interpreter::{DebugState, Interpreter},
+        memory_region::AccessType,
+        program::SBPFVersion,
+        vm::ContextObject,
+    },
+    bpf_arch::{id::BpfRegId, reg::BpfRegs, Bpf},
+    core::convert::TryInto,
+    gdbstub::{
+        arch::{
+            lldb::{Encoding, Format, Generic, Register},
+            RegId,
+        },
+        common::Signal,
+        conn::ConnectionExt,
+        stub::{state_machine, GdbStub, SingleThreadStopReason},
+        target::ext::{
+            base::singlethread::{SingleThreadBase, SingleThreadResume},
+            lldb_register_info_override::{Callback, CallbackToken},
+            section_offsets::Offsets,
+        },
+        target::{self, Target, TargetError, TargetResult},
+    },
+    std::net::{TcpListener, TcpStream},
 };
 
 type DynResult<T> = Result<T, Box<dyn std::error::Error>>;
