@@ -3,7 +3,6 @@ SECTIONS
   .rodata 0x000000000 : {
     *(.rodata*)
     *(.data.rel.ro*)
-    BYTE(0);
     . = ALIGN(8);
   } :rodata
   .text 0x100000000 : {

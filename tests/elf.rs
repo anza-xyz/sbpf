@@ -41,7 +41,7 @@ fn test_strict_header() {
             ..Config::default()
         }));
         let executable = ElfExecutable::load(&elf_bytes, loader.clone()).unwrap();
-        let (name, _pc) = executable.get_function_registry().lookup_by_key(5).unwrap();
+        let (name, _pc) = executable.get_function_registry().lookup_by_key(4).unwrap();
         assert_eq!(name, b"entrypoint");
     }
 

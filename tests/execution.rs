@@ -2678,7 +2678,7 @@ fn test_syscall_static() {
         (
             "log" => syscalls::SyscallString::vm,
         ),
-        TestContextObject::new(4),
+        TestContextObject::new(5),
         ProgramResult::Ok(0),
     );
 }
@@ -2761,7 +2761,7 @@ fn test_reloc_64_relative() {
         config,
         [],
         (),
-        TestContextObject::new(3),
+        TestContextObject::new(2),
         ProgramResult::Ok(ebpf::MM_RODATA_START),
     );
 }
@@ -2843,7 +2843,7 @@ fn test_load_elf_rodata() {
         config,
         [],
         (),
-        TestContextObject::new(4),
+        TestContextObject::new(3),
         ProgramResult::Ok(42),
     );
 }
@@ -2873,7 +2873,7 @@ fn test_strict_header() {
         "tests/elfs/strict_header.so",
         [],
         (),
-        TestContextObject::new(7),
+        TestContextObject::new(5),
         ProgramResult::Ok(42),
     );
 }
