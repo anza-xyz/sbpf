@@ -42,7 +42,7 @@ low byte                                          high byte
 | 3..=7     | operation code
 | 8..=11    | destination register
 | 12..=15   | source register
-| 16..=31   | offset
+| 16..=31   | offset (`i16`)
 | 32..=63   | immediate
 
 
@@ -75,7 +75,7 @@ Instructions by Class
 The following Rust equivalents assume that:
 - `src` and `dst` registers are `u64`
 - `imm` is `u32`
-- `off` is `u16`
+- `off` is `i16`
 
 ### Memory Load or 32 bit Arithmetic and Logic
 | opcode (hex / bin) | feature set | assembler mnemonic     | Rust equivalent
