@@ -1488,7 +1488,7 @@ fn test_conditional_jumps() {
     const ELSE: u32 = 0x454C5345;
     let mut prog = [0; 80];
     prog[0] = ebpf::ADD64_IMM;
-    prog[1] = 10;
+    prog[1] = 0;
     prog[8] = ebpf::LD_DW_IMM;
     prog[9] = 1; // dst = R1
     prog[17] = 1; // dst = R1
@@ -1660,10 +1660,11 @@ fn test_string_stack() {
 }
 
 #[test]
-fn test_err_dynamic_stack_out_of_bound() {
+fn test_err_stack_out_of_bound() {
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
-        max_call_depth: 3,
+        enable_stack_frame_gaps: false,
+        max_call_depth: 64,
         ..Config::default()
     };
 
@@ -1672,81 +1673,42 @@ fn test_err_dynamic_stack_out_of_bound() {
     // Check that accessing MM_STACK_START - 1 fails
     test_interpreter_and_jit_asm!(
         "
-        add64 r10, -0x1000
-        stb [r10-1], 0
+        stb [r10-0x1001], 0
         exit",
         config.clone(),
         [],
-        TestContextObject::new(2),
-        ProgramResult::Err(EbpfError::AccessViolation(
+        TestContextObject::new(1),
+        ProgramResult::Err(EbpfError::StackAccessViolation(
             AccessType::Store,
             ebpf::MM_STACK_START - 1,
             1,
-            "program"
+            0
         )),
     );
 
     // Check that accessing MM_STACK_START + expected_stack_len fails
     test_interpreter_and_jit_asm!(
         "
-        add64 r10, -0x1000
-        stb [r10+0x3000], 0
+        mov r0, r10
+        mov r1, 63
+        lsh r1, 12
+        add r0, r1
+        stb [r0], 0
         exit",
         config.clone(),
         [],
-        TestContextObject::new(2),
-        ProgramResult::Err(EbpfError::AccessViolation(
+        TestContextObject::new(5),
+        ProgramResult::Err(EbpfError::StackAccessViolation(
             AccessType::Store,
             ebpf::MM_STACK_START + config.stack_size() as u64,
             1,
-            "stack"
+            config.max_call_depth as i64
         )),
     );
 }
 
 #[test]
-fn test_err_dynamic_stack_ptr_overflow() {
-    // See the comment in CallFrames::resize_stack() for the reason why it's
-    // safe to let the stack pointer overflow
-
-    test_interpreter_and_jit_asm!(
-        "
-        add r10, -0x7FFFFF00
-        call function_stage1
-        exit
-        function_stage1:
-        add r10, -0x7FFFFF00
-        call function_stage2
-        exit
-        function_stage2:
-        add r10, -0x7FFFFF00
-        call function_stage3
-        exit
-        function_stage3:
-        add r10, -0x7FFFFF00
-        call function_stage4
-        exit
-        function_stage4:
-        add r10, -0x6440
-        call function_final
-        exit
-        function_final:
-        add r10, 0
-        stb [r10], 0
-        exit",
-        [],
-        TestContextObject::new(12),
-        ProgramResult::Err(EbpfError::AccessViolation(
-            AccessType::Store,
-            u64::MAX - 63,
-            1,
-            "unknown"
-        )),
-    );
-}
-
-#[test]
-fn test_dynamic_stack_frames_empty() {
+fn test_dynamic_stack_frames_sbpfv1() {
     // In SBPFv1 the stack starts at the top and does not grow automatically
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
@@ -1767,76 +1729,42 @@ fn test_dynamic_stack_frames_empty() {
         ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
     );
 
-    // In SBPFv3 the stack starts at the bottom and does grow automatically
-    let config = Config::default();
+    // See the comment in CallFrames::resize_stack() for the reason why it's
+    // safe to let the stack pointer overflow
     test_interpreter_and_jit_asm!(
         "
-        add64 r10, 0
-        call function_foo
+        add r10, -0x7FFFFF00
+        call function_stage1
         exit
-        function_foo:
-        add64 r10, 0
-        mov r0, r10
+        function_stage1:
+        add r10, -0x7FFFFF00
+        call function_stage2
+        exit
+        function_stage2:
+        add r10, -0x7FFFFF00
+        call function_stage3
+        exit
+        function_stage3:
+        add r10, -0x7FFFFF00
+        call function_stage4
+        exit
+        function_stage4:
+        add r10, -0x1440
+        call function_final
+        exit
+        function_final:
+        add r10, 0
+        stb [r10], 0
         exit",
         config,
         [],
-        TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + 0x2000),
-    );
-}
-
-#[test]
-fn test_dynamic_frame_ptr() {
-    let config = Config::default();
-
-    // Check that changes to r10 are immediately visible
-    test_interpreter_and_jit_asm!(
-        "
-        add r10, 64
-        stxdw [r10-8], r10
-        call function_foo
-        ldxdw r0, [r10-8]
-        exit
-        function_foo:
-        add r10, 0
-        exit",
-        config.clone(),
-        [],
-        TestContextObject::new(7),
-        ProgramResult::Ok(ebpf::MM_STACK_START + 0x1040),
-    );
-
-    // Check that changes to r10 continue to be visible in a callee
-    test_interpreter_and_jit_asm!(
-        "
-        add r10, 64
-        call function_foo
-        exit
-        function_foo:
-        add r10, 0
-        mov r0, r10
-        exit",
-        config.clone(),
-        [],
-        TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + 0x2040),
-    );
-
-    // And check that changes to r10 are undone after returning
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        call function_foo
-        mov r0, r10
-        exit
-        function_foo:
-        add r10, 64
-        exit
-        ",
-        config.clone(),
-        [],
-        TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + 0x1000),
+        TestContextObject::new(12),
+        ProgramResult::Err(EbpfError::AccessViolation(
+            AccessType::Store,
+            0x3F000 - 64,
+            1,
+            "unknown"
+        )),
     );
 }
 
@@ -1932,7 +1860,7 @@ fn test_err_mem_access_out_of_bound() {
     let mem = [0; 512];
     let mut prog = [0; 40];
     prog[0] = ebpf::ADD64_IMM;
-    prog[1] = 10;
+    prog[1] = 0;
     prog[8] = ebpf::LD_DW_IMM;
     prog[24] = ebpf::ST_B_IMM;
     prog[32] = ebpf::EXIT;

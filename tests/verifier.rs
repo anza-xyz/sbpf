@@ -226,7 +226,10 @@ fn test_verifier_negative_unaligned_stack() {
         "
         add r10, -63
         exit",
-        Arc::new(BuiltinProgram::new_mock()),
+        Arc::new(BuiltinProgram::new_loader(Config {
+            enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+            ..Config::default()
+        })),
     )
     .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
@@ -239,7 +242,10 @@ fn test_verifier_positive_unaligned_stack() {
         "
         add r10, 63
         exit",
-        Arc::new(BuiltinProgram::new_mock()),
+        Arc::new(BuiltinProgram::new_loader(Config {
+            enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
+            ..Config::default()
+        })),
     )
     .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
@@ -328,7 +334,7 @@ fn test_verifier_err_jmp_out_start() {
 #[test]
 fn test_verifier_known_syscall() {
     let prog = &[
-        0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
+        0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r0, 0
         0x85, 0x00, 0x00, 0x00, 0xDD, 0x0C, 0x02, 0x91, // syscall gather_bytes
         0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
     ];
