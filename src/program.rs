@@ -30,7 +30,7 @@ impl SBPFVersion {
     ///
     /// Allows usage of `add64 r10, imm`.
     pub fn manual_stack_frame_bump(self) -> bool {
-        self >= SBPFVersion::V1
+        self == SBPFVersion::V1 || self == SBPFVersion::V2
     }
     /// ... SIMD-0377
     ///
