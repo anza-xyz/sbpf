@@ -1756,7 +1756,7 @@ fn test_dynamic_stack_frames_sbpfv1() {
         add r10, 0
         stb [r10], 0
         exit",
-        config,
+        config.clone(),
         [],
         TestContextObject::new(12),
         ProgramResult::Err(EbpfError::AccessViolation(
@@ -1765,6 +1765,56 @@ fn test_dynamic_stack_frames_sbpfv1() {
             1,
             "unknown"
         )),
+    );
+
+    // Check that changes to r10 are immediately visible
+    test_interpreter_and_jit_asm!(
+        "
+        add r10, -64
+        stxdw [r10-8], r10
+        call function_foo
+        ldxdw r0, [r10-8]
+        exit
+        function_foo:
+        add r10, 0
+        exit",
+        config.clone(),
+        [],
+        TestContextObject::new(7),
+        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
+    );
+
+    // Check that changes to r10 continue to be visible in a callee
+    test_interpreter_and_jit_asm!(
+        "
+        add r10, -64
+        call function_foo
+        exit
+        function_foo:
+        add r10, 0
+        mov r0, r10
+        exit",
+        config.clone(),
+        [],
+        TestContextObject::new(6),
+        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
+    );
+
+    // And check that changes to r10 are undone after returning
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        call function_foo
+        mov r0, r10
+        exit
+        function_foo:
+        add r10, -64
+        exit
+        ",
+        config.clone(),
+        [],
+        TestContextObject::new(6),
+        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
     );
 }
 
