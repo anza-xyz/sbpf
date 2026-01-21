@@ -320,7 +320,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         let config = loader.get_config();
         let mut registers = [0u64; 12];
         registers[ebpf::FRAME_PTR_REG] =
-            ebpf::MM_STACK_START.saturating_add(if sbpf_version.automatic_stack_frame_bump() {
+            ebpf::MM_STACK_START.saturating_add(if !sbpf_version.manual_stack_frame_bump() {
                 config.stack_frame_size
             } else {
                 stack_len

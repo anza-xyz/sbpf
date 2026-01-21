@@ -138,11 +138,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
             throw_error!(self, EbpfError::CallDepthExceeded);
         }
 
-        if self
-            .executable
-            .get_sbpf_version()
-            .automatic_stack_frame_bump()
-        {
+        if !self.executable.get_sbpf_version().manual_stack_frame_bump() {
             // With fixed frames we start the new frame at the next fixed offset
             let stack_frame_size = config.stack_frame_size
                 * if !self.executable.get_sbpf_version().manual_stack_frame_bump()

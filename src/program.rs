@@ -32,13 +32,6 @@ impl SBPFVersion {
     pub fn manual_stack_frame_bump(self) -> bool {
         self == SBPFVersion::V1 || self == SBPFVersion::V2
     }
-    /// ... SIMD-0377
-    ///
-    /// Initializes the stack at the bottom with one frame,
-    /// then add one frame at every `call` and `callx`.
-    pub fn automatic_stack_frame_bump(self) -> bool {
-        self != SBPFVersion::V1 && self != SBPFVersion::V2
-    }
 
     /// Enable SIMD-0174: SBPF arithmetics improvements
     pub fn enable_pqr(self) -> bool {
