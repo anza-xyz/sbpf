@@ -147,7 +147,7 @@ fn main() {
         MemoryRegion::new_writable_gapped(
             stack.as_slice_mut(),
             ebpf::MM_STACK_START,
-            if !sbpf_version.manual_stack_frame_bump() && config.enable_stack_frame_gaps {
+            if sbpf_version.stack_frame_gaps() && config.enable_stack_frame_gaps {
                 config.stack_frame_size as u64
             } else {
                 0

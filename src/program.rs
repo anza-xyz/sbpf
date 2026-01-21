@@ -32,6 +32,10 @@ impl SBPFVersion {
     pub fn manual_stack_frame_bump(self) -> bool {
         self == SBPFVersion::V1 || self == SBPFVersion::V2
     }
+    /// ... SIMD-0166
+    pub fn stack_frame_gaps(self) -> bool {
+        self == SBPFVersion::V0
+    }
 
     /// Enable SIMD-0174: SBPF arithmetics improvements
     pub fn enable_pqr(self) -> bool {
