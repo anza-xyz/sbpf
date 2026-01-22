@@ -475,7 +475,7 @@ impl MemoryMapping {
         sbpf_version: SBPFVersion,
         access_violation_handler: AccessViolationHandler,
     ) -> Result<Self, EbpfError> {
-        if sbpf_version == SBPFVersion::V4 || config.aligned_memory_mapping {
+        if sbpf_version >= SBPFVersion::V4 || config.aligned_memory_mapping {
             AlignedMemoryMapping::new_with_access_violation_handler(
                 regions,
                 config,
