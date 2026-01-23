@@ -1564,7 +1564,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Setup the frame pointer for the new frame. What we do depends on whether we're using dynamic or fixed frames.
         if !self.executable.get_sbpf_version().manual_stack_frame_bump() {
             // With fixed frames we start the new frame at the next fixed offset
-            let stack_frame_size = self.config.stack_frame_size as i64 * if !self.executable.get_sbpf_version().manual_stack_frame_bump() && self.config.enable_stack_frame_gaps { 2 } else { 1 };
+            let stack_frame_size = self.config.stack_frame_size as i64 * if self.executable.get_sbpf_version().stack_frame_gaps() && self.config.enable_stack_frame_gaps { 2 } else { 1 };
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_MAP[FRAME_PTR_REG], stack_frame_size, None)); // REGISTER_MAP[FRAME_PTR_REG] += stack_frame_size;
         }
         self.emit_ins(X86Instruction::return_near());

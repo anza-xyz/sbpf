@@ -141,7 +141,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
         if !self.executable.get_sbpf_version().manual_stack_frame_bump() {
             // With fixed frames we start the new frame at the next fixed offset
             let stack_frame_size = config.stack_frame_size
-                * if !self.executable.get_sbpf_version().manual_stack_frame_bump()
+                * if self.executable.get_sbpf_version().stack_frame_gaps()
                     && config.enable_stack_frame_gaps
                 {
                     2
