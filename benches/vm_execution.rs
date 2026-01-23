@@ -258,3 +258,53 @@ fn bench_jit_vs_interpreter_call_depth_dynamic(bencher: &mut Bencher) {
         &mut [],
     );
 }
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[bench]
+fn bench_mem_ldxdw_jit(bencher: &mut Bencher) {
+    use solana_sbpf::assembler::assemble;
+
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    const LOAD64_ITERATIONS: u64 = 65536;
+    const LOAD64_INSTRUCTION_COUNT: u64 = LOAD64_ITERATIONS * 3 + 2;
+    let assembly = format!(
+        r#"
+            entrypoint:
+            mov r2, {}
+            loop:
+            ldxdw r0, [r1+0]
+            add r2, -1
+            jgt r2, 0, loop
+            exit
+        "#,
+        LOAD64_ITERATIONS
+    );
+    let mut executable =
+        assemble::<TestContextObject>(&assembly, Arc::new(BuiltinProgram::new_loader(config)))
+            .unwrap();
+    executable.verify::<RequisiteVerifier>().unwrap();
+    executable.jit_compile().unwrap();
+
+    let mut context_object = TestContextObject::default();
+    let mut input = [0u8; 8];
+    let mem_region = MemoryRegion::new_writable(&mut input, ebpf::MM_INPUT_START);
+    create_vm!(
+        vm,
+        &executable,
+        &mut context_object,
+        stack,
+        heap,
+        vec![mem_region],
+        None
+    );
+
+    bencher.iter(|| {
+        vm.context_object_pointer.remaining = LOAD64_INSTRUCTION_COUNT;
+        let (instruction_count, result) = vm.execute_program(&executable, false);
+        assert!(result.is_ok(), "{:?}", result);
+        assert_eq!(instruction_count, LOAD64_INSTRUCTION_COUNT);
+    });
+}
