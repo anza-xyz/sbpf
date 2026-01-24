@@ -119,6 +119,16 @@ impl MemoryRegion {
         }
 
         let begin_offset = vm_addr.saturating_sub(self.vm_addr);
+        if self.vm_gap_shift == 63 {
+            // fast path for non-gapped regions
+            if let Some(end_offset) = begin_offset.checked_add(len) {
+                if end_offset <= self.len {
+                    return Some(self.host_addr.saturating_add(begin_offset));
+                }
+            }
+            return None;
+        }
+
         let is_in_gap = (begin_offset
             .checked_shr(self.vm_gap_shift as u32)
             .unwrap_or(0)
