@@ -647,7 +647,9 @@ struct MappingCache {
 }
 
 impl MappingCache {
+    // must be a power of two
     const SIZE: isize = 4;
+    const MASK: isize = Self::SIZE - 1;
 
     fn new() -> MappingCache {
         MappingCache {
@@ -660,7 +662,7 @@ impl MappingCache {
     #[inline]
     fn find(&self, vm_addr: u64) -> Option<usize> {
         for i in 0..Self::SIZE {
-            let index = (self.head + i) % Self::SIZE;
+            let index = (self.head + i) & Self::MASK;
             // Safety:
             // index is guaranteed to be between 0..Self::SIZE
             let (vm_range, region_index) = unsafe { self.entries.get_unchecked(index as usize) };
@@ -675,7 +677,7 @@ impl MappingCache {
     #[allow(clippy::arithmetic_side_effects)]
     #[inline]
     fn insert(&mut self, vm_range: Range<u64>, region_index: usize) {
-        self.head = (self.head - 1).rem_euclid(Self::SIZE);
+        self.head = (self.head - 1) & Self::MASK;
         // Safety:
         // self.head is guaranteed to be between 0..Self::SIZE
         unsafe { *self.entries.get_unchecked_mut(self.head as usize) = (vm_range, region_index) };
