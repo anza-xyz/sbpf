@@ -529,7 +529,7 @@ impl MemoryMapping {
     ///
     /// This requires the [MemoryMapping] to be mutable and
     /// can cause previously translated addresses to become invalid.
-    #[inline]
+    #[inline(always)]
     pub fn map_with_access_violation_handler(
         &mut self,
         access_type: AccessType,
