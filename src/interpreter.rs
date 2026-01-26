@@ -140,14 +140,14 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
 
         if !self.executable.get_sbpf_version().manual_stack_frame_bump() {
             // With fixed frames we start the new frame at the next fixed offset
-            let stack_frame_size = config.stack_frame_size
-                * if self.executable.get_sbpf_version().stack_frame_gaps()
-                    && config.enable_stack_frame_gaps
-                {
-                    2
-                } else {
-                    1
-                };
+            let num_frames = if self.executable.get_sbpf_version().stack_frame_gaps()
+                && config.enable_stack_frame_gaps
+            {
+                2
+            } else {
+                1
+            };
+            let stack_frame_size = config.stack_frame_size * num_frames;
             self.reg[ebpf::FRAME_PTR_REG] =
                 self.reg[ebpf::FRAME_PTR_REG].wrapping_add(stack_frame_size as u64);
         }

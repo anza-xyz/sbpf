@@ -3859,3 +3859,49 @@ fn test_symbol_relocation() {
         ProgramResult::Ok(0),
     );
 }
+
+#[test]
+fn test_stack_gaps() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    // V0 has stack gaps, so storing to [r10 + 8] should raise an error.
+    test_interpreter_and_jit_asm!(
+        "
+        stw [r10 + 8], 77
+        call function_foo
+        exit
+        function_foo:
+        ldxdw r0, [r10 - 4088]
+        exit",
+        config,
+        [],
+        TestContextObject::new(1),
+        ProgramResult::Err(EbpfError::StackAccessViolation(
+            AccessType::Store,
+            0x200001008,
+            4,
+            1
+        )),
+    );
+
+    // V3 and V4 do not have stack gaps, so we should see 77 as the return.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V4,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_asm!(
+        "
+        stw [r10 + 8], 77
+        call function_foo
+        exit
+        function_foo:
+        ldxdw r0, [r10 - 4088]
+        exit",
+        config,
+        [],
+        TestContextObject::new(5),
+        ProgramResult::Ok(77),
+    );
+}
