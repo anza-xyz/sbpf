@@ -460,6 +460,8 @@ impl<C: ContextObject> Executable<C> {
             // If the first program header is not marked as PF_R (readonly),
             // then expect to start at the second program header instead.
             expected_program_headers.next();
+        } else if file_header.e_phnum < 2 {
+            return Err(ElfParserError::InvalidFileHeader);
         }
         let mut expected_offset = program_header_table_range.end as u64;
         for (program_header, (p_flags, p_vaddr)) in
