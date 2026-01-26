@@ -101,6 +101,26 @@ fn test_strict_header() {
         }
     }
 
+    // Check that skipping the rodata without the PF_X flag indication fails
+    {
+        let program_header = &elf_bytes[std::mem::size_of::<Elf64Ehdr>()
+            + std::mem::size_of::<Elf64Phdr>()
+            ..std::mem::size_of::<Elf64Ehdr>() + std::mem::size_of::<Elf64Phdr>() * 2];
+        let mut elf_bytes = elf_bytes.clone();
+        elf_bytes[std::mem::offset_of!(Elf64Ehdr, e_phnum)] = 1;
+        elf_bytes[std::mem::size_of::<Elf64Ehdr>() + std::mem::offset_of!(Elf64Phdr, p_offset)] =
+            0x40;
+        let err = ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap_err();
+        assert_eq!(err, ElfParserError::InvalidFileHeader);
+        // Check that skipping the rodata with the PF_X flag indication succeeds
+        elf_bytes[std::mem::size_of::<Elf64Ehdr>()
+            ..std::mem::size_of::<Elf64Ehdr>() + std::mem::size_of::<Elf64Phdr>()]
+            .copy_from_slice(program_header);
+        elf_bytes[std::mem::size_of::<Elf64Ehdr>() + std::mem::offset_of!(Elf64Phdr, p_offset)] =
+            0x78;
+        ElfExecutable::load_with_strict_parser(&elf_bytes, loader.clone()).unwrap();
+    }
+
     // Check that an unaligned program header length fails
     {
         let mut elf_bytes = elf_bytes.clone();
