@@ -1,6 +1,6 @@
 [package]
 name = "solana-sbpf-fuzz"
-version = "0.14.1"
+version = "0.14.2"
 authors = ["Automatically generated"]
 publish = false
 edition = "2018"

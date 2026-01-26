@@ -1,6 +1,6 @@
 [package]
 name = "test_utils"
-version = "0.14.1"
+version = "0.14.2"
 authors = ["Anza Maintainers <maintainers@anza.xyz>"]
 edition = "2018"
 publish = false
