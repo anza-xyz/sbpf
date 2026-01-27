@@ -3,10 +3,11 @@
 pub mod consts;
 pub mod types;
 
-use std::{fmt, mem, ops::Range, slice};
-
-use crate::{ArithmeticOverflow, ErrCheckedArithmetic};
-use {consts::*, types::*};
+use {
+    crate::{ArithmeticOverflow, ErrCheckedArithmetic},
+    std::{fmt, mem, ops::Range, slice},
+    {consts::*, types::*},
+};
 
 /// Maximum length of section name allowed.
 pub const SECTION_NAME_LENGTH_MAXIMUM: usize = 16;

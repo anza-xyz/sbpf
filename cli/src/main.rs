@@ -1,17 +1,19 @@
-use clap::{crate_version, App, Arg};
-use solana_sbpf::{
-    aligned_memory::AlignedMemory,
-    assembler::assemble,
-    ebpf,
-    elf::Executable,
-    memory_region::{MemoryMapping, MemoryRegion},
-    program::BuiltinProgram,
-    static_analysis::Analysis,
-    verifier::RequisiteVerifier,
-    vm::{Config, DynamicAnalysis, EbpfVm},
+use {
+    clap::{crate_version, App, Arg},
+    solana_sbpf::{
+        aligned_memory::AlignedMemory,
+        assembler::assemble,
+        ebpf,
+        elf::Executable,
+        memory_region::{MemoryMapping, MemoryRegion},
+        program::BuiltinProgram,
+        static_analysis::Analysis,
+        verifier::RequisiteVerifier,
+        vm::{Config, DynamicAnalysis, EbpfVm},
+    },
+    std::{fs::File, io::Read, path::Path, sync::Arc},
+    test_utils::TestContextObject,
 };
-use std::{fs::File, io::Read, path::Path, sync::Arc};
-use test_utils::TestContextObject;
 
 fn main() {
     let matches = App::new("Solana BPF CLI")

@@ -14,25 +14,27 @@ extern crate solana_sbpf;
 extern crate test_utils;
 extern crate thiserror;
 
-use byteorder::{ByteOrder, LittleEndian};
 #[cfg(all(not(windows), target_arch = "x86_64"))]
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
-use solana_sbpf::{
-    assembler::assemble,
-    declare_builtin_function, ebpf,
-    elf::Executable,
-    error::{EbpfError, ProgramResult},
-    memory_region::{AccessType, MemoryMapping, MemoryRegion},
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::Analysis,
-    verifier::RequisiteVerifier,
-    vm::{Config, ContextObject},
-};
-use std::{fs::File, io::Read, sync::Arc};
-use test_utils::{
-    assert_error, compare_register_trace, create_vm, syscalls, test_interpreter_and_jit,
-    test_interpreter_and_jit_asm, test_interpreter_and_jit_elf, test_syscall_asm,
-    TestContextObject, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
+use {
+    byteorder::{ByteOrder, LittleEndian},
+    solana_sbpf::{
+        assembler::assemble,
+        declare_builtin_function, ebpf,
+        elf::Executable,
+        error::{EbpfError, ProgramResult},
+        memory_region::{AccessType, MemoryMapping, MemoryRegion},
+        program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        static_analysis::Analysis,
+        verifier::RequisiteVerifier,
+        vm::{Config, ContextObject},
+    },
+    std::{fs::File, io::Read, sync::Arc},
+    test_utils::{
+        assert_error, compare_register_trace, create_vm, syscalls, test_interpreter_and_jit,
+        test_interpreter_and_jit_asm, test_interpreter_and_jit_elf, test_syscall_asm,
+        TestContextObject, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
+    },
 };
 
 // BPF_ALU32_LOAD : Arithmetic and Logic

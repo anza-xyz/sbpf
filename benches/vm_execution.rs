@@ -11,10 +11,12 @@ extern crate test;
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 use solana_sbpf::{ebpf, memory_region::MemoryRegion, program::SBPFVersion, vm::Config};
-use solana_sbpf::{elf::Executable, program::BuiltinProgram, verifier::RequisiteVerifier};
-use std::{fs::File, io::Read, sync::Arc};
-use test::Bencher;
-use test_utils::{create_vm, TestContextObject};
+use {
+    solana_sbpf::{elf::Executable, program::BuiltinProgram, verifier::RequisiteVerifier},
+    std::{fs::File, io::Read, sync::Arc},
+    test::Bencher,
+    test_utils::{create_vm, TestContextObject},
+};
 
 #[bench]
 fn bench_init_interpreter_start(bencher: &mut Bencher) {

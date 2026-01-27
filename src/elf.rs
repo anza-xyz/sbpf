@@ -6,28 +6,30 @@
 // where the section headers may be removed from the ELF.  If that happens then
 // this loader will need to be re-written to use the program headers instead.
 
-use crate::{
-    aligned_memory::{is_memory_aligned, AlignedMemory},
-    ebpf::{self, HOST_ALIGN, INSN_SIZE},
-    elf_parser::{
-        consts::{
-            ELFCLASS64, ELFDATA2LSB, ELFOSABI_NONE, EM_BPF, EM_SBPF, ET_DYN, R_X86_64_32,
-            R_X86_64_64, R_X86_64_NONE, R_X86_64_RELATIVE,
+use {
+    crate::{
+        aligned_memory::{is_memory_aligned, AlignedMemory},
+        byteorder::{ByteOrder, LittleEndian},
+        ebpf::{self, HOST_ALIGN, INSN_SIZE},
+        elf_parser::{
+            consts::{
+                ELFCLASS64, ELFDATA2LSB, ELFOSABI_NONE, EM_BPF, EM_SBPF, ET_DYN, R_X86_64_32,
+                R_X86_64_64, R_X86_64_NONE, R_X86_64_RELATIVE,
+            },
+            types::{Elf64Phdr, Elf64Shdr, Elf64Word},
+            Elf64, ElfParserError,
         },
-        types::{Elf64Phdr, Elf64Shdr, Elf64Word},
-        Elf64, ElfParserError,
+        error::EbpfError,
+        memory_region::MemoryRegion,
+        program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        verifier::Verifier,
+        vm::{Config, ContextObject},
     },
-    error::EbpfError,
-    memory_region::MemoryRegion,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
-    verifier::Verifier,
-    vm::{Config, ContextObject},
+    std::{collections::BTreeMap, fmt::Debug, mem, ops::Range, str},
 };
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 use crate::jit::{JitCompiler, JitProgram};
-use byteorder::{ByteOrder, LittleEndian};
-use std::{collections::BTreeMap, fmt::Debug, mem, ops::Range, str};
 
 #[cfg(not(feature = "shuttle-test"))]
 use std::sync::Arc;

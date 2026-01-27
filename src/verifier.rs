@@ -12,12 +12,14 @@
 
 //! Verifies that the bytecode is valid for the given config.
 
-use crate::{
-    ebpf,
-    program::{BuiltinFunction, FunctionRegistry, SBPFVersion},
-    vm::{Config, ContextObject},
+use {
+    crate::{
+        ebpf,
+        program::{BuiltinFunction, FunctionRegistry, SBPFVersion},
+        vm::{Config, ContextObject},
+    },
+    thiserror::Error,
 };
-use thiserror::Error;
 
 /// Error definitions
 #[derive(Debug, Error, Eq, PartialEq)]

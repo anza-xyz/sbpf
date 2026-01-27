@@ -1,13 +1,15 @@
 //! This module defines memory regions
 
-use crate::{
-    aligned_memory::Pod,
-    ebpf,
-    error::{EbpfError, ProgramResult},
-    program::SBPFVersion,
-    vm::Config,
+use {
+    crate::{
+        aligned_memory::Pod,
+        ebpf,
+        error::{EbpfError, ProgramResult},
+        program::SBPFVersion,
+        vm::Config,
+    },
+    std::{array, cell::UnsafeCell, fmt, mem, ops::Range, ptr},
 };
-use std::{array, cell::UnsafeCell, fmt, mem, ops::Range, ptr};
 
 /* Explanation of the Gapped Memory
 

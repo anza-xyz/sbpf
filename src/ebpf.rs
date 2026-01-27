@@ -18,9 +18,11 @@
 //! <https://www.kernel.org/doc/Documentation/networking/filter.txt>, or for a shorter version of
 //! the list of the operation codes: <https://github.com/iovisor/bpf-docs/blob/master/eBPF.md>
 
-use byteorder::{ByteOrder, LittleEndian};
-use hash32::{Hasher, Murmur3Hasher};
-use std::{fmt, hash::Hash};
+use {
+    byteorder::{ByteOrder, LittleEndian},
+    hash32::{Hasher, Murmur3Hasher},
+    std::{fmt, hash::Hash},
+};
 
 /// Maximum number of instructions in an eBPF program.
 pub const PROG_MAX_INSNS: usize = 65_536;

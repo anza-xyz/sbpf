@@ -6,18 +6,20 @@
 
 #[macro_use]
 extern crate json;
-
 extern crate elf;
-use std::path::PathBuf;
-
 extern crate solana_sbpf;
-use solana_sbpf::{
-    elf::Executable,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::Analysis,
+
+use {
+    solana_sbpf::{
+        elf::Executable,
+        program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        static_analysis::Analysis,
+    },
+    std::path::PathBuf,
+    std::sync::Arc,
+    test_utils::TestContextObject,
 };
-use std::sync::Arc;
-use test_utils::TestContextObject;
+
 // Turn a program into a JSON string.
 //
 // Relies on `json` crate.

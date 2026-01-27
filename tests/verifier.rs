@@ -24,17 +24,19 @@
 extern crate solana_sbpf;
 extern crate thiserror;
 
-use solana_sbpf::{
-    assembler::assemble,
-    ebpf,
-    elf::Executable,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    verifier::{RequisiteVerifier, Verifier, VerifierError},
-    vm::{Config, ContextObject},
+use {
+    solana_sbpf::{
+        assembler::assemble,
+        ebpf,
+        elf::Executable,
+        program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
+        verifier::{RequisiteVerifier, Verifier, VerifierError},
+        vm::{Config, ContextObject},
+    },
+    std::sync::Arc,
+    test_utils::{assert_error, create_vm, syscalls, TestContextObject},
+    thiserror::Error,
 };
-use std::sync::Arc;
-use test_utils::{assert_error, create_vm, syscalls, TestContextObject};
-use thiserror::Error;
 
 /// Error definitions
 #[derive(Debug, Error)]

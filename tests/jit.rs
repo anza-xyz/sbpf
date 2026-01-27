@@ -1,22 +1,24 @@
 #![allow(clippy::literal_string_with_formatting_args)]
 #![cfg(all(test, target_arch = "x86_64", not(target_os = "windows")))]
 
-use byteorder::{ByteOrder, LittleEndian};
-use solana_sbpf::{
-    disassembler::disassemble_instruction,
-    ebpf,
-    elf::Executable,
-    error::EbpfError,
-    jit::{
-        MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT, MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH,
-        MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION,
+use {
+    byteorder::{ByteOrder, LittleEndian},
+    solana_sbpf::{
+        disassembler::disassemble_instruction,
+        ebpf,
+        elf::Executable,
+        error::EbpfError,
+        jit::{
+            MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT, MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH,
+            MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION,
+        },
+        program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        static_analysis::CfgNode,
+        vm::Config,
     },
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
-    static_analysis::CfgNode,
-    vm::Config,
+    std::{collections::BTreeMap, sync::Arc},
+    test_utils::{syscalls, TestContextObject},
 };
-use std::{collections::BTreeMap, sync::Arc};
-use test_utils::{syscalls, TestContextObject};
 
 fn create_mockup_executable(config: Config, program: &[u8]) -> Executable<TestContextObject> {
     let sbpf_version = *config.enabled_sbpf_versions.end();

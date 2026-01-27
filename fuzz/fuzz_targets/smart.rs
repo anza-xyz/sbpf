@@ -1,21 +1,20 @@
 #![no_main]
 
-use std::hint::black_box;
-
-use libfuzzer_sys::fuzz_target;
-
-use grammar_aware::*;
-use solana_sbpf::{
-    ebpf,
-    elf::Executable,
-    insn_builder::{Arch, IntoBytes},
-    memory_region::MemoryRegion,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
-    verifier::{RequisiteVerifier, Verifier},
+use {
+    crate::common::ConfigTemplate,
+    grammar_aware::*,
+    libfuzzer_sys::fuzz_target,
+    solana_sbpf::{
+        ebpf,
+        elf::Executable,
+        insn_builder::{Arch, IntoBytes},
+        memory_region::MemoryRegion,
+        program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
+        verifier::{RequisiteVerifier, Verifier},
+    },
+    std::hint::black_box,
+    test_utils::{create_vm, TestContextObject},
 };
-use test_utils::{create_vm, TestContextObject};
-
-use crate::common::ConfigTemplate;
 
 mod common;
 mod grammar_aware;
