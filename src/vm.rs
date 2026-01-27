@@ -105,7 +105,7 @@ impl Default for Config {
             enable_stack_frame_gaps: true,
             instruction_meter_checkpoint_distance: 10000,
             enable_instruction_meter: true,
-            enable_register_tracing: false,
+            enable_register_tracing: false, // original default: false
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
             #[cfg(feature = "jit")]
@@ -376,7 +376,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             #[cfg(not(feature = "debugger"))]
             while interpreter.step() {}
         } else {
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
             {
                 let compiled_program = match executable
                     .get_compiled_program()
@@ -387,7 +387,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 };
                 compiled_program.invoke(config, self, self.registers);
             }
-            #[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64")))]
+            #[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64")))]
             {
                 return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
             }

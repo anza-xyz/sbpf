@@ -1,6 +1,6 @@
 #![allow(clippy::literal_string_with_formatting_args)]
 #![allow(clippy::arithmetic_side_effects)]
-#![cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#![cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
 
 // Copyright 2020 Solana Maintainers <maintainers@solana.com>
 //
@@ -15,7 +15,7 @@ extern crate test_utils;
 extern crate thiserror;
 
 use byteorder::{ByteOrder, LittleEndian};
-#[cfg(all(not(windows), target_arch = "x86_64"))]
+#[cfg(all(not(windows), target_arch = "riscv64"))]
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use solana_sbpf::{
     assembler::assemble,
@@ -3101,7 +3101,7 @@ fn test_tcp_sack_nomatch() {
 
 // Fuzzy
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
 fn execute_generated_program(prog: &[u8]) -> bool {
     let max_instruction_count = 1024;
     let mem_size = 1024 * 1024;
@@ -3181,7 +3181,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     true
 }
 
-#[cfg(all(not(windows), target_arch = "x86_64"))]
+#[cfg(all(not(windows), target_arch = "riscv64"))]
 #[test]
 fn test_total_chaos() {
     let instruction_count = 6;

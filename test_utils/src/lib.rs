@@ -308,8 +308,8 @@ macro_rules! test_interpreter_and_jit {
                 vm.register_trace.clone(),
             )
         };
-        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-        {
+        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
+        {   
             #[allow(unused_mut)]
             let compilation_result = $executable.jit_compile();
             let mut mem = $mem;
@@ -326,6 +326,32 @@ macro_rules! test_interpreter_and_jit {
             match compilation_result {
                 Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
+                    // Count the host machine code length and instruction count for JIT-compiled program
+                    // please use the "cargo test --test execution -- --test-threads=1" to avoid interleaving the output of multiple tests
+                    // if !$override_budget {
+                    //     let jit = $executable
+                    //     .get_compiled_program()
+                    //     .expect("JIT compilation succeeded but compiled program is missing");
+
+                    //     let host_machine_code_len = jit.machine_code_length();
+                    //     let host_machine_insn_count = jit.machine_instruction_count();
+
+                    //     let mut file = std::fs::OpenOptions::new()
+                    //         .create(true)
+                    //         .append(true)
+                    //         .open("optimized_result.txt")
+                    //         .unwrap();
+
+                    //     use std::io::Write;
+                    //     writeln!(
+                    //         file,
+                    //         "host machine code bytes: {}, host machine instruction count: {}\n",
+                    //         host_machine_code_len,
+                    //         host_machine_insn_count
+                    //     )
+                    //     .unwrap();
+                    // }
+
                     vm.registers[1] = ebpf::MM_INPUT_START;
                     let (instruction_count_jit, result_jit) = vm.execute_program(&$executable, false);
                     let trace_jit = &vm.register_trace;

@@ -37,7 +37,7 @@ fn bench_init_vm(bencher: &mut Bencher) {
     });
 }
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows"), any(target_arch = "x86_64", target_arch = "riscv64")))]
 #[bench]
 fn bench_jit_compile(bencher: &mut Bencher) {
     let mut file = File::open("tests/elfs/relative_call_sbpfv0.so").unwrap();

@@ -24,10 +24,11 @@ use crate::{
     vm::{Config, ContextObject},
 };
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
 use crate::jit::{JitCompiler, JitProgram};
 use byteorder::{ByteOrder, LittleEndian};
 use std::{collections::BTreeMap, fmt::Debug, mem, ops::Range, str};
+
 
 #[cfg(not(feature = "shuttle-test"))]
 use std::sync::Arc;
@@ -249,7 +250,7 @@ pub struct Executable<C: ContextObject> {
     /// Loader built-in program
     loader: Arc<BuiltinProgram<C>>,
     /// Compiled program and argument
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
     compiled_program: Option<JitProgram>,
 }
 
@@ -304,7 +305,7 @@ impl<C: ContextObject> Executable<C> {
     }
 
     /// Get the JIT compiled program
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
     pub fn get_compiled_program(&self) -> Option<&JitProgram> {
         self.compiled_program.as_ref()
     }
@@ -322,7 +323,7 @@ impl<C: ContextObject> Executable<C> {
     }
 
     /// JIT compile the executable
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
     pub fn jit_compile(&mut self) -> Result<(), crate::error::EbpfError> {
         let jit = JitCompiler::<C>::new(self)?;
         self.compiled_program = Some(jit.compile()?);
@@ -369,7 +370,7 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
             compiled_program: None,
         })
     }
@@ -571,7 +572,7 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
             compiled_program: None,
         })
     }
@@ -664,7 +665,7 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
             compiled_program: None,
         })
     }
@@ -685,7 +686,7 @@ impl<C: ContextObject> Executable<C> {
             // bpf functions
             .saturating_add(self.function_registry.mem_size());
 
-        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "riscv64"))]
         {
             // compiled programs
             total = total.saturating_add(self.compiled_program.as_ref().map_or(0, |program| program.mem_size()));

@@ -137,7 +137,7 @@ impl<T: std::fmt::Debug, E: std::fmt::Debug> StableResult<T, E> {
         any(
             not(feature = "jit"),
             target_os = "windows",
-            not(target_arch = "x86_64")
+            not(target_arch = "riscv64")
         ),
         allow(dead_code)
     )]

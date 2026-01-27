@@ -1,0 +1,1052 @@
+// BPF_ALU32_LOAD : Arithmetic and Logic
+host machine code bytes: 4160, host machine instruction count: 1040
+
+host machine code bytes: 4148, host machine instruction count: 1037
+
+host machine code bytes: 4672, host machine instruction count: 1168
+
+host machine code bytes: 4656, host machine instruction count: 1164
+
+host machine code bytes: 4108, host machine instruction count: 1027
+
+host machine code bytes: 4064, host machine instruction count: 1016
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4112, host machine instruction count: 1028
+
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 4104, host machine instruction count: 1026
+
+host machine code bytes: 4104, host machine instruction count: 1026
+
+host machine code bytes: 4168, host machine instruction count: 1042
+
+host machine code bytes: 4144, host machine instruction count: 1036
+
+host machine code bytes: 4544, host machine instruction count: 1136
+
+host machine code bytes: 4544, host machine instruction count: 1136
+
+host machine code bytes: 4544, host machine instruction count: 1136
+
+host machine code bytes: 4544, host machine instruction count: 1136
+
+host machine code bytes: 4592, host machine instruction count: 1148
+
+host machine code bytes: 4220, host machine instruction count: 1055
+
+host machine code bytes: 4224, host machine instruction count: 1056
+
+host machine code bytes: 4444, host machine instruction count: 1111
+
+host machine code bytes: 4452, host machine instruction count: 1113
+
+host machine code bytes: 4376, host machine instruction count: 1094
+
+host machine code bytes: 4380, host machine instruction count: 1095
+
+host machine code bytes: 4364, host machine instruction count: 1091
+
+
+
+
+
+
+
+
+
+// BPF_PQR : Product / Quotient / Remainder
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4008, host machine instruction count: 1002
+
+host machine code bytes: 4176, host machine instruction count: 1044
+
+host machine code bytes: 4364, host machine instruction count: 1091
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4340, host machine instruction count: 1085
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4340, host machine instruction count: 1085
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4324, host machine instruction count: 1081
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4060, host machine instruction count: 1015
+
+host machine code bytes: 4088, host machine instruction count: 1022
+
+host machine code bytes: 4056, host machine instruction count: 1014
+
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 4352, host machine instruction count: 1088
+
+host machine code bytes: 4240, host machine instruction count: 1060
+
+host machine code bytes: 4240, host machine instruction count: 1060
+
+host machine code bytes: 4232, host machine instruction count: 1058
+
+host machine code bytes: 4240, host machine instruction count: 1060
+
+host machine code bytes: 4112, host machine instruction count: 1028
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4264, host machine instruction count: 1066
+
+host machine code bytes: 4272, host machine instruction count: 1068
+
+host machine code bytes: 4176, host machine instruction count: 1044
+
+host machine code bytes: 4136, host machine instruction count: 1034
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4092, host machine instruction count: 1023
+
+host machine code bytes: 4164, host machine instruction count: 1041
+
+host machine code bytes: 4036, host machine instruction count: 1009
+
+host machine code bytes: 4044, host machine instruction count: 1011
+
+host machine code bytes: 5368, host machine instruction count: 1342
+
+host machine code bytes: 4300, host machine instruction count: 1075
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 4240, host machine instruction count: 1060
+
+host machine code bytes: 4032, host machine instruction count: 1008
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4128, host machine instruction count: 1032
+
+host machine code bytes: 4024, host machine instruction count: 1006
+
+host machine code bytes: 4024, host machine instruction count: 1006
+
+host machine code bytes: 4084, host machine instruction count: 1021
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4112, host machine instruction count: 1028
+
+host machine code bytes: 4240, host machine instruction count: 1060
+
+host machine code bytes: 4240, host machine instruction count: 1060
+
+host machine code bytes: 4036, host machine instruction count: 1009
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4028, host machine instruction count: 1007
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4088, host machine instruction count: 1022
+
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 4088, host machine instruction count: 1022
+
+
+
+
+
+
+
+
+
+// Loads and stores
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 3724, host machine instruction count: 931
+
+host machine code bytes: 3708, host machine instruction count: 927
+
+host machine code bytes: 3724, host machine instruction count: 931
+
+host machine code bytes: 3708, host machine instruction count: 927
+
+host machine code bytes: 3720, host machine instruction count: 930
+
+host machine code bytes: 3704, host machine instruction count: 926
+
+host machine code bytes: 3720, host machine instruction count: 930
+
+host machine code bytes: 3704, host machine instruction count: 926
+
+host machine code bytes: 4132, host machine instruction count: 1033
+
+host machine code bytes: 4132, host machine instruction count: 1033
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4128, host machine instruction count: 1032
+
+host machine code bytes: 3884, host machine instruction count: 971
+
+host machine code bytes: 3884, host machine instruction count: 971
+
+host machine code bytes: 3884, host machine instruction count: 971
+
+host machine code bytes: 3980, host machine instruction count: 995
+
+host machine code bytes: 3984, host machine instruction count: 996
+
+host machine code bytes: 3948, host machine instruction count: 987
+
+host machine code bytes: 3952, host machine instruction count: 988
+
+host machine code bytes: 3948, host machine instruction count: 987
+
+host machine code bytes: 3952, host machine instruction count: 988
+
+host machine code bytes: 37468, host machine instruction count: 9367
+
+host machine code bytes: 4048, host machine instruction count: 1012
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4128, host machine instruction count: 1032
+
+host machine code bytes: 4076, host machine instruction count: 1019
+
+host machine code bytes: 3940, host machine instruction count: 985
+
+host machine code bytes: 4040, host machine instruction count: 1010
+
+host machine code bytes: 4032, host machine instruction count: 1008
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4252, host machine instruction count: 1063
+
+host machine code bytes: 4252, host machine instruction count: 1063
+
+host machine code bytes: 4316, host machine instruction count: 1079
+
+host machine code bytes: 4404, host machine instruction count: 1101
+
+host machine code bytes: 4068, host machine instruction count: 1017
+
+host machine code bytes: 5312, host machine instruction count: 1328
+
+host machine code bytes: 5792, host machine instruction count: 1448
+
+host machine code bytes: 5472, host machine instruction count: 1368
+
+host machine code bytes: 4136, host machine instruction count: 1034
+
+host machine code bytes: 5792, host machine instruction count: 1448
+
+host machine code bytes: 4060, host machine instruction count: 1015
+
+host machine code bytes: 4060, host machine instruction count: 1015
+
+
+
+
+
+
+
+
+
+// BPF_JMP : Branches
+host machine code bytes: 4080, host machine instruction count: 1020
+
+host machine code bytes: 4080, host machine instruction count: 1020
+
+host machine code bytes: 4048, host machine instruction count: 1012
+
+host machine code bytes: 5344, host machine instruction count: 1336
+
+host machine code bytes: 4332, host machine instruction count: 1083
+
+host machine code bytes: 3704, host machine instruction count: 926
+
+host machine code bytes: 3724, host machine instruction count: 931
+
+host machine code bytes: 4048, host machine instruction count: 1012
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4136, host machine instruction count: 1034
+
+host machine code bytes: 4136, host machine instruction count: 1034
+
+host machine code bytes: 4216, host machine instruction count: 1054
+
+host machine code bytes: 4024, host machine instruction count: 1006
+
+host machine code bytes: 4024, host machine instruction count: 1006
+
+host machine code bytes: 4024, host machine instruction count: 1006
+
+host machine code bytes: 4024, host machine instruction count: 1006
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4104, host machine instruction count: 1026
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4104, host machine instruction count: 1026
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4104, host machine instruction count: 1026
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4128, host machine instruction count: 1032
+
+host machine code bytes: 4140, host machine instruction count: 1035
+
+host machine code bytes: 4140, host machine instruction count: 1035
+
+host machine code bytes: 4220, host machine instruction count: 1055
+
+host machine code bytes: 4148, host machine instruction count: 1037
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4312, host machine instruction count: 1078
+
+host machine code bytes: 4056, host machine instruction count: 1014
+
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 3984, host machine instruction count: 996
+
+host machine code bytes: 4008, host machine instruction count: 1002
+
+host machine code bytes: 4024, host machine instruction count: 1006
+
+host machine code bytes: 4048, host machine instruction count: 1012
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 3984, host machine instruction count: 996
+
+host machine code bytes: 3984, host machine instruction count: 996
+
+host machine code bytes: 4016, host machine instruction count: 1004
+
+host machine code bytes: 4016, host machine instruction count: 1004
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4048, host machine instruction count: 1012
+
+host machine code bytes: 4060, host machine instruction count: 1015
+
+host machine code bytes: 4028, host machine instruction count: 1007
+
+host machine code bytes: 4056, host machine instruction count: 1014
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4012, host machine instruction count: 1003
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4016, host machine instruction count: 1004
+
+host machine code bytes: 3800, host machine instruction count: 950
+
+host machine code bytes: 3800, host machine instruction count: 950
+
+host machine code bytes: 3804, host machine instruction count: 951
+
+host machine code bytes: 3804, host machine instruction count: 951
+
+host machine code bytes: 4092, host machine instruction count: 1023
+
+host machine code bytes: 4088, host machine instruction count: 1022
+
+host machine code bytes: 4076, host machine instruction count: 1019
+
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 4092, host machine instruction count: 1023
+
+host machine code bytes: 4088, host machine instruction count: 1022
+
+host machine code bytes: 4076, host machine instruction count: 1019
+
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4112, host machine instruction count: 1028
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4112, host machine instruction count: 1028
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4092, host machine instruction count: 1023
+
+host machine code bytes: 4088, host machine instruction count: 1022
+
+host machine code bytes: 4076, host machine instruction count: 1019
+
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 4092, host machine instruction count: 1023
+
+host machine code bytes: 4088, host machine instruction count: 1022
+
+host machine code bytes: 4076, host machine instruction count: 1019
+
+host machine code bytes: 4072, host machine instruction count: 1018
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4112, host machine instruction count: 1028
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4112, host machine instruction count: 1028
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4068, host machine instruction count: 1017
+
+host machine code bytes: 4064, host machine instruction count: 1016
+
+host machine code bytes: 4064, host machine instruction count: 1016
+
+host machine code bytes: 4060, host machine instruction count: 1015
+
+host machine code bytes: 4100, host machine instruction count: 1025
+
+host machine code bytes: 4096, host machine instruction count: 1024
+
+host machine code bytes: 4064, host machine instruction count: 1016
+
+host machine code bytes: 4060, host machine instruction count: 1015
+
+host machine code bytes: 4064, host machine instruction count: 1016
+
+host machine code bytes: 4060, host machine instruction count: 1015
+
+host machine code bytes: 4064, host machine instruction count: 1016
+
+host machine code bytes: 4060, host machine instruction count: 1015
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4104, host machine instruction count: 1026
+
+host machine code bytes: 4136, host machine instruction count: 1034
+
+
+
+
+
+
+
+
+
+// Call Stack
+host machine code bytes: 4132, host machine instruction count: 1033
+
+host machine code bytes: 4128, host machine instruction count: 1032
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4144, host machine instruction count: 1036
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4128, host machine instruction count: 1032
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4140, host machine instruction count: 1035
+
+host machine code bytes: 4128, host machine instruction count: 1032
+
+host machine code bytes: 4160, host machine instruction count: 1040
+
+host machine code bytes: 4156, host machine instruction count: 1039
+
+host machine code bytes: 4152, host machine instruction count: 1038
+
+host machine code bytes: 4140, host machine instruction count: 1035
+
+host machine code bytes: 4168, host machine instruction count: 1042
+
+host machine code bytes: 4148, host machine instruction count: 1037
+
+host machine code bytes: 4152, host machine instruction count: 1038
+
+host machine code bytes: 4140, host machine instruction count: 1035
+
+host machine code bytes: 4180, host machine instruction count: 1045
+
+host machine code bytes: 4168, host machine instruction count: 1042
+
+host machine code bytes: 4200, host machine instruction count: 1050
+
+host machine code bytes: 4196, host machine instruction count: 1049
+
+host machine code bytes: 4192, host machine instruction count: 1048
+
+host machine code bytes: 4180, host machine instruction count: 1045
+
+
+
+
+
+
+
+
+
+// CALL_IMM & CALL_REG : Procedure Calls
+host machine code bytes: 4208, host machine instruction count: 1052
+
+host machine code bytes: 4188, host machine instruction count: 1047
+
+host machine code bytes: 4192, host machine instruction count: 1048
+
+host machine code bytes: 4180, host machine instruction count: 1045
+
+host machine code bytes: 4204, host machine instruction count: 1051
+
+host machine code bytes: 4192, host machine instruction count: 1048
+
+host machine code bytes: 4224, host machine instruction count: 1056
+
+host machine code bytes: 4220, host machine instruction count: 1055
+
+host machine code bytes: 4216, host machine instruction count: 1054
+
+host machine code bytes: 4204, host machine instruction count: 1051
+
+host machine code bytes: 4232, host machine instruction count: 1058
+
+host machine code bytes: 4212, host machine instruction count: 1053
+
+host machine code bytes: 4216, host machine instruction count: 1054
+
+host machine code bytes: 4204, host machine instruction count: 1051
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4112, host machine instruction count: 1028
+
+
+
+
+
+
+
+
+
+// CALL_IMM : Syscalls
+host machine code bytes: 4108, host machine instruction count: 1027
+
+host machine code bytes: 4104, host machine instruction count: 1026
+
+host machine code bytes: 4108, host machine instruction count: 1027
+
+host machine code bytes: 4104, host machine instruction count: 1026
+
+host machine code bytes: 4188, host machine instruction count: 1047
+
+host machine code bytes: 4184, host machine instruction count: 1046
+
+host machine code bytes: 4172, host machine instruction count: 1043
+
+host machine code bytes: 4168, host machine instruction count: 1042
+
+host machine code bytes: 4188, host machine instruction count: 1047
+
+host machine code bytes: 4184, host machine instruction count: 1046
+
+host machine code bytes: 4172, host machine instruction count: 1043
+
+host machine code bytes: 4168, host machine instruction count: 1042
+
+host machine code bytes: 4148, host machine instruction count: 1037
+
+host machine code bytes: 4136, host machine instruction count: 1034
+
+
+
+
+
+
+
+
+
+// Instruction Meter Limit
+host machine code bytes: 4172, host machine instruction count: 1043
+
+host machine code bytes: 4168, host machine instruction count: 1042
+
+host machine code bytes: 4172, host machine instruction count: 1043
+
+host machine code bytes: 4168, host machine instruction count: 1042
+
+host machine code bytes: 4212, host machine instruction count: 1053
+
+host machine code bytes: 4208, host machine instruction count: 1052
+
+host machine code bytes: 4236, host machine instruction count: 1059
+
+host machine code bytes: 4232, host machine instruction count: 1058
+
+host machine code bytes: 4212, host machine instruction count: 1053
+
+host machine code bytes: 4208, host machine instruction count: 1052
+
+host machine code bytes: 4236, host machine instruction count: 1059
+
+host machine code bytes: 4232, host machine instruction count: 1058
+
+host machine code bytes: 4188, host machine instruction count: 1047
+
+host machine code bytes: 4176, host machine instruction count: 1044
+
+host machine code bytes: 4172, host machine instruction count: 1043
+
+host machine code bytes: 4168, host machine instruction count: 1042
+
+
+
+
+
+
+
+
+
+// Symbols and Relocation
+host machine code bytes: 4172, host machine instruction count: 1043
+
+host machine code bytes: 4168, host machine instruction count: 1042
+
+host machine code bytes: 4252, host machine instruction count: 1063
+
+host machine code bytes: 4248, host machine instruction count: 1062
+
+host machine code bytes: 4236, host machine instruction count: 1059
+
+host machine code bytes: 4232, host machine instruction count: 1058
+
+host machine code bytes: 4252, host machine instruction count: 1063
+
+host machine code bytes: 4248, host machine instruction count: 1062
+
+host machine code bytes: 4236, host machine instruction count: 1059
+
+host machine code bytes: 4232, host machine instruction count: 1058
+
+host machine code bytes: 4212, host machine instruction count: 1053
+
+host machine code bytes: 4200, host machine instruction count: 1050
+
+host machine code bytes: 4236, host machine instruction count: 1059
+
+host machine code bytes: 4232, host machine instruction count: 1058
+
+
+
+
+
+
+
+
+
+// Programs
+host machine code bytes: 4236, host machine instruction count: 1059
+
+host machine code bytes: 4232, host machine instruction count: 1058
+
+host machine code bytes: 4276, host machine instruction count: 1069
+
+host machine code bytes: 4272, host machine instruction count: 1068
+
+host machine code bytes: 4300, host machine instruction count: 1075
+
+host machine code bytes: 4296, host machine instruction count: 1074
+
+host machine code bytes: 4276, host machine instruction count: 1069
+
+host machine code bytes: 4272, host machine instruction count: 1068
+
+host machine code bytes: 4300, host machine instruction count: 1075
+
+
+
+
+
+
+
+
+
+// Fuzzy
+host machine code bytes: 4296, host machine instruction count: 1074
+
+host machine code bytes: 4592, host machine instruction count: 1148
+
+host machine code bytes: 4164, host machine instruction count: 1041
+
+host machine code bytes: 4196, host machine instruction count: 1049
+
+
+
+
+
+
+
+
+
+// SBPFv0 only [DEPRECATED]
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4000, host machine instruction count: 1000
+
+host machine code bytes: 3660, host machine instruction count: 915
+
+host machine code bytes: 3696, host machine instruction count: 924
+
+host machine code bytes: 3724, host machine instruction count: 931
+
+host machine code bytes: 3680, host machine instruction count: 920
+
+host machine code bytes: 4060, host machine instruction count: 1015
+
+host machine code bytes: 4048, host machine instruction count: 1012
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 4940, host machine instruction count: 1235
+
+host machine code bytes: 4944, host machine instruction count: 1236
+
+host machine code bytes: 4320, host machine instruction count: 1080
+
+host machine code bytes: 4452, host machine instruction count: 1113
+
+host machine code bytes: 4328, host machine instruction count: 1082
+
+host machine code bytes: 4464, host machine instruction count: 1116
+
+host machine code bytes: 4336, host machine instruction count: 1084
+
+host machine code bytes: 5244, host machine instruction count: 1311
+
+host machine code bytes: 5248, host machine instruction count: 1312
+
+host machine code bytes: 3696, host machine instruction count: 924
+
+host machine code bytes: 3688, host machine instruction count: 922
+
+host machine code bytes: 5000, host machine instruction count: 1250
+
+host machine code bytes: 4312, host machine instruction count: 1078
+
+host machine code bytes: 5352, host machine instruction count: 1338
+
+host machine code bytes: 4628, host machine instruction count: 1157
+
+host machine code bytes: 4192, host machine instruction count: 1048
+
+host machine code bytes: 4196, host machine instruction count: 1049
+
+host machine code bytes: 4252, host machine instruction count: 1063
+
+host machine code bytes: 4256, host machine instruction count: 1064
+
+host machine code bytes: 4192, host machine instruction count: 1048
+
+host machine code bytes: 4204, host machine instruction count: 1051
+
+host machine code bytes: 3772, host machine instruction count: 943
+
+host machine code bytes: 3740, host machine instruction count: 935
+
+host machine code bytes: 4124, host machine instruction count: 1031
+
+host machine code bytes: 4128, host machine instruction count: 1032
+
+host machine code bytes: 4932, host machine instruction count: 1233
+
+host machine code bytes: 4932, host machine instruction count: 1233
+
+host machine code bytes: 4932, host machine instruction count: 1233
+
+host machine code bytes: 4932, host machine instruction count: 1233
+
+host machine code bytes: 5952, host machine instruction count: 1488
+
+host machine code bytes: 5952, host machine instruction count: 1488
+
+host machine code bytes: 4020, host machine instruction count: 1005
+
+host machine code bytes: 4012, host machine instruction count: 1003
+
+host machine code bytes: 4116, host machine instruction count: 1029
+
+host machine code bytes: 4420, host machine instruction count: 1105
+
