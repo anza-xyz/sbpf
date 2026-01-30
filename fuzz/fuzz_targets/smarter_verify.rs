@@ -22,18 +22,20 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    let prog = make_program(&data.prog);
     let sbpf_version = data.template.sbpf_version;
+    let prog = make_program(&data.prog, sbpf_version);
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
     let syscall_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
 
-    RequisiteVerifier::verify(
+    #[allow(unused)]
+    let res = RequisiteVerifier::verify(
         prog.into_bytes(),
         &config,
         sbpf_version,
         &function_registry,
         &syscall_registry,
-    )
-    .unwrap();
+    );
+    #[cfg(feature = "only-verified")]
+    assert!(res.is_ok(), "Verification failed: {:?}", res.err());
 });

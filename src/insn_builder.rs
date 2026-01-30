@@ -101,16 +101,17 @@ impl<I: Instruction> IntoBytes for &I {
 }
 
 /// BPF instruction stack in byte representation
-#[derive(Default)]
 pub struct BpfCode {
     instructions: Vec<u8>,
+    sbpf_version: crate::program::SBPFVersion,
 }
 
 impl BpfCode {
-    /// creates new empty BPF instruction stack
-    pub fn new() -> Self {
+    /// creates new empty BPF instruction stack with the specified SBPF version
+    pub fn new(sbpf_version: crate::program::SBPFVersion) -> Self {
         BpfCode {
             instructions: vec![],
+            sbpf_version,
         }
     }
 
@@ -270,6 +271,45 @@ impl BpfCode {
         FunctionCall {
             bpf_code: self,
             insn: Insn::default(),
+            is_reg: false,
+        }
+    }
+
+    /// create CALL_REG (callx) instruction
+    pub fn call_reg(&mut self) -> FunctionCall<'_> {
+        FunctionCall {
+            bpf_code: self,
+            insn: Insn::default(),
+            is_reg: true,
+        }
+    }
+
+    /// create PQR instruction (Product/Quotient/Remainder for SBPF v2)
+    pub fn pqr(&mut self, source: Source, arch: Arch, op: PqrOp) -> Pqr<'_> {
+        Pqr {
+            bpf_code: self,
+            src_bit: source,
+            op,
+            arch_bits: arch,
+            insn: Insn::default(),
+        }
+    }
+
+    /// create JMP32 conditional instruction (for SBPF v3+)
+    pub fn jump_conditional_32(&mut self, cond: Cond, src_bit: Source) -> Jump32<'_> {
+        Jump32 {
+            bpf_code: self,
+            cond,
+            src_bit,
+            insn: Insn::default(),
+        }
+    }
+
+    /// create HOR64_IMM instruction (for SBPF v2)
+    pub fn hor64_imm(&mut self) -> Hor64<'_> {
+        Hor64 {
+            bpf_code: self,
+            insn: Insn::default(),
         }
     }
 
@@ -327,6 +367,45 @@ impl Instruction for Move<'_> {
     }
 }
 
+/// struct to represent PQR instructions (Product/Quotient/Remainder for SBPF v2)
+pub struct Pqr<'i> {
+    bpf_code: &'i mut BpfCode,
+    src_bit: Source,
+    op: PqrOp,
+    arch_bits: Arch,
+    insn: Insn,
+}
+
+impl<'i> Pqr<'i> {
+    /// push PQR instruction into BpfCode instruction stack
+    pub fn push(self) -> &'i mut BpfCode {
+        let mut asm = self.into_bytes();
+        self.bpf_code.instructions.append(&mut asm);
+        self.bpf_code
+    }
+}
+
+impl Instruction for Pqr<'_> {
+    fn opt_code_byte(&self) -> u8 {
+        let op = self.op as u8;
+        let src_bit = self.src_bit as u8;
+        // For PQR: 64-bit uses BPF_B flag, 32-bit doesn't
+        let arch_size_bit = match self.arch_bits {
+            Arch::X64 => BPF_B,
+            Arch::X32 => 0,
+        };
+        BPF_PQR | op | src_bit | arch_size_bit
+    }
+
+    fn get_insn_mut(&mut self) -> &mut Insn {
+        &mut self.insn
+    }
+
+    fn get_insn(&self) -> &Insn {
+        &self.insn
+    }
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(
     feature = "fuzzer-not-safe-for-production",
@@ -355,6 +434,29 @@ enum OpBits {
     BitXor = BPF_XOR as isize,
     Mov = BPF_MOV as isize,
     SignRShift = BPF_ARSH as isize,
+}
+
+#[derive(Copy, Clone)]
+#[cfg_attr(
+    feature = "fuzzer-not-safe-for-production",
+    derive(arbitrary::Arbitrary, Debug, PartialEq, Eq)
+)]
+/// PQR operation types for SBPF v2
+pub enum PqrOp {
+    /// Low multiplication
+    Lmul = BPF_LMUL as isize,
+    /// Unsigned high multiplication
+    Uhmul = BPF_UHMUL as isize,
+    /// Unsigned division
+    Udiv = BPF_UDIV as isize,
+    /// Unsigned remainder
+    Urem = BPF_UREM as isize,
+    /// Signed high multiplication
+    Shmul = BPF_SHMUL as isize,
+    /// Signed division
+    Sdiv = BPF_SDIV as isize,
+    /// Signed remainder
+    Srem = BPF_SREM as isize,
 }
 
 #[derive(Copy, Clone)]
@@ -433,6 +535,16 @@ impl<'i> Load<'i> {
 
 impl Instruction for Load<'_> {
     fn opt_code_byte(&self) -> u8 {
+        // For load_x with V2+, use BPF_ALU32_LOAD class with new size encoding
+        if self.bpf_code.sbpf_version.move_memory_instruction_classes()
+            && self.addressing == Addressing::Mem
+            && self.source == BPF_LDX
+        {
+            let size = self.mem_size.to_v2_encoding();
+            return BPF_ALU32_LOAD | BPF_X | size;
+        }
+
+        // Original encoding
         let size = self.mem_size as u8;
         let addressing = self.addressing as u8;
         addressing | size | self.source
@@ -466,6 +578,15 @@ impl<'i> Store<'i> {
 
 impl Instruction for Store<'_> {
     fn opt_code_byte(&self) -> u8 {
+        // For stores with V2+, use BPF_ALU64_STORE class with new size encoding
+        if self.bpf_code.sbpf_version.move_memory_instruction_classes() {
+            let size = self.mem_size.to_v2_encoding();
+            // Determine if it's IMM or REG source
+            let v2_source = if self.source == BPF_IMM { BPF_K } else { BPF_X };
+            return BPF_ALU64_STORE | v2_source | size;
+        }
+
+        // Original encoding
         let size = self.mem_size as u8;
         BPF_MEM | BPF_ST | size | self.source
     }
@@ -496,7 +617,19 @@ pub enum MemSize {
     DoubleWord = BPF_DW as isize,
 }
 
-#[derive(Copy, Clone)]
+impl MemSize {
+    /// Convert old memory size encoding to new V2 encoding for move_memory_instruction_classes
+    fn to_v2_encoding(&self) -> u8 {
+        match self {
+            MemSize::Byte => BPF_1B,
+            MemSize::HalfWord => BPF_2B,
+            MemSize::Word => BPF_4B,
+            MemSize::DoubleWord => BPF_8B,
+        }
+    }
+}
+
+#[derive(Copy, Clone, PartialEq)]
 enum Addressing {
     Imm = BPF_IMM as isize,
     Abs = BPF_ABS as isize,
@@ -570,10 +703,73 @@ pub enum Cond {
     LowerEqualsSigned = BPF_JSLE as isize,
 }
 
+/// struct representation of JMP32 instructions (for SBPF v3+)
+pub struct Jump32<'i> {
+    bpf_code: &'i mut BpfCode,
+    cond: Cond,
+    src_bit: Source,
+    insn: Insn,
+}
+
+impl<'i> Jump32<'i> {
+    /// push JMP32 instruction into BpfCode instruction stack
+    pub fn push(self) -> &'i mut BpfCode {
+        let mut asm = self.into_bytes();
+        self.bpf_code.instructions.append(&mut asm);
+        self.bpf_code
+    }
+}
+
+impl Instruction for Jump32<'_> {
+    fn opt_code_byte(&self) -> u8 {
+        let cmp: u8 = self.cond as u8;
+        let src_bit = self.src_bit as u8;
+        cmp | src_bit | BPF_JMP32
+    }
+
+    fn get_insn_mut(&mut self) -> &mut Insn {
+        &mut self.insn
+    }
+
+    fn get_insn(&self) -> &Insn {
+        &self.insn
+    }
+}
+
+/// struct representation of HOR64_IMM instruction (for SBPF v2)
+pub struct Hor64<'i> {
+    bpf_code: &'i mut BpfCode,
+    insn: Insn,
+}
+
+impl<'i> Hor64<'i> {
+    /// push HOR64_IMM instruction into BpfCode instruction stack
+    pub fn push(self) -> &'i mut BpfCode {
+        let mut asm = self.into_bytes();
+        self.bpf_code.instructions.append(&mut asm);
+        self.bpf_code
+    }
+}
+
+impl Instruction for Hor64<'_> {
+    fn opt_code_byte(&self) -> u8 {
+        HOR64_IMM
+    }
+
+    fn get_insn_mut(&mut self) -> &mut Insn {
+        &mut self.insn
+    }
+
+    fn get_insn(&self) -> &Insn {
+        &self.insn
+    }
+}
+
 /// struct representation of CALL instruction
 pub struct FunctionCall<'i> {
     bpf_code: &'i mut BpfCode,
     insn: Insn,
+    is_reg: bool,
 }
 
 impl<'i> FunctionCall<'i> {
@@ -587,7 +783,55 @@ impl<'i> FunctionCall<'i> {
 
 impl Instruction for FunctionCall<'_> {
     fn opt_code_byte(&self) -> u8 {
-        BPF_CALL | BPF_JMP64
+        if self.is_reg {
+            BPF_CALL | BPF_X | BPF_JMP64 // CALL_REG
+        } else {
+            BPF_CALL | BPF_JMP64 // CALL_IMM
+        }
+    }
+
+    fn get_src(&self) -> u8 {
+        if self.is_reg {
+            // CALLX (call register)
+            let version = &self.bpf_code.sbpf_version;
+            if version.callx_uses_src_reg() {
+                // V2: use src register field
+                self.insn.src
+            } else if version.callx_uses_dst_reg() {
+                // V3+: dst register is used, src is 0
+                0
+            } else {
+                // V0/V1: neither src nor dst, use imm field for register
+                0
+            }
+        } else {
+            // CALL_IMM
+            let version = &self.bpf_code.sbpf_version;
+            if version.static_syscalls() {
+                // V3+: src register is 1 for static syscalls
+                1
+            } else {
+                // V0/V1/V2: src is 0
+                0
+            }
+        }
+    }
+
+    fn get_dst(&self) -> u8 {
+        if self.is_reg {
+            // CALLX
+            let version = &self.bpf_code.sbpf_version;
+            if version.callx_uses_dst_reg() {
+                // V3+: use dst register field
+                self.insn.dst
+            } else {
+                // V0/V1/V2: dst is 0, register is in src (V2) or imm (V0/V1)
+                0
+            }
+        } else {
+            // CALL_IMM: dst is always 0
+            0
+        }
     }
 
     fn get_insn_mut(&mut self) -> &mut Insn {
@@ -636,7 +880,7 @@ mod tests {
 
         #[test]
         fn call_immediate() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program.call().set_imm(0x11_22_33_44).push();
 
             assert_eq!(
@@ -647,7 +891,7 @@ mod tests {
 
         #[test]
         fn exit_operation() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program.exit().push();
 
             assert_eq!(
@@ -665,7 +909,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_equals_src() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::Equals, Source::Reg)
                     .set_dst(0x01)
@@ -680,7 +924,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_greater_than_src() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::Greater, Source::Reg)
                     .set_dst(0x03)
@@ -695,7 +939,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_greater_or_equals_to_src() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::GreaterEquals, Source::Reg)
                     .set_dst(0x04)
@@ -710,7 +954,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_lower_than_src() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::Lower, Source::Reg)
                     .set_dst(0x03)
@@ -725,7 +969,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_lower_or_equals_to_src() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::LowerEquals, Source::Reg)
                     .set_dst(0x04)
@@ -740,7 +984,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_bit_and_with_src_not_equal_zero() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::BitAnd, Source::Reg)
                     .set_dst(0x05)
@@ -755,7 +999,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_not_equals_src() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::NotEquals, Source::Reg)
                     .set_dst(0x03)
@@ -770,7 +1014,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_greater_than_src_signed() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::GreaterSigned, Source::Reg)
                     .set_dst(0x04)
@@ -785,7 +1029,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_greater_or_equals_src_signed() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::GreaterEqualsSigned, Source::Reg)
                     .set_dst(0x01)
@@ -800,7 +1044,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_lower_than_src_signed() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::LowerSigned, Source::Reg)
                     .set_dst(0x04)
@@ -815,7 +1059,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_lower_or_equals_src_signed() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::LowerEqualsSigned, Source::Reg)
                     .set_dst(0x01)
@@ -835,7 +1079,7 @@ mod tests {
 
             #[test]
             fn jump_to_label() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program.jump_unconditional().set_off(0x00_11).push();
 
                 assert_eq!(
@@ -846,7 +1090,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_equals_const() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::Equals, Source::Imm)
                     .set_dst(0x01)
@@ -861,7 +1105,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_greater_than_const() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::Greater, Source::Imm)
                     .set_dst(0x02)
@@ -876,7 +1120,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_greater_or_equals_to_const() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::GreaterEquals, Source::Imm)
                     .set_dst(0x04)
@@ -891,7 +1135,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_lower_than_const() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::Lower, Source::Imm)
                     .set_dst(0x02)
@@ -906,7 +1150,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_lower_or_equals_to_const() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::LowerEquals, Source::Imm)
                     .set_dst(0x04)
@@ -921,7 +1165,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_bit_and_with_const_not_equal_zero() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::BitAnd, Source::Imm)
                     .set_dst(0x05)
@@ -935,7 +1179,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_not_equals_const() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::NotEquals, Source::Imm)
                     .set_dst(0x03)
@@ -949,7 +1193,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_greater_than_const_signed() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::GreaterSigned, Source::Imm)
                     .set_dst(0x04)
@@ -963,7 +1207,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_greater_or_equals_src_signed() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::GreaterEqualsSigned, Source::Imm)
                     .set_dst(0x01)
@@ -977,7 +1221,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_lower_than_const_signed() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::LowerSigned, Source::Imm)
                     .set_dst(0x04)
@@ -991,7 +1235,7 @@ mod tests {
 
             #[test]
             fn jump_on_dst_lower_or_equals_src_signed() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .jump_conditional(Cond::LowerEqualsSigned, Source::Imm)
                     .set_dst(0x01)
@@ -1011,7 +1255,7 @@ mod tests {
 
         #[test]
         fn store_word_from_dst_into_immediate_address() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .store(MemSize::Word)
                 .set_dst(0x01)
@@ -1027,7 +1271,7 @@ mod tests {
 
         #[test]
         fn store_half_word_from_dst_into_immediate_address() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .store(MemSize::HalfWord)
                 .set_dst(0x02)
@@ -1042,7 +1286,7 @@ mod tests {
 
         #[test]
         fn store_byte_from_dst_into_immediate_address() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program.store(MemSize::Byte).push();
 
             assert_eq!(
@@ -1053,7 +1297,7 @@ mod tests {
 
         #[test]
         fn store_double_word_from_dst_into_immediate_address() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program.store(MemSize::DoubleWord).push();
 
             assert_eq!(
@@ -1064,7 +1308,7 @@ mod tests {
 
         #[test]
         fn store_word_from_dst_into_src_address() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .store_x(MemSize::Word)
                 .set_dst(0x01)
@@ -1079,7 +1323,7 @@ mod tests {
 
         #[test]
         fn store_half_word_from_dst_into_src_address() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program.store_x(MemSize::HalfWord).push();
 
             assert_eq!(
@@ -1090,7 +1334,7 @@ mod tests {
 
         #[test]
         fn store_byte_from_dst_into_src_address() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program.store_x(MemSize::Byte).push();
 
             assert_eq!(
@@ -1101,7 +1345,7 @@ mod tests {
 
         #[test]
         fn store_double_word_from_dst_into_src_address() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program.store_x(MemSize::DoubleWord).push();
 
             assert_eq!(
@@ -1119,7 +1363,7 @@ mod tests {
 
             #[test]
             fn load_word_from_set_src_with_offset() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .load_x(MemSize::Word)
                     .set_dst(0x01)
@@ -1135,7 +1379,7 @@ mod tests {
 
             #[test]
             fn load_half_word_from_set_src_with_offset() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .load_x(MemSize::HalfWord)
                     .set_dst(0x02)
@@ -1151,7 +1395,7 @@ mod tests {
 
             #[test]
             fn load_byte_from_set_src_with_offset() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .load_x(MemSize::Byte)
                     .set_dst(0x01)
@@ -1167,7 +1411,7 @@ mod tests {
 
             #[test]
             fn load_double_word_from_set_src_with_offset() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .load_x(MemSize::DoubleWord)
                     .set_dst(0x04)
@@ -1188,7 +1432,7 @@ mod tests {
 
             #[test]
             fn load_double_word() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .load(MemSize::DoubleWord)
                     .set_dst(0x01)
@@ -1203,7 +1447,7 @@ mod tests {
 
             #[test]
             fn load_abs_word() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program.load_abs(MemSize::Word).push();
 
                 assert_eq!(
@@ -1214,7 +1458,7 @@ mod tests {
 
             #[test]
             fn load_abs_half_word() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program.load_abs(MemSize::HalfWord).set_dst(0x05).push();
 
                 assert_eq!(
@@ -1225,7 +1469,7 @@ mod tests {
 
             #[test]
             fn load_abs_byte() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program.load_abs(MemSize::Byte).set_dst(0x01).push();
 
                 assert_eq!(
@@ -1236,7 +1480,7 @@ mod tests {
 
             #[test]
             fn load_abs_double_word() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program
                     .load_abs(MemSize::DoubleWord)
                     .set_dst(0x01)
@@ -1251,7 +1495,7 @@ mod tests {
 
             #[test]
             fn load_indirect_word() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program.load_ind(MemSize::Word).push();
 
                 assert_eq!(
@@ -1262,7 +1506,7 @@ mod tests {
 
             #[test]
             fn load_indirect_half_word() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program.load_ind(MemSize::HalfWord).push();
 
                 assert_eq!(
@@ -1273,7 +1517,7 @@ mod tests {
 
             #[test]
             fn load_indirect_byte() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program.load_ind(MemSize::Byte).push();
 
                 assert_eq!(
@@ -1284,7 +1528,7 @@ mod tests {
 
             #[test]
             fn load_indirect_double_word() {
-                let mut program = BpfCode::new();
+                let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                 program.load_ind(MemSize::DoubleWord).push();
 
                 assert_eq!(
@@ -1301,7 +1545,7 @@ mod tests {
 
         #[test]
         fn convert_host_to_little_endian_16bits() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .swap_bytes(Endian::Little)
                 .set_dst(0x01)
@@ -1316,7 +1560,7 @@ mod tests {
 
         #[test]
         fn convert_host_to_little_endian_32bits() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .swap_bytes(Endian::Little)
                 .set_dst(0x02)
@@ -1331,7 +1575,7 @@ mod tests {
 
         #[test]
         fn convert_host_to_little_endian_64bit() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .swap_bytes(Endian::Little)
                 .set_dst(0x03)
@@ -1346,7 +1590,7 @@ mod tests {
 
         #[test]
         fn convert_host_to_big_endian_16bits() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .swap_bytes(Endian::Big)
                 .set_dst(0x01)
@@ -1361,7 +1605,7 @@ mod tests {
 
         #[test]
         fn convert_host_to_big_endian_32bits() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .swap_bytes(Endian::Big)
                 .set_dst(0x02)
@@ -1376,7 +1620,7 @@ mod tests {
 
         #[test]
         fn convert_host_to_big_endian_64bit() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .swap_bytes(Endian::Big)
                 .set_dst(0x03)
@@ -1400,7 +1644,7 @@ mod tests {
 
                 #[test]
                 fn move_and_add_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .add(Source::Imm, Arch::X64)
                         .set_dst(0x02)
@@ -1415,7 +1659,7 @@ mod tests {
 
                 #[test]
                 fn move_sub_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .sub(Source::Imm, Arch::X64)
                         .set_dst(0x04)
@@ -1430,7 +1674,7 @@ mod tests {
 
                 #[test]
                 fn move_mul_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .mul(Source::Imm, Arch::X64)
                         .set_dst(0x05)
@@ -1445,7 +1689,7 @@ mod tests {
 
                 #[test]
                 fn move_div_constant_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .div(Source::Imm, Arch::X64)
                         .set_dst(0x02)
@@ -1460,7 +1704,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_or_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_or(Source::Imm, Arch::X64)
                         .set_dst(0x02)
@@ -1475,7 +1719,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_and_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_and(Source::Imm, Arch::X64)
                         .set_dst(0x02)
@@ -1490,7 +1734,7 @@ mod tests {
 
                 #[test]
                 fn move_left_shift_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .left_shift(Source::Imm, Arch::X64)
                         .set_dst(0x01)
@@ -1504,7 +1748,7 @@ mod tests {
 
                 #[test]
                 fn move_logical_right_shift_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .right_shift(Source::Imm, Arch::X64)
                         .set_dst(0x01)
@@ -1518,7 +1762,7 @@ mod tests {
 
                 #[test]
                 fn move_negate_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program.negate(Arch::X64).set_dst(0x02).push();
 
                     assert_eq!(
@@ -1529,7 +1773,7 @@ mod tests {
 
                 #[test]
                 fn move_mod_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program.modulo(Source::Imm, Arch::X64).set_dst(0x02).push();
 
                     assert_eq!(
@@ -1540,7 +1784,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_xor_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program.bit_xor(Source::Imm, Arch::X64).set_dst(0x03).push();
 
                     assert_eq!(
@@ -1551,7 +1795,7 @@ mod tests {
 
                 #[test]
                 fn move_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .mov(Source::Imm, Arch::X64)
                         .set_dst(0x01)
@@ -1566,7 +1810,7 @@ mod tests {
 
                 #[test]
                 fn move_signed_right_shift_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .signed_right_shift(Source::Imm, Arch::X64)
                         .set_dst(0x05)
@@ -1585,7 +1829,7 @@ mod tests {
 
                 #[test]
                 fn move_and_add_from_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .add(Source::Reg, Arch::X64)
                         .set_dst(0x03)
@@ -1600,7 +1844,7 @@ mod tests {
 
                 #[test]
                 fn move_sub_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .sub(Source::Reg, Arch::X64)
                         .set_dst(0x03)
@@ -1615,7 +1859,7 @@ mod tests {
 
                 #[test]
                 fn move_mul_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .mul(Source::Reg, Arch::X64)
                         .set_dst(0x04)
@@ -1630,7 +1874,7 @@ mod tests {
 
                 #[test]
                 fn move_div_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .div(Source::Reg, Arch::X64)
                         .set_dst(0x01)
@@ -1645,7 +1889,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_or_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_or(Source::Reg, Arch::X64)
                         .set_dst(0x03)
@@ -1660,7 +1904,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_and_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_and(Source::Reg, Arch::X64)
                         .set_dst(0x03)
@@ -1675,7 +1919,7 @@ mod tests {
 
                 #[test]
                 fn move_left_shift_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .left_shift(Source::Reg, Arch::X64)
                         .set_dst(0x02)
@@ -1690,7 +1934,7 @@ mod tests {
 
                 #[test]
                 fn move_logical_right_shift_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .right_shift(Source::Reg, Arch::X64)
                         .set_dst(0x02)
@@ -1705,7 +1949,7 @@ mod tests {
 
                 #[test]
                 fn move_mod_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .modulo(Source::Reg, Arch::X64)
                         .set_dst(0x01)
@@ -1720,7 +1964,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_xor_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_xor(Source::Reg, Arch::X64)
                         .set_dst(0x02)
@@ -1735,7 +1979,7 @@ mod tests {
 
                 #[test]
                 fn move_from_register_to_another_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program.mov(Source::Reg, Arch::X64).set_src(0x01).push();
 
                     assert_eq!(
@@ -1746,7 +1990,7 @@ mod tests {
 
                 #[test]
                 fn move_signed_right_shift_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .signed_right_shift(Source::Reg, Arch::X64)
                         .set_dst(0x02)
@@ -1769,7 +2013,7 @@ mod tests {
 
                 #[test]
                 fn move_and_add_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .add(Source::Imm, Arch::X32)
                         .set_dst(0x02)
@@ -1784,7 +2028,7 @@ mod tests {
 
                 #[test]
                 fn move_sub_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .sub(Source::Imm, Arch::X32)
                         .set_dst(0x04)
@@ -1799,7 +2043,7 @@ mod tests {
 
                 #[test]
                 fn move_mul_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .mul(Source::Imm, Arch::X32)
                         .set_dst(0x05)
@@ -1814,7 +2058,7 @@ mod tests {
 
                 #[test]
                 fn move_div_constant_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .div(Source::Imm, Arch::X32)
                         .set_dst(0x02)
@@ -1829,7 +2073,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_or_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_or(Source::Imm, Arch::X32)
                         .set_dst(0x02)
@@ -1844,7 +2088,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_and_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_and(Source::Imm, Arch::X32)
                         .set_dst(0x02)
@@ -1859,7 +2103,7 @@ mod tests {
 
                 #[test]
                 fn move_left_shift_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .left_shift(Source::Imm, Arch::X32)
                         .set_dst(0x01)
@@ -1873,7 +2117,7 @@ mod tests {
 
                 #[test]
                 fn move_logical_right_shift_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .right_shift(Source::Imm, Arch::X32)
                         .set_dst(0x01)
@@ -1887,7 +2131,7 @@ mod tests {
 
                 #[test]
                 fn move_negate_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program.negate(Arch::X32).set_dst(0x02).push();
 
                     assert_eq!(
@@ -1898,7 +2142,7 @@ mod tests {
 
                 #[test]
                 fn move_mod_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program.modulo(Source::Imm, Arch::X32).set_dst(0x02).push();
 
                     assert_eq!(
@@ -1909,7 +2153,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_xor_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program.bit_xor(Source::Imm, Arch::X32).set_dst(0x03).push();
 
                     assert_eq!(
@@ -1920,7 +2164,7 @@ mod tests {
 
                 #[test]
                 fn move_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .mov(Source::Imm, Arch::X32)
                         .set_dst(0x01)
@@ -1935,7 +2179,7 @@ mod tests {
 
                 #[test]
                 fn move_signed_right_shift_const_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .signed_right_shift(Source::Imm, Arch::X32)
                         .set_dst(0x05)
@@ -1954,7 +2198,7 @@ mod tests {
 
                 #[test]
                 fn move_and_add_from_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .add(Source::Reg, Arch::X32)
                         .set_dst(0x03)
@@ -1969,7 +2213,7 @@ mod tests {
 
                 #[test]
                 fn move_sub_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .sub(Source::Reg, Arch::X32)
                         .set_dst(0x03)
@@ -1984,7 +2228,7 @@ mod tests {
 
                 #[test]
                 fn move_mul_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .mul(Source::Reg, Arch::X32)
                         .set_dst(0x04)
@@ -1999,7 +2243,7 @@ mod tests {
 
                 #[test]
                 fn move_div_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .div(Source::Reg, Arch::X32)
                         .set_dst(0x01)
@@ -2014,7 +2258,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_or_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_or(Source::Reg, Arch::X32)
                         .set_dst(0x03)
@@ -2029,7 +2273,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_and_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_and(Source::Reg, Arch::X32)
                         .set_dst(0x03)
@@ -2044,7 +2288,7 @@ mod tests {
 
                 #[test]
                 fn move_left_shift_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .left_shift(Source::Reg, Arch::X32)
                         .set_dst(0x02)
@@ -2059,7 +2303,7 @@ mod tests {
 
                 #[test]
                 fn move_logical_right_shift_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .right_shift(Source::Reg, Arch::X32)
                         .set_dst(0x02)
@@ -2074,7 +2318,7 @@ mod tests {
 
                 #[test]
                 fn move_mod_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .modulo(Source::Reg, Arch::X32)
                         .set_dst(0x01)
@@ -2089,7 +2333,7 @@ mod tests {
 
                 #[test]
                 fn move_bit_xor_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .bit_xor(Source::Reg, Arch::X32)
                         .set_dst(0x02)
@@ -2104,7 +2348,7 @@ mod tests {
 
                 #[test]
                 fn move_from_register_to_another_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .mov(Source::Reg, Arch::X32)
                         .set_dst(0x00)
@@ -2119,7 +2363,7 @@ mod tests {
 
                 #[test]
                 fn move_signed_right_shift_from_register_to_register() {
-                    let mut program = BpfCode::new();
+                    let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
                     program
                         .signed_right_shift(Source::Reg, Arch::X32)
                         .set_dst(0x02)
@@ -2141,7 +2385,7 @@ mod tests {
 
         #[test]
         fn example_from_assembler() {
-            let mut program = BpfCode::new();
+            let mut program = BpfCode::new(crate::program::SBPFVersion::V0);
             program
                 .add(Source::Imm, Arch::X64)
                 .set_dst(1)

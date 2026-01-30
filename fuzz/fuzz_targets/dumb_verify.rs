@@ -4,11 +4,9 @@ use std::hint::black_box;
 
 use libfuzzer_sys::fuzz_target;
 
-use grammar_aware::*;
 use solana_sbpf::{
     ebpf,
     elf::Executable,
-    insn_builder::{Arch, IntoBytes},
     memory_region::MemoryRegion,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
@@ -18,25 +16,23 @@ use test_utils::{create_vm, TestContextObject};
 use crate::common::ConfigTemplate;
 
 mod common;
-mod grammar_aware;
 
 #[derive(arbitrary::Arbitrary, Debug)]
-struct FuzzData {
+struct DumbFuzzData {
     template: ConfigTemplate,
-    prog: FuzzProgram,
+    prog: Vec<u8>,
     mem: Vec<u8>,
-    arch: Arch,
 }
 
-fuzz_target!(|data: FuzzData| {
-    let prog = make_program(&data.prog, data.arch);
+fuzz_target!(|data: DumbFuzzData| {
+    let prog = data.prog;
     let sbpf_version = data.template.sbpf_version;
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
     let syscall_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
 
     if RequisiteVerifier::verify(
-        prog.into_bytes(),
+        &prog,
         &config,
         sbpf_version,
         &function_registry,
@@ -49,14 +45,14 @@ fuzz_target!(|data: FuzzData| {
     }
     let mut mem = data.mem;
     let executable = Executable::<TestContextObject>::from_text_bytes(
-        prog.into_bytes(),
+        &prog,
         std::sync::Arc::new(BuiltinProgram::new_loader(config)),
         sbpf_version,
         function_registry,
     )
     .unwrap();
     let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
-    let mut context_object = TestContextObject::new(1 << 16);
+    let mut context_object = TestContextObject::new(1 << 4);
     create_vm!(
         interp_vm,
         &executable,
@@ -66,6 +62,7 @@ fuzz_target!(|data: FuzzData| {
         vec![mem_region],
         None
     );
+
     let (_interp_ins_count, interp_res) = interp_vm.execute_program(&executable, true);
     drop(black_box(interp_res));
 });
