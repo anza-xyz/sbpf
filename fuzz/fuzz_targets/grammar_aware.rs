@@ -1,22 +1,22 @@
 #![allow(dead_code)]
 
-use solana_sbpf::insn_builder::{Arch, BpfCode, Cond, Endian, Instruction, MemSize, Source};
+use solana_sbpf::insn_builder::{Arch, BpfCode, Cond, Endian, Instruction, MemSize, PqrOp, Source};
 
 #[derive(arbitrary::Arbitrary, Debug, Eq, PartialEq)]
 pub enum FuzzedOp {
-    Add(Source),
-    Sub(Source),
-    Mul(Source),
-    Div(Source),
-    BitOr(Source),
-    BitAnd(Source),
-    LeftShift(Source),
-    RightShift(Source),
-    Negate,
-    Modulo(Source),
-    BitXor(Source),
-    Mov(Source),
-    SRS(Source),
+    Add(Arch, Source),
+    Sub(Arch, Source),
+    Mul(Arch, Source),
+    Div(Arch, Source),
+    BitOr(Arch, Source),
+    BitAnd(Arch, Source),
+    LeftShift(Arch, Source),
+    RightShift(Arch, Source),
+    Negate(Arch),
+    Modulo(Arch, Source),
+    BitXor(Arch, Source),
+    Mov(Arch, Source),
+    SRS(Arch, Source),
     SwapBytes(Endian),
     Load(MemSize),
     LoadAbs(MemSize),
@@ -27,7 +27,16 @@ pub enum FuzzedOp {
     Jump,
     JumpC(Cond, Source),
     Call,
+    CallReg,
     Exit,
+    // V2 instructions
+    Pqr(PqrOp, Arch, Source),
+    LoadV2(MemSize),
+    StoreV2(MemSize),
+    StoreV2X(MemSize),
+    Hor64Imm,
+    // V3+ instructions
+    JumpC32(Cond, Source),
 }
 
 impl FuzzedOp {
@@ -66,95 +75,95 @@ impl FuzzedInstruction {
 
 pub type FuzzProgram = Vec<FuzzedInstruction>;
 
-pub fn make_program(prog: &FuzzProgram, arch: Arch) -> BpfCode {
-    let mut code = BpfCode::default();
+pub fn make_program(prog: &FuzzProgram, sbpf_version: solana_sbpf::program::SBPFVersion) -> BpfCode {
+    let mut code = BpfCode::new(sbpf_version);
     for inst in prog {
         match inst.op {
-            FuzzedOp::Add(src) => code
+            FuzzedOp::Add(arch, src) => code
                 .add(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::Sub(src) => code
+            FuzzedOp::Sub(arch, src) => code
                 .sub(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::Mul(src) => code
+            FuzzedOp::Mul(arch, src) => code
                 .mul(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::Div(src) => code
+            FuzzedOp::Div(arch, src) => code
                 .div(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::BitOr(src) => code
+            FuzzedOp::BitOr(arch, src) => code
                 .bit_or(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::BitAnd(src) => code
+            FuzzedOp::BitAnd(arch, src) => code
                 .bit_and(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::LeftShift(src) => code
+            FuzzedOp::LeftShift(arch, src) => code
                 .left_shift(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::RightShift(src) => code
+            FuzzedOp::RightShift(arch, src) => code
                 .right_shift(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::Negate => code
+            FuzzedOp::Negate(arch) => code
                 .negate(arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::Modulo(src) => code
+            FuzzedOp::Modulo(arch, src) => code
                 .modulo(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::BitXor(src) => code
+            FuzzedOp::BitXor(arch, src) => code
                 .bit_xor(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::Mov(src) => code
+            FuzzedOp::Mov(arch, src) => code
                 .mov(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::SRS(src) => code
+            FuzzedOp::SRS(arch, src) => code
                 .signed_right_shift(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
@@ -231,8 +240,59 @@ pub fn make_program(prog: &FuzzProgram, arch: Arch) -> BpfCode {
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
+            FuzzedOp::CallReg => code
+                .call_reg()
+                .set_dst(inst.dst)
+                .set_src(inst.src)
+                .set_off(inst.off)
+                .set_imm(inst.imm)
+                .push(),
             FuzzedOp::Exit => code
                 .exit()
+                .set_dst(inst.dst)
+                .set_src(inst.src)
+                .set_off(inst.off)
+                .set_imm(inst.imm)
+                .push(),
+            // V2 instructions
+            FuzzedOp::Pqr(pqr_op, arch, src) => code
+                .pqr(src, arch, pqr_op)
+                .set_dst(inst.dst)
+                .set_src(inst.src)
+                .set_off(inst.off)
+                .set_imm(inst.imm)
+                .push(),
+            FuzzedOp::LoadV2(mem) => code
+                .load_x(mem)
+                .set_dst(inst.dst)
+                .set_src(inst.src)
+                .set_off(inst.off)
+                .set_imm(inst.imm)
+                .push(),
+            FuzzedOp::StoreV2(mem) => code
+                .store(mem)
+                .set_dst(inst.dst)
+                .set_src(inst.src)
+                .set_off(inst.off)
+                .set_imm(inst.imm)
+                .push(),
+            FuzzedOp::StoreV2X(mem) => code
+                .store_x(mem)
+                .set_dst(inst.dst)
+                .set_src(inst.src)
+                .set_off(inst.off)
+                .set_imm(inst.imm)
+                .push(),
+            FuzzedOp::Hor64Imm => code
+                .hor64_imm()
+                .set_dst(inst.dst)
+                .set_src(inst.src)
+                .set_off(inst.off)
+                .set_imm(inst.imm)
+                .push(),
+            // V3+ instructions
+            FuzzedOp::JumpC32(cond, src) => code
+                .jump_conditional_32(cond, src)
                 .set_dst(inst.dst)
                 .set_src(inst.src)
                 .set_off(inst.off)

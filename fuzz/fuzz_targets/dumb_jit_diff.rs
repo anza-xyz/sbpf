@@ -2,11 +2,9 @@
 
 use libfuzzer_sys::fuzz_target;
 
-use semantic_aware::*;
 use solana_sbpf::{
     ebpf,
     elf::Executable,
-    insn_builder::IntoBytes,
     memory_region::MemoryRegion,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
@@ -16,24 +14,23 @@ use test_utils::{create_vm, TestContextObject};
 use crate::common::ConfigTemplate;
 
 mod common;
-mod semantic_aware;
 
 #[derive(arbitrary::Arbitrary, Debug)]
-struct FuzzData {
+struct DumbFuzzData {
     template: ConfigTemplate,
-    prog: FuzzProgram,
+    prog: Vec<u8>,
     mem: Vec<u8>,
 }
 
-fuzz_target!(|data: FuzzData| {
+fuzz_target!(|data: DumbFuzzData| {
+    let prog = data.prog;
     let sbpf_version = data.template.sbpf_version;
-    let prog = make_program(&data.prog, sbpf_version);
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
     let syscall_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
 
     if RequisiteVerifier::verify(
-        prog.into_bytes(),
+        &prog,
         &config,
         sbpf_version,
         &function_registry,
@@ -46,7 +43,7 @@ fuzz_target!(|data: FuzzData| {
     }
     #[allow(unused_mut)]
     let mut executable = Executable::<TestContextObject>::from_text_bytes(
-        prog.into_bytes(),
+        &prog,
         std::sync::Arc::new(BuiltinProgram::new_loader(config)),
         sbpf_version,
         function_registry,

@@ -14,20 +14,22 @@ pub struct ConfigTemplate {
     sanitize_user_provided_values: bool,
     optimize_rodata: bool,
     pub sbpf_version: SBPFVersion,
+    aligned_memory_mapping: bool,
 }
 
 impl<'a> Arbitrary<'a> for ConfigTemplate {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let bools = u16::arbitrary(u)?;
-        let version = u8::arbitrary(u)?;
-        let sbpf_version = match version {
+        // This is how the arbitrary crate quickly generates an enum variant
+        let variant =  u64::from(u32::arbitrary(u)?) * 5 >> 32;
+        let sbpf_version = match variant {
             0 => SBPFVersion::V0,
             1 => SBPFVersion::V1,
             2 => SBPFVersion::V2,
             3 => SBPFVersion::V3,
             4 => SBPFVersion::V4,
             5 => SBPFVersion::Reserved,
-            _ => SBPFVersion::V3, // default to V3 if out of range
+            _ => unreachable!(),
         };
         Ok(ConfigTemplate {
             max_call_depth: usize::from(u8::arbitrary(u)?) + 1, // larger is unreasonable + must be non-zero
@@ -38,6 +40,7 @@ impl<'a> Arbitrary<'a> for ConfigTemplate {
             sanitize_user_provided_values: bools & (1 << 3) != 0,
             optimize_rodata: bools & (1 << 9) != 0,
             sbpf_version,
+            aligned_memory_mapping: bools & (1 << 10) != 0,
         })
     }
 
@@ -60,7 +63,8 @@ impl From<ConfigTemplate> for Config {
                 enable_symbol_and_section_labels,
                 sanitize_user_provided_values,
                 optimize_rodata,
-                ..
+                sbpf_version,
+                aligned_memory_mapping,
             } => Config {
                 max_call_depth,
                 enable_stack_frame_gaps,
@@ -69,6 +73,7 @@ impl From<ConfigTemplate> for Config {
                 noop_instruction_rate,
                 sanitize_user_provided_values,
                 optimize_rodata,
+                aligned_memory_mapping: sbpf_version > SBPFVersion::V3 || aligned_memory_mapping,
                 ..Default::default()
             },
         }

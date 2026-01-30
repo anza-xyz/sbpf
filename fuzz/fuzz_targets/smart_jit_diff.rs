@@ -6,7 +6,7 @@ use grammar_aware::*;
 use solana_sbpf::{
     ebpf,
     elf::Executable,
-    insn_builder::{Arch, Instruction, IntoBytes},
+    insn_builder::{Instruction, IntoBytes},
     memory_region::MemoryRegion,
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
@@ -30,14 +30,14 @@ struct FuzzData {
 }
 
 fuzz_target!(|data: FuzzData| {
-    let mut prog = make_program(&data.prog, Arch::X64);
+    let sbpf_version = data.template.sbpf_version;
+    let mut prog = make_program(&data.prog, sbpf_version);
     prog.exit()
         .set_dst(data.exit_dst)
         .set_src(data.exit_src)
         .set_off(data.exit_off)
         .set_imm(data.exit_imm)
         .push();
-    let sbpf_version = data.template.sbpf_version;
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
     let syscall_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
@@ -77,10 +77,11 @@ fuzz_target!(|data: FuzzData| {
     );
     #[allow(unused)]
     let (_interp_ins_count, interp_res) = interp_vm.execute_program(&executable, true);
+    let interp_final_pc = interp_vm.registers[11];
 
     #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
     if executable.jit_compile().is_ok() {
-        let mut jit_mem = data.mem;
+        let mut jit_mem = data.mem.clone();
         let mut jit_context_object = TestContextObject::new(1 << 16);
         let jit_mem_region = MemoryRegion::new_writable(&mut jit_mem, ebpf::MM_INPUT_START);
         create_vm!(
@@ -93,6 +94,7 @@ fuzz_target!(|data: FuzzData| {
             None
         );
         let (_jit_ins_count, jit_res) = jit_vm.execute_program(&executable, false);
+        let jit_final_pc = jit_vm.registers[11];
         if format!("{:?}", interp_res) != format!("{:?}", jit_res) {
             panic!("Expected {:?}, but got {:?}", interp_res, jit_res);
         }
@@ -110,6 +112,29 @@ fuzz_target!(|data: FuzzData| {
                     interp_mem, jit_mem
                 );
             }
+
+            if interp_stack != jit_stack {
+                panic!(
+                    "Expected different stack. From interpreter: {:?}\nFrom JIT: {:?}",
+                    interp_stack, jit_stack
+                );
+            }
+
+            if interp_heap != jit_heap {
+                panic!(
+                    "Expected different heap. From interpreter: {:?}\nFrom JIT: {:?}",
+                    interp_heap, jit_heap
+                );
+            }
         }
+        if interp_final_pc != jit_final_pc {
+            panic!(
+                "Expected final PC {}, but got {}",
+                interp_final_pc, jit_final_pc
+            );
+        }
+    } else {
+        #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
+        panic!("JIT compilation failed for program that passed verification");
     }
 });
