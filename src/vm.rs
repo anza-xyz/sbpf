@@ -392,12 +392,10 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         } else {
             #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             {
-                let compiled_program = match executable
-                    .get_compiled_program()
-                    .ok_or_else(|| EbpfError::JitNotCompiled)
-                {
-                    Ok(compiled_program) => compiled_program,
-                    Err(error) => return (0, ProgramResult::Err(error)),
+                let compiled_program = executable.get_compiled_program();
+                let compiled_program = match &*compiled_program {
+                    Some(compiled_program) => compiled_program,
+                    None => return (0, ProgramResult::Err(EbpfError::JitNotCompiled)),
                 };
                 compiled_program.invoke(config, self, self.registers);
             }

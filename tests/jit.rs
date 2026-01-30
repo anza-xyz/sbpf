@@ -53,10 +53,10 @@ fn test_code_length_estimate() {
                 enabled_sbpf_versions: sbpf_version..=sbpf_version,
                 ..Config::default()
             };
-            let mut executable = create_mockup_executable(config, &prog[0..0]);
-            Executable::<TestContextObject>::jit_compile(&mut executable).unwrap();
-            executable
-                .get_compiled_program()
+            let executable = create_mockup_executable(config, &prog[0..0]);
+            Executable::<TestContextObject>::jit_compile(&executable).unwrap();
+            (*executable.get_compiled_program())
+                .as_ref()
                 .unwrap()
                 .machine_code_length()
         };
@@ -76,10 +76,10 @@ fn test_code_length_estimate() {
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
             ..Config::default()
         };
-        let mut executable = create_mockup_executable(config, &prog);
-        Executable::<TestContextObject>::jit_compile(&mut executable).unwrap();
-        *machine_code_length = (executable
-            .get_compiled_program()
+        let executable = create_mockup_executable(config, &prog);
+        Executable::<TestContextObject>::jit_compile(&executable).unwrap();
+        *machine_code_length = ((*executable.get_compiled_program())
+            .as_ref()
             .unwrap()
             .machine_code_length()
             - empty_program_machine_code_length_per_version[0])
@@ -137,14 +137,14 @@ fn test_code_length_estimate() {
                 enabled_sbpf_versions: sbpf_version..=sbpf_version,
                 ..Config::default()
             };
-            let mut executable = create_mockup_executable(config, &prog);
-            let result = Executable::<TestContextObject>::jit_compile(&mut executable);
+            let executable = create_mockup_executable(config, &prog);
+            let result = Executable::<TestContextObject>::jit_compile(&executable);
             if let Err(err) = result {
                 assert!(matches!(err, EbpfError::UnsupportedInstruction));
                 continue;
             }
-            let machine_code_length = executable
-                .get_compiled_program()
+            let machine_code_length = (*executable.get_compiled_program())
+                .as_ref()
                 .unwrap()
                 .machine_code_length()
                 - empty_program_machine_code_length;

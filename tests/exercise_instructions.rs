@@ -445,7 +445,7 @@ fn test_ins(is_v2_only: bool, ins: String, prng: &mut SmallRng, cu: Option<u64>)
         ..Config::default()
     };
     let loader = Arc::new(BuiltinProgram::new_loader(config));
-    let mut executable = assemble(asm.as_str(), loader).unwrap();
+    let executable = assemble(asm.as_str(), loader).unwrap();
     let cu = cu
         .map(|cu| cu.saturating_add(22))
         .unwrap_or(executable.get_text_bytes().1.len().wrapping_shr(3) as u64);
