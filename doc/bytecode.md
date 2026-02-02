@@ -332,7 +332,6 @@ Verification
 - `le` is allowed
 - `lddw` (opcodes `0x18` and `0x00`) is allowed
 - `hor64` is forbidden
-- `callx` target is encoded in the imm field
 
 ### only in v2
 - Opcodes from the product / quotient / remainder instruction class are allowed
