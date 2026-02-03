@@ -82,7 +82,6 @@ pub enum FuzzedInstruction {
     Load(Register, i32, i32),
     #[cfg(not(feature = "only-verified"))]
     // illegal load variants
-    #[cfg(not(feature = "only-verified"))]
     Load(Register, MemSize, i64),
     #[cfg(not(feature = "only-verified"))]
     LoadAbs(MemSize, i32),
@@ -95,6 +94,8 @@ pub enum FuzzedInstruction {
     Jump(i16),
     JumpC(Register, Cond, FuzzedSource, i16),
     Call(FuzzedSource),
+    // External syscall (CALL_IMM with src=0 for V3+ static_syscalls)
+    Syscall(i32),
     Exit,
     // PQR instructions for SBPF V2 (when enable_pqr() is true)
     Pqr(PqrOp, Arch, Register, FuzzedNonZeroSource),
@@ -366,7 +367,8 @@ pub fn make_program(prog: &FuzzProgram, sbpf_version: solana_sbpf::program::SBPF
             FuzzedInstruction::Call(src) => {
                 match src {
                     FuzzedSource::Imm(imm) => {
-                        code.call().set_imm(*imm as i64).push();
+                        // Internal call (src=1 for V3+ static_syscalls)
+                        code.call().set_src(1).set_imm(*imm as i64).push();
                     }
                     FuzzedSource::Reg(r) => {
                         // CALL_REG (callx) - automatically handles version-specific register encoding
@@ -379,6 +381,10 @@ pub fn make_program(prog: &FuzzProgram, sbpf_version: solana_sbpf::program::SBPF
                             .push();
                     }
                 }
+            }
+            FuzzedInstruction::Syscall(imm) => {
+                // External syscall (src=0 for V3+ static_syscalls)
+                code.call().set_src(0).set_imm(*imm as i64).push();
             }
             FuzzedInstruction::Pqr(pqr_op, a, d, s) => {
                 complete_pqr_insn(code.pqr(s.into(), *a, *pqr_op), d, s)
