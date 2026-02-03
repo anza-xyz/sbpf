@@ -63,6 +63,7 @@ fuzz_target!(|data: DumbFuzzData| {
     );
     #[allow(unused)]
     let (_interp_ins_count, interp_res) = interp_vm.execute_program(&executable, true);
+    #[allow(unused)]
     let interp_final_pc = interp_vm.registers[11];
 
     #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
