@@ -619,7 +619,7 @@ pub enum MemSize {
 
 impl MemSize {
     /// Convert old memory size encoding to new V2 encoding for move_memory_instruction_classes
-    fn to_v2_encoding(&self) -> u8 {
+    fn to_v2_encoding(self) -> u8 {
         match self {
             MemSize::Byte => BPF_1B,
             MemSize::HalfWord => BPF_2B,
@@ -808,8 +808,8 @@ impl Instruction for FunctionCall<'_> {
             // CALL_IMM
             let version = &self.bpf_code.sbpf_version;
             if version.static_syscalls() {
-                // V3+: src register is 1 for static syscalls
-                1
+                // V3+: src register distinguishes external (0) vs internal (1) calls
+                self.insn.src
             } else {
                 // V0/V1/V2: src is 0
                 0
