@@ -1,11 +1,13 @@
 //! Aligned memory
 
-use std::{mem, ptr};
+use std::{
+    alloc::{alloc, alloc_zeroed, dealloc, handle_alloc_error, Layout},
+    mem::{self, ManuallyDrop},
+};
 
 /// Scalar types, aka "plain old data"
-pub trait Pod {}
+pub trait Pod: Copy {}
 
-impl Pod for bool {}
 impl Pod for u8 {}
 impl Pod for u16 {}
 impl Pod for u32 {}
@@ -18,120 +20,156 @@ impl Pod for i64 {}
 /// Provides u8 slices at a specified alignment
 #[derive(Debug, PartialEq, Eq)]
 pub struct AlignedMemory<const ALIGN: usize> {
-    max_len: usize,
-    align_offset: usize,
-    mem: Vec<u8>,
+    // Do not use allocator-related Vec methods (push, resize)
+    // All allocation operations must be done with the correct `Layout`
+    mem: ManuallyDrop<Vec<u8>>,
     zero_up_to_max_len: bool,
 }
 
+impl<const ALIGN: usize> Drop for AlignedMemory<ALIGN> {
+    fn drop(&mut self) {
+        if self.mem.capacity() == 0 {
+            return;
+        }
+        let ptr = self.mem.as_mut_ptr();
+        unsafe {
+            // SAFETY: Layout is checked on construction
+            let layout = Layout::from_size_align_unchecked(self.mem.capacity(), ALIGN);
+            dealloc(ptr, layout);
+        }
+    }
+}
+
 impl<const ALIGN: usize> AlignedMemory<ALIGN> {
-    fn get_mem(max_len: usize) -> (Vec<u8>, usize) {
-        let mut mem: Vec<u8> = Vec::with_capacity(max_len.saturating_add(ALIGN));
-        let align_offset = mem.as_ptr().align_offset(ALIGN);
-        mem.resize(align_offset, 0);
-        (mem, align_offset)
+    /// Allocates a [`Vec<u8>`] with the requested alignment.
+    /// Ensure that the Vec is only dropped with the correct layout
+    ///
+    /// # Panics
+    /// Panics if `max_len` is 0, the requested size is incompatible with the requested alignment,
+    /// or allocation fails.
+    fn get_mem(max_len: usize, zeroed: bool) -> ManuallyDrop<Vec<u8>> {
+        assert!(ALIGN != 0, "Alignment must not be zero");
+        if max_len == 0 {
+            return ManuallyDrop::new(Vec::new());
+        }
+        let mem: Vec<u8> = unsafe {
+            let layout = Layout::from_size_align(max_len, ALIGN).expect("invalid layout");
+            // SAFETY: Layout is non-zero, and allocation errors are handled
+            let ptr = if zeroed {
+                alloc_zeroed(layout)
+            } else {
+                alloc(layout)
+            };
+            if ptr.is_null() {
+                handle_alloc_error(layout);
+            }
+            Vec::from_raw_parts(ptr, 0, max_len)
+        };
+        ManuallyDrop::new(mem)
     }
-    fn get_mem_zeroed(max_len: usize) -> (Vec<u8>, usize) {
-        // use calloc() to get zeroed memory from the OS instead of using
-        // malloc() + memset(), see
-        // https://github.com/rust-lang/rust/issues/54628
-        let mut mem = vec![0; max_len];
-        let align_offset = mem.as_ptr().align_offset(ALIGN);
-        mem.resize(max_len.saturating_add(align_offset), 0);
-        (mem, align_offset)
+
+    fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.mem.as_mut_ptr()
     }
+
     /// Returns a filled AlignedMemory by copying the given slice
     pub fn from_slice(data: &[u8]) -> Self {
         let max_len = data.len();
-        let (mut mem, align_offset) = Self::get_mem(max_len);
-        mem.extend_from_slice(data);
+        let mut mem = Self::get_mem(max_len, false);
+        unsafe {
+            // SAFETY: `mem` was allocated with `max_len` bytes
+            core::ptr::copy_nonoverlapping(data.as_ptr(), mem.as_mut_ptr(), max_len);
+            mem.set_len(max_len);
+        }
         Self {
-            max_len,
-            align_offset,
             mem,
             zero_up_to_max_len: false,
         }
     }
+
     /// Returns a new empty AlignedMemory with uninitialized preallocated memory
     pub fn with_capacity(max_len: usize) -> Self {
-        let (mem, align_offset) = Self::get_mem(max_len);
+        let mem = Self::get_mem(max_len, false);
         Self {
-            max_len,
-            align_offset,
             mem,
             zero_up_to_max_len: false,
         }
     }
+
     /// Returns a new empty AlignedMemory with zero initialized preallocated memory
     pub fn with_capacity_zeroed(max_len: usize) -> Self {
-        let (mut mem, align_offset) = Self::get_mem_zeroed(max_len);
-        mem.truncate(align_offset);
+        let mem = Self::get_mem(max_len, true);
         Self {
-            max_len,
-            align_offset,
             mem,
             zero_up_to_max_len: true,
         }
     }
+
     /// Returns a new filled AlignedMemory with zero initialized preallocated memory
     pub fn zero_filled(max_len: usize) -> Self {
-        let (mem, align_offset) = Self::get_mem_zeroed(max_len);
+        let mut mem = Self::get_mem(max_len, true);
+        // SAFETY: Bytes were zeroed
+        unsafe {
+            mem.set_len(max_len);
+        }
         Self {
-            max_len,
-            align_offset,
             mem,
             zero_up_to_max_len: true,
         }
     }
-    /// Calculate memory size
+
+    /// Calculate memory size (allocated memory block and the size of [`AlignedMemory`] itself).
     pub fn mem_size(&self) -> usize {
         self.mem.capacity().saturating_add(mem::size_of::<Self>())
     }
+
     /// Get the length of the data
     pub fn len(&self) -> usize {
-        self.mem.len().saturating_sub(self.align_offset)
+        self.mem.len()
     }
+
     /// Is the memory empty
     pub fn is_empty(&self) -> bool {
-        self.mem.len() == self.align_offset
+        self.mem.is_empty()
     }
+
     /// Get the current write index
     pub fn write_index(&self) -> usize {
         self.mem.len()
     }
+
     /// Get an aligned slice
     pub fn as_slice(&self) -> &[u8] {
-        let start = self.align_offset;
-        let end = self.mem.len();
-        &self.mem[start..end]
+        self.mem.as_slice()
     }
+
     /// Get an aligned mutable slice
     pub fn as_slice_mut(&mut self) -> &mut [u8] {
-        let start = self.align_offset;
-        let end = self.mem.len();
-        &mut self.mem[start..end]
+        self.mem.as_mut_slice()
     }
+
     /// Grows memory with `value` repeated `num` times starting at the `write_index`
     pub fn fill_write(&mut self, num: usize, value: u8) -> std::io::Result<()> {
-        let new_len = match (
-            self.mem.len().checked_add(num),
-            self.align_offset.checked_add(self.max_len),
-        ) {
-            (Some(new_len), Some(allocation_end)) if new_len <= allocation_end => new_len,
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "aligned memory fill_write failed",
-                ))
-            }
+        let Some(new_len) = self
+            .mem
+            .len()
+            .checked_add(num)
+            .filter(|l| *l <= self.mem.capacity())
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "aligned memory fill_write failed",
+            ));
         };
         if self.zero_up_to_max_len && value == 0 {
-            // Safe because everything up to `max_len` is zeroed and no shrinking is allowed
-            unsafe {
-                self.mem.set_len(new_len);
-            }
+            // No action needed because up to `max_len` is zeroed and no shrinking is allowed
         } else {
-            self.mem.resize(new_len, value);
+            unsafe {
+                core::ptr::write_bytes(self.mem.as_mut_ptr().add(self.write_index()), value, num);
+            }
+        }
+        unsafe {
+            self.mem.set_len(new_len);
         }
         Ok(())
     }
@@ -144,12 +182,15 @@ impl<const ALIGN: usize> AlignedMemory<ALIGN> {
     pub unsafe fn write_unchecked<T: Pod>(&mut self, value: T) {
         let pos = self.mem.len();
         let new_len = pos.saturating_add(mem::size_of::<T>());
-        debug_assert!(new_len <= self.align_offset.saturating_add(self.max_len));
-        self.mem.set_len(new_len);
-        ptr::write_unaligned(
-            self.mem.get_unchecked_mut(pos..new_len).as_mut_ptr().cast(),
-            value,
-        );
+        debug_assert!(new_len <= self.mem.capacity());
+        unsafe {
+            self.mem
+                .as_mut_ptr()
+                .add(pos)
+                .cast::<T>()
+                .write_unaligned(value);
+            self.mem.set_len(new_len);
+        }
     }
 
     /// Write a slice of bytes into the memory.
@@ -160,11 +201,13 @@ impl<const ALIGN: usize> AlignedMemory<ALIGN> {
     pub unsafe fn write_all_unchecked(&mut self, value: &[u8]) {
         let pos = self.mem.len();
         let new_len = pos.saturating_add(value.len());
-        debug_assert!(new_len <= self.align_offset.saturating_add(self.max_len));
+        debug_assert!(new_len <= self.mem.capacity());
+        core::ptr::copy_nonoverlapping(
+            value.as_ptr(),
+            self.as_mut_ptr().add(self.len()),
+            value.len(),
+        );
         self.mem.set_len(new_len);
-        self.mem
-            .get_unchecked_mut(pos..new_len)
-            .copy_from_slice(value);
     }
 }
 
@@ -179,19 +222,25 @@ impl<const ALIGN: usize> Clone for AlignedMemory<ALIGN> {
 
 impl<const ALIGN: usize> std::io::Write for AlignedMemory<ALIGN> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        match (
-            self.mem.len().checked_add(buf.len()),
-            self.align_offset.checked_add(self.max_len),
-        ) {
-            (Some(new_len), Some(allocation_end)) if new_len <= allocation_end => {}
-            _ => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "aligned memory write failed",
-                ))
-            }
+        let Some(new_len) = self
+            .mem
+            .len()
+            .checked_add(buf.len())
+            .filter(|l| *l <= self.mem.capacity())
+        else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "aligned memory write failed",
+            ));
+        };
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr(),
+                self.mem.as_mut_ptr().add(self.write_index()),
+                buf.len(),
+            );
+            self.mem.set_len(new_len);
         }
-        self.mem.extend_from_slice(buf);
         Ok(buf.len())
     }
     fn flush(&mut self) -> std::io::Result<()> {
@@ -219,6 +268,12 @@ mod tests {
 
     fn do_test<const ALIGN: usize>() {
         let mut aligned_memory = AlignedMemory::<ALIGN>::with_capacity(10);
+        let ptr = aligned_memory.as_mut_ptr();
+        assert_eq!(
+            ptr.addr() & (ALIGN - 1),
+            0,
+            "memory is not correctly aligned"
+        );
 
         assert_eq!(aligned_memory.write(&[42u8; 1]).unwrap(), 1);
         assert_eq!(aligned_memory.write(&[42u8; 9]).unwrap(), 9);
@@ -257,7 +312,7 @@ mod tests {
         assert_eq!(mem[0], 42);
         assert_eq!(
             unsafe {
-                ptr::read_unaligned::<u64>(mem[1..1 + mem::size_of::<u64>()].as_ptr().cast())
+                core::ptr::read_unaligned::<u64>(mem[1..1 + mem::size_of::<u64>()].as_ptr().cast())
             },
             0xCAFEBADDDEADCAFE
         );
@@ -268,12 +323,13 @@ mod tests {
     #[test]
     fn test_aligned_memory() {
         do_test::<1>();
+        do_test::<16>();
         do_test::<32768>();
     }
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "<= self.align_offset.saturating_add(self.max_len)")]
+    #[should_panic(expected = "<= self.mem.capacity()")]
     fn test_write_unchecked_debug_assert() {
         let mut aligned_memory = AlignedMemory::<8>::with_capacity(15);
         unsafe {
@@ -284,7 +340,7 @@ mod tests {
 
     #[cfg(debug_assertions)]
     #[test]
-    #[should_panic(expected = "<= self.align_offset.saturating_add(self.max_len)")]
+    #[should_panic(expected = "<= self.mem.capacity()")]
     fn test_write_all_unchecked_debug_assert() {
         let mut aligned_memory = AlignedMemory::<8>::with_capacity(5);
         unsafe {
