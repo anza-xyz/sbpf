@@ -224,8 +224,24 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
     }
 }
 
-/// Syscall function without context
+/// Syscall handler function (ContextObject is derived from VM)
 pub type BuiltinFunction<C> = fn(*mut EbpfVm<C>, u64, u64, u64, u64, u64);
+/// Re-export of the JIT compiler for the declare_builtin_function! macro
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+pub type JitCompiler<'a, C> = crate::jit::JitCompiler<'a, C>;
+/// Re-export of the JIT compiler for the declare_builtin_function! macro
+#[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64")))]
+pub struct JitCompiler<'a, C> {
+    _phantom: std::marker::PhantomData<&'a C>,
+}
+#[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64")))]
+impl<'a, C: ContextObject> JitCompiler<'a, C> {
+    /// Dummy for declare_builtin_function!()
+    #[allow(dead_code)]
+    pub fn emit_external_call(&mut self, _function: BuiltinFunction<C>) {}
+}
+/// Syscall codegen function for JIT compiler
+pub type BuiltinCodegen<C> = fn(&mut JitCompiler<C>);
 
 /// Represents the interface to a fixed functionality program
 #[derive(Eq)]
@@ -292,11 +308,11 @@ impl<C: ContextObject> BuiltinProgram<C> {
     pub fn register_function(
         &mut self,
         name: &str,
-        value: BuiltinFunction<C>,
+        entry: BuiltinFunction<C>,
     ) -> Result<(), ElfError> {
         let key = ebpf::hash_symbol_name(name.as_bytes());
         self.sparse_registry
-            .register_function(key, name, value)
+            .register_function(key, name, entry)
             .map(|_| ())
     }
 }
