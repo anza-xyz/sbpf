@@ -315,8 +315,6 @@ impl<C: ContextObject> Executable<C> {
             self.get_text_bytes().1,
             self.get_config(),
             self.get_sbpf_version(),
-            self.get_function_registry(),
-            self.loader.get_function_registry(),
         )?;
         Ok(())
     }

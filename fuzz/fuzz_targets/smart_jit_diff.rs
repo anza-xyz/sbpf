@@ -8,7 +8,7 @@ use solana_sbpf::{
     elf::Executable,
     insn_builder::{Instruction, IntoBytes},
     memory_region::MemoryRegion,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry},
+    program::{BuiltinProgram, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
 };
 use test_utils::{create_vm, TestContextObject};
@@ -40,14 +40,11 @@ fuzz_target!(|data: FuzzData| {
         .push();
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
-    let syscall_registry = FunctionRegistry::<BuiltinFunction<TestContextObject>>::default();
 
     if RequisiteVerifier::verify(
         prog.into_bytes(),
         &config,
         sbpf_version,
-        &function_registry,
-        &syscall_registry,
     )
     .is_err()
     {
