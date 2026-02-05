@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '37 3 * * *'
 
 permissions:                                                                                                                                                                                                                          
     contents: read
@@ -28,14 +28,9 @@ jobs:
             exit 1
           fi
 
-      - uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: nightly
-
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-        with:
-          cache-on-failure: true
-
+      - run: rustup update nightly
+      - run: rustup default nightly
+      
       - uses: dtolnay/install@d0dc46e85ffd2c174b5ac0489e17f95dae84fa5a # cargo-fuzz
       - run: cargo +nightly fuzz build --no-trace-compares
 
