@@ -1218,7 +1218,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 _ => 0,
             };
             let anchor = ANCHOR_TRANSLATE_MEMORY_ADDRESS + anchor_base + len.trailing_zeros() as usize;
-            self.emit_ins(X86Instruction::push_immediate(OperandSize::S64, self.pc as i32));
+            // store self.pc in the first stack slot of the anchor
+            self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, RSP, X86IndirectAccess::OffsetIndexShift(-16, RSP, 0), self.pc as i64));
             self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(anchor, 5)));
             if let Some(dst) = dst {
                 self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_SCRATCH, dst));
@@ -1624,6 +1625,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         ] {
             let target_offset = *anchor_base + len.trailing_zeros() as usize;
             self.set_anchor(ANCHOR_TRANSLATE_MEMORY_ADDRESS + target_offset);
+            // skip over the pc slot pushed by the caller, we'll pop it before returning
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 8, None)); // RSP -= 8
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
             if *anchor_base == 0 { // AccessType::Load
                 let load = match len {
@@ -1662,8 +1665,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
             // Throw error if the result indicates one
             self.emit_result_is_err(REGISTER_SCRATCH);
-            self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH)); // REGISTER_SCRATCH = self.pc
-            self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_SCRATCH, RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Swap return address and self.pc
+            self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH)); // REGISTER_SCRATCH = pc
             self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 6)));
 
             if *anchor_base == 0 { // AccessType::Load
