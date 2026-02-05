@@ -371,6 +371,9 @@ macro_rules! declare_builtin_function {
                     vm.previous_instruction_meter = vm.context_object_pointer.get_remaining();
                 }
             }
+            /// Entry for the syscall registry
+            pub const REGISTRY_ENTRY: $crate::program::BuiltinFunction<$ContextObject>
+                = Self::vm;
         }
     };
 }

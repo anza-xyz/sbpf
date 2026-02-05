@@ -337,7 +337,7 @@ fn test_verifier_known_syscall() {
 
     let mut loader = BuiltinProgram::new_loader(Config::default());
     loader
-        .register_function("gather_bytes", syscalls::SyscallString::vm)
+        .register_function("gather_bytes", syscalls::SyscallString::REGISTRY_ENTRY)
         .unwrap();
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
