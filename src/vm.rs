@@ -306,6 +306,9 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// TCP port for the debugger interface
     #[cfg(feature = "debugger")]
     pub debug_port: Option<u16>,
+    /// Debug metadata passed
+    #[cfg(feature = "debugger")]
+    pub debug_metadata: Option<String>,
 }
 
 impl<'a, C: ContextObject> EbpfVm<'a, C> {
@@ -345,6 +348,8 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             debug_port: std::env::var("VM_DEBUG_PORT")
                 .ok()
                 .and_then(|v| v.parse::<u16>().ok()),
+            #[cfg(feature = "debugger")]
+            debug_metadata: None,
             register_trace: Vec::default(),
         }
     }
