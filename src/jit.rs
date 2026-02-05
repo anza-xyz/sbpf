@@ -811,8 +811,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     let mut resolved = false;
                     // External syscall
                     if !self.executable.get_sbpf_version().static_syscalls() || insn.src == 0 {
-                        if let Some((_, function)) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
-                            self.emit_external_call(function);
+                        if let Some((_, (_, callback))) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
+                            callback(&mut self);
                             resolved = true;
                         }
                     }
