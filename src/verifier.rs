@@ -12,11 +12,7 @@
 
 //! Verifies that the bytecode is valid for the given config.
 
-use crate::{
-    ebpf,
-    program::{BuiltinFunction, FunctionRegistry, SBPFVersion},
-    vm::{Config, ContextObject},
-};
+use crate::{ebpf, program::SBPFVersion, vm::Config};
 use thiserror::Error;
 
 /// Error definitions
@@ -91,13 +87,8 @@ pub trait Verifier {
     ///   - Unknown instructions.
     ///   - Bad formed instruction.
     ///   - Unknown eBPF syscall index.
-    fn verify<C: ContextObject>(
-        prog: &[u8],
-        config: &Config,
-        sbpf_version: SBPFVersion,
-        function_registry: &FunctionRegistry<usize>,
-        syscall_registry: &FunctionRegistry<BuiltinFunction<C>>,
-    ) -> Result<(), VerifierError>;
+    fn verify(prog: &[u8], config: &Config, sbpf_version: SBPFVersion)
+        -> Result<(), VerifierError>;
 }
 
 fn check_prog_len(prog: &[u8]) -> Result<(), VerifierError> {
@@ -228,7 +219,7 @@ pub struct RequisiteVerifier {}
 impl Verifier for RequisiteVerifier {
     /// Check the program against the verifier's rules
     #[rustfmt::skip]
-    fn verify<C: ContextObject>(prog: &[u8], _config: &Config, sbpf_version: SBPFVersion, _function_registry: &FunctionRegistry<usize>, _syscall_registry: &FunctionRegistry<BuiltinFunction<C>>) -> Result<(), VerifierError> {
+    fn verify(prog: &[u8], _config: &Config, sbpf_version: SBPFVersion) -> Result<(), VerifierError> {
         check_prog_len(prog)?;
 
         let program_range = 0..prog.len() / ebpf::INSN_SIZE;

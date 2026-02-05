@@ -28,9 +28,9 @@ use solana_sbpf::{
     assembler::assemble,
     ebpf,
     elf::Executable,
-    program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
     verifier::{RequisiteVerifier, Verifier, VerifierError},
-    vm::{Config, ContextObject},
+    vm::Config,
 };
 use std::sync::Arc;
 use test_utils::{assert_error, create_vm, syscalls, TestContextObject};
@@ -45,12 +45,10 @@ pub enum VerifierTestError {
 
 struct TautologyVerifier {}
 impl Verifier for TautologyVerifier {
-    fn verify<C: ContextObject>(
+    fn verify(
         _prog: &[u8],
         _config: &Config,
         _sbpf_version: SBPFVersion,
-        _function_registry: &FunctionRegistry<usize>,
-        _syscall_registry: &FunctionRegistry<BuiltinFunction<C>>,
     ) -> std::result::Result<(), VerifierError> {
         Ok(())
     }
@@ -58,12 +56,10 @@ impl Verifier for TautologyVerifier {
 
 struct ContradictionVerifier {}
 impl Verifier for ContradictionVerifier {
-    fn verify<C: ContextObject>(
+    fn verify(
         _prog: &[u8],
         _config: &Config,
         _sbpf_version: SBPFVersion,
-        _function_registry: &FunctionRegistry<usize>,
-        _syscall_registry: &FunctionRegistry<BuiltinFunction<C>>,
     ) -> std::result::Result<(), VerifierError> {
         Err(VerifierError::NoProgram)
     }
