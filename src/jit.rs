@@ -449,7 +449,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
             match insn.opc {
                 ebpf::LD_DW_IMM if !self.executable.get_sbpf_version().disable_lddw() => {
-                    self.emit_validate_and_profile_instruction_count(Some(self.pc + 2));
+                    self.emit_validate_and_profile_instruction_count(self.pc + 2);
                     self.pc += 1;
                     self.result.pc_section[self.pc] = unsafe { self.anchors[ANCHOR_CALL_UNSUPPORTED_INSTRUCTION].offset_from(self.result.text_section.as_ptr()) as u32 };
                     ebpf::augment_lddw_unchecked(self.program, &mut insn);
@@ -780,7 +780,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
                 // BPF_JMP64 class
                 ebpf::JA         => {
-                    self.emit_validate_and_profile_instruction_count(Some(target_pc));
+                    self.emit_validate_and_profile_instruction_count(target_pc);
                     let jump_offset = self.relative_to_target_pc(target_pc, 5);
                     self.emit_ins(X86Instruction::jump_immediate(jump_offset));
                 },
@@ -812,7 +812,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     if !self.executable.get_sbpf_version().static_syscalls() || insn.src == 0 {
                         if let Some((_, function)) =
                                 self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
-                            self.emit_validate_and_profile_instruction_count(Some(0));
+                            self.emit_validate_and_profile_instruction_count(0);
                             self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, function as usize as i64));
                             self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL, 5)));
                             self.emit_undo_profile_instruction_count(0);
@@ -849,7 +849,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_internal_call(Value::Register(target_pc));
                 },
                 ebpf::EXIT      => {
-                    self.emit_validate_and_profile_instruction_count(Some(0));
+                    self.emit_validate_and_profile_instruction_count(0);
 
                     let call_depth_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::CallDepth));
                     // If env.call_depth == 0, we've reached the exit instruction of the entry point
@@ -874,7 +874,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         if self.offset_in_text_section + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION * 2 >= self.result.text_section.len() {
             return Err(EbpfError::ExhaustedTextSegment(self.pc));
         }
-        self.emit_validate_and_profile_instruction_count(Some(self.pc + 1));
+        self.emit_validate_and_profile_instruction_count(self.pc + 1);
         self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64)); // Save pc
         self.emit_set_exception_kind(EbpfError::ExecutionOverrun);
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 5)));
@@ -1007,19 +1007,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
     }
 
-    fn emit_profile_instruction_count(&mut self, target_pc: Option<usize>) {
+    fn emit_profile_instruction_count(&mut self, target_pc: usize) {
         if !self.config.enable_instruction_meter {
             return;
         }
-        match target_pc {
-            Some(target_pc) => {
-                self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, target_pc as i64 - self.pc as i64 - 1); // instruction_meter += target_pc - (self.pc + 1);
-            },
-            None => {
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += target_pc;
-                self.emit_sanitized_alu(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, self.pc as i64 + 1); // instruction_meter -= self.pc + 1;
-            },
-        }
+        self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, target_pc as i64 - self.pc as i64 - 1); // instruction_meter += target_pc - (self.pc + 1);
     }
 
     fn emit_undo_profile_instruction_count(&mut self, target_pc: usize) {
@@ -1028,7 +1020,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
-    fn emit_validate_and_profile_instruction_count(&mut self, target_pc: Option<usize>) {
+    fn emit_validate_and_profile_instruction_count(&mut self, target_pc: usize) {
         self.emit_validate_instruction_count(Some(self.pc));
         self.emit_profile_instruction_count(target_pc);
     }
@@ -1154,7 +1146,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             },
             Value::Constant64(target_pc, user_provided) => {
                 debug_assert!(user_provided);
-                self.emit_profile_instruction_count(Some(target_pc as usize));
+                self.emit_profile_instruction_count(target_pc as usize);
                 if user_provided && self.should_sanitize_constant(target_pc) {
                     self.emit_sanitized_load_immediate(REGISTER_SCRATCH, target_pc);
                 } else {
@@ -1246,7 +1238,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     fn emit_conditional_branch_reg(&mut self, size: OperandSize, op: u8, bitwise: bool, first_operand: X86Register, second_operand: X86Register, target_pc: usize) {
-        self.emit_validate_and_profile_instruction_count(Some(target_pc));
+        self.emit_validate_and_profile_instruction_count(target_pc);
         if bitwise { // Logical
             self.emit_ins(X86Instruction::test(size, first_operand, second_operand, None));
         } else { // Arithmetic
@@ -1258,7 +1250,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     fn emit_conditional_branch_imm(&mut self, size: OperandSize, op: u8, bitwise: bool, immediate: i64, second_operand: X86Register, target_pc: usize) {
-        self.emit_validate_and_profile_instruction_count(Some(target_pc));
+        self.emit_validate_and_profile_instruction_count(target_pc);
         if self.should_sanitize_constant(immediate) {
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
             if bitwise { // Logical
