@@ -320,7 +320,7 @@ impl<const ALIGN: usize> AlignedVec<ALIGN> {
             new_len <= self.capacity,
             "attempted to grow AlignedVec beyond capacity"
         );
-        debug_assert!(new_len > self.length, "attempted to shrink AlignedVec");
+        debug_assert!(new_len >= self.length, "attempted to shrink AlignedVec");
         self.length = new_len;
     }
 }
