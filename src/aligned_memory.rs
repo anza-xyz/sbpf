@@ -314,7 +314,7 @@ impl<const ALIGN: usize> AlignedVec<ALIGN> {
 
     /// Set the length of the `AlignedVec`. The new length must be less than or equal to
     /// the capacity, and the memory must be initialized up to that length.
-    /// The new length must also be greater than the previous length.
+    /// The new length must not be less than the previous length.
     unsafe fn set_len(&mut self, new_len: usize) {
         debug_assert!(
             new_len <= self.capacity,
