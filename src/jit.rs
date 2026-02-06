@@ -1012,15 +1012,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             return;
         }
         self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, target_pc as i64 - self.pc as i64 - 1); // instruction_meter += target_pc - (self.pc + 1);
-        // match target_pc {
-        //     Some(target_pc) => {
-        //         self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, target_pc as i64 - self.pc as i64 - 1); // instruction_meter += target_pc - (self.pc + 1);
-        //     },
-        //     None => {
-        //         self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += target_pc;
-        //         self.emit_sanitized_alu(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, self.pc as i64 + 1); // instruction_meter -= self.pc + 1;
-        //     },
-        // }
     }
 
     fn emit_undo_profile_instruction_count(&mut self, target_pc: usize) {
