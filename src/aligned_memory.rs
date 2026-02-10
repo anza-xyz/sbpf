@@ -325,6 +325,12 @@ impl<const ALIGN: usize> AlignedVec<ALIGN> {
     }
 }
 
+/// `AlignedVec` is [`Send`] as `u8` is `Send` and the data behind the pointer is uniquely owned.
+unsafe impl<const N: usize> Send for AlignedVec<N> {}
+
+/// `AlignedVec` is [`Sync`] as `u8` is `Send` and the data behind the pointer is uniquely owned.
+unsafe impl<const N: usize> Sync for AlignedVec<N> {}
+
 #[allow(clippy::arithmetic_side_effects)]
 #[cfg(test)]
 mod tests {
@@ -412,4 +418,11 @@ mod tests {
             aligned_memory.write_all_unchecked(b"bar");
         }
     }
+
+    const fn assert_send<T: Send>() {}
+    const fn assert_sync<T: Sync>() {}
+    const fn assert_unpin<T: Unpin>() {}
+    const _: () = assert_send::<AlignedMemory<8>>();
+    const _: () = assert_sync::<AlignedMemory<8>>();
+    const _: () = assert_unpin::<AlignedMemory<8>>();
 }
