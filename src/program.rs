@@ -321,18 +321,14 @@ impl<C: ContextObject> BuiltinProgram<C> {
 
 impl<C: ContextObject> std::fmt::Debug for BuiltinProgram<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        unsafe {
-            writeln!(
-                f,
-                "registry: {:?}",
-                // `derive(Debug)` does not know that `C: ContextObject` does not need to implement `Debug`
+        f.debug_struct("BuiltinProgram")
+            .field("registry", unsafe {
                 std::mem::transmute::<
                     &FunctionRegistry<(BuiltinFunction<C>, BuiltinCodegen<C>)>,
                     &FunctionRegistry<(usize, usize)>,
-                >(&self.sparse_registry),
-            )?;
-        }
-        Ok(())
+                >(&self.sparse_registry)
+            })
+            .finish()
     }
 }
 
