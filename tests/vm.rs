@@ -59,19 +59,19 @@ fn test_builtin_program_eq() {
     let mut builtin_program_b = BuiltinProgram::new_loader(Config::default());
     let mut builtin_program_c = BuiltinProgram::new_loader(Config::default());
     builtin_program_a
-        .register_function("log", syscalls::SyscallString::vm)
+        .register_function("log", syscalls::SyscallString::REGISTRY_ENTRY)
         .unwrap();
     builtin_program_a
-        .register_function("log_64", syscalls::SyscallU64::vm)
+        .register_function("log_64", syscalls::SyscallU64::REGISTRY_ENTRY)
         .unwrap();
     builtin_program_b
-        .register_function("log_64", syscalls::SyscallU64::vm)
+        .register_function("log_64", syscalls::SyscallU64::REGISTRY_ENTRY)
         .unwrap();
     builtin_program_b
-        .register_function("log", syscalls::SyscallString::vm)
+        .register_function("log", syscalls::SyscallString::REGISTRY_ENTRY)
         .unwrap();
     builtin_program_c
-        .register_function("log_64", syscalls::SyscallU64::vm)
+        .register_function("log_64", syscalls::SyscallU64::REGISTRY_ENTRY)
         .unwrap();
     assert_eq!(builtin_program_a, builtin_program_b);
     assert_ne!(builtin_program_a, builtin_program_c);

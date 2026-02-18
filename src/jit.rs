@@ -33,6 +33,7 @@ use crate::{
         allocate_pages, free_pages, get_system_page_size, protect_pages, round_to_page_size,
     },
     memory_region::MemoryMapping,
+    program::BuiltinFunction,
     vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm, RuntimeEnvironmentSlot},
     x86::{
         FenceType, X86IndirectAccess, X86Instruction,
@@ -810,12 +811,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     let mut resolved = false;
                     // External syscall
                     if !self.executable.get_sbpf_version().static_syscalls() || insn.src == 0 {
-                        if let Some((_, function)) =
-                                self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
-                            self.emit_validate_and_profile_instruction_count(0);
-                            self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, function as usize as i64));
-                            self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL, 5)));
-                            self.emit_undo_profile_instruction_count(0);
+                        if let Some((_, (_, callback))) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
+                            callback(&mut self);
                             resolved = true;
                         }
                     }
@@ -1168,6 +1165,14 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         for reg in REGISTER_MAP.iter().skip(FIRST_SCRATCH_REG).take(SCRATCH_REGS).rev() {
             self.emit_ins(X86Instruction::pop(*reg));
         }
+    }
+
+    /// Emits a syscall handler invocation
+    pub fn emit_external_call(&mut self, function: BuiltinFunction<C>) {
+        self.emit_validate_and_profile_instruction_count(0);
+        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, function as usize as i64));
+        self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL, 5)));
+        self.emit_undo_profile_instruction_count(0);
     }
 
     fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {

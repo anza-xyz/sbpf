@@ -224,8 +224,24 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
     }
 }
 
-/// Syscall function without context
+/// Syscall handler function (ContextObject is derived from VM)
 pub type BuiltinFunction<C> = fn(*mut EbpfVm<C>, u64, u64, u64, u64, u64);
+/// Re-export of the JIT compiler for the declare_builtin_function! macro
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+pub type JitCompiler<'a, C> = crate::jit::JitCompiler<'a, C>;
+/// Re-export of the JIT compiler for the declare_builtin_function! macro
+#[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64")))]
+pub struct JitCompiler<'a, C> {
+    _phantom: std::marker::PhantomData<&'a C>,
+}
+#[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64")))]
+impl<'a, C: ContextObject> JitCompiler<'a, C> {
+    /// Dummy for declare_builtin_function!()
+    #[allow(dead_code)]
+    pub fn emit_external_call(&mut self, _function: BuiltinFunction<C>) {}
+}
+/// Syscall codegen function for JIT compiler
+pub type BuiltinCodegen<C> = fn(&mut JitCompiler<C>);
 
 /// Represents the interface to a fixed functionality program
 #[derive(Eq)]
@@ -233,7 +249,7 @@ pub struct BuiltinProgram<C: ContextObject> {
     /// Holds the Config if this is a loader program
     config: Option<Box<Config>>,
     /// Function pointers by symbol with sparse indexing
-    sparse_registry: FunctionRegistry<BuiltinFunction<C>>,
+    sparse_registry: FunctionRegistry<(BuiltinFunction<C>, BuiltinCodegen<C>)>,
 }
 
 impl<C: ContextObject> PartialEq for BuiltinProgram<C> {
@@ -273,7 +289,9 @@ impl<C: ContextObject> BuiltinProgram<C> {
     }
 
     /// Get the function registry depending on the SBPF version
-    pub fn get_function_registry(&self) -> &FunctionRegistry<BuiltinFunction<C>> {
+    pub fn get_function_registry(
+        &self,
+    ) -> &FunctionRegistry<(BuiltinFunction<C>, BuiltinCodegen<C>)> {
         &self.sparse_registry
     }
 
@@ -292,29 +310,25 @@ impl<C: ContextObject> BuiltinProgram<C> {
     pub fn register_function(
         &mut self,
         name: &str,
-        value: BuiltinFunction<C>,
+        entry: (BuiltinFunction<C>, BuiltinCodegen<C>),
     ) -> Result<(), ElfError> {
         let key = ebpf::hash_symbol_name(name.as_bytes());
         self.sparse_registry
-            .register_function(key, name, value)
+            .register_function(key, name, entry)
             .map(|_| ())
     }
 }
 
 impl<C: ContextObject> std::fmt::Debug for BuiltinProgram<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
-        unsafe {
-            writeln!(
-                f,
-                "registry: {:?}",
-                // `derive(Debug)` does not know that `C: ContextObject` does not need to implement `Debug`
+        f.debug_struct("BuiltinProgram")
+            .field("registry", unsafe {
                 std::mem::transmute::<
-                    &FunctionRegistry<BuiltinFunction<C>>,
-                    &FunctionRegistry<usize>,
-                >(&self.sparse_registry),
-            )?;
-        }
-        Ok(())
+                    &FunctionRegistry<(BuiltinFunction<C>, BuiltinCodegen<C>)>,
+                    &FunctionRegistry<(usize, usize)>,
+                >(&self.sparse_registry)
+            })
+            .finish()
     }
 }
 
@@ -329,7 +343,10 @@ macro_rules! declare_builtin_function {
         $arg_d:ident : u64,
         $arg_e:ident : u64,
         $memory_mapping:ident : &mut $MemoryMapping:ty,
-    ) -> $Result:ty { $($rust:tt)* }) => {
+    ) -> $Result:ty { $($rust:tt)* }
+    fn codegen(
+        $jit:ident : &mut $crate::program::JitCompiler<$ContextObject2:ty>,
+    ) { $($codegen:tt)* }) => {
         $(#[$attr])*
         pub struct $name {}
         impl $name {
@@ -371,6 +388,44 @@ macro_rules! declare_builtin_function {
                     vm.previous_instruction_meter = vm.context_object_pointer.get_remaining();
                 }
             }
+            /// JIT codegen interceptor
+            pub fn codegen(
+                $jit: &mut $crate::program::JitCompiler<$ContextObject2>,
+            ) {
+                $($codegen)*
+            }
+            /// Generate an entry for the syscall registry
+            pub const REGISTRY_ENTRY: ($crate::program::BuiltinFunction<$ContextObject>, $crate::program::BuiltinCodegen<$ContextObject>)
+                = (Self::vm, Self::codegen);
         }
+    };
+    ($(#[$attr:meta])* $name:ident $(<$($generic_ident:tt : $generic_type:tt),+>)?, fn rust(
+        $vm:ident : &mut $ContextObject:ty,
+        $arg_a:ident : u64,
+        $arg_b:ident : u64,
+        $arg_c:ident : u64,
+        $arg_d:ident : u64,
+        $arg_e:ident : u64,
+        $memory_mapping:ident : &mut $MemoryMapping:ty,
+    ) -> $Result:ty { $($rust:tt)* }) => {
+        declare_builtin_function!(
+            $(#[$attr])* $name $(<$($generic_ident : $generic_type),+>)?,
+            fn rust(
+                $vm : &mut $ContextObject,
+                $arg_a : u64,
+                $arg_b : u64,
+                $arg_c : u64,
+                $arg_d : u64,
+                $arg_e : u64,
+                $memory_mapping : &mut $MemoryMapping,
+            ) -> $Result {
+                $($rust)*
+            }
+            fn codegen(
+                jit : &mut $crate::program::JitCompiler<$ContextObject>,
+            ) {
+                jit.emit_external_call(Self::vm);
+            }
+        );
     };
 }

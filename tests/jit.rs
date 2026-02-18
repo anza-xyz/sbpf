@@ -22,7 +22,7 @@ fn create_mockup_executable(config: Config, program: &[u8]) -> Executable<TestCo
     let sbpf_version = *config.enabled_sbpf_versions.end();
     let mut loader = BuiltinProgram::new_loader(config);
     loader
-        .register_function("gather_bytes", syscalls::SyscallGatherBytes::vm)
+        .register_function("gather_bytes", syscalls::SyscallGatherBytes::REGISTRY_ENTRY)
         .unwrap();
     let mut function_registry = FunctionRegistry::default();
     function_registry
