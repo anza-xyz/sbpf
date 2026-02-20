@@ -3092,7 +3092,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         SBPFVersion::V4,
         FunctionRegistry::default(),
     );
-    let mut executable = if let Ok(executable) = executable {
+    let executable = if let Ok(executable) = executable {
         executable
     } else {
         return false;
