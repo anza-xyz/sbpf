@@ -55,8 +55,8 @@ fn test_code_length_estimate() {
             };
             let mut executable = create_mockup_executable(config, &prog[0..0]);
             Executable::<TestContextObject>::jit_compile(&mut executable).unwrap();
-            executable
-                .get_compiled_program()
+            (*executable.get_compiled_program())
+                .as_ref()
                 .unwrap()
                 .machine_code_length()
         };
@@ -78,8 +78,8 @@ fn test_code_length_estimate() {
         };
         let mut executable = create_mockup_executable(config, &prog);
         Executable::<TestContextObject>::jit_compile(&mut executable).unwrap();
-        *machine_code_length = (executable
-            .get_compiled_program()
+        *machine_code_length = ((*executable.get_compiled_program())
+            .as_ref()
             .unwrap()
             .machine_code_length()
             - empty_program_machine_code_length_per_version[0])
@@ -143,8 +143,8 @@ fn test_code_length_estimate() {
                 assert!(matches!(err, EbpfError::UnsupportedInstruction));
                 continue;
             }
-            let machine_code_length = executable
-                .get_compiled_program()
+            let machine_code_length = (*executable.get_compiled_program())
+                .as_ref()
                 .unwrap()
                 .machine_code_length()
                 - empty_program_machine_code_length;

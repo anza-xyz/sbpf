@@ -43,7 +43,7 @@ fn bench_jit_compile(bencher: &mut Bencher) {
     let mut file = File::open("tests/elfs/relative_call_sbpfv0.so").unwrap();
     let mut elf = Vec::new();
     file.read_to_end(&mut elf).unwrap();
-    let mut executable =
+    let executable =
         Executable::<TestContextObject>::from_elf(&elf, Arc::new(BuiltinProgram::new_mock()))
             .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
