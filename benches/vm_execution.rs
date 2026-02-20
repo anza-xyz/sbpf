@@ -11,7 +11,9 @@ extern crate test;
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 use solana_sbpf::{ebpf, memory_region::MemoryRegion, program::SBPFVersion, vm::Config};
-use solana_sbpf::{elf::Executable, program::BuiltinProgram, verifier::RequisiteVerifier};
+use solana_sbpf::{
+    elf::Executable, program::BuiltinProgram, verifier::RequisiteVerifier, vm::ExecutionMode,
+};
 use std::{fs::File, io::Read, sync::Arc};
 use test::Bencher;
 use test_utils::{create_vm, TestContextObject};
@@ -37,7 +39,9 @@ fn bench_init_interpreter_start(bencher: &mut Bencher) {
     );
     bencher.iter(|| {
         vm.context_object_pointer.remaining = 37;
-        vm.execute_program(&executable, true).1.unwrap()
+        vm.execute_program(&executable, &mut ExecutionMode::Interpreted)
+            .1
+            .unwrap()
     });
 }
 
@@ -47,7 +51,7 @@ fn bench_init_jit_start(bencher: &mut Bencher) {
     let mut file = File::open("tests/elfs/rodata_section_sbpfv0.so").unwrap();
     let mut elf = Vec::new();
     file.read_to_end(&mut elf).unwrap();
-    let mut executable =
+    let executable =
         Executable::<TestContextObject>::from_elf(&elf, Arc::new(BuiltinProgram::new_mock()))
             .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
@@ -64,7 +68,9 @@ fn bench_init_jit_start(bencher: &mut Bencher) {
     );
     bencher.iter(|| {
         vm.context_object_pointer.remaining = 37;
-        vm.execute_program(&executable, false).1.unwrap()
+        vm.execute_program(&executable, &mut ExecutionMode::Jit)
+            .1
+            .unwrap()
     });
 }
 
@@ -76,7 +82,7 @@ fn bench_jit_vs_interpreter(
     instruction_meter: u64,
     mem: &mut [u8],
 ) {
-    let mut executable = solana_sbpf::assembler::assemble::<TestContextObject>(
+    let executable = solana_sbpf::assembler::assemble::<TestContextObject>(
         assembly,
         Arc::new(BuiltinProgram::new_loader(config)),
     )
@@ -98,7 +104,8 @@ fn bench_jit_vs_interpreter(
         .bench(|bencher| {
             bencher.iter(|| {
                 vm.context_object_pointer.remaining = instruction_meter;
-                let (instruction_count_interpreter, result) = vm.execute_program(&executable, true);
+                let (instruction_count_interpreter, result) =
+                    vm.execute_program(&executable, &mut ExecutionMode::Interpreted);
                 assert!(result.is_ok(), "{:?}", result);
                 assert_eq!(instruction_count_interpreter, instruction_meter);
             });
@@ -110,7 +117,8 @@ fn bench_jit_vs_interpreter(
         .bench(|bencher| {
             bencher.iter(|| {
                 vm.context_object_pointer.remaining = instruction_meter;
-                let (instruction_count_jit, result) = vm.execute_program(&executable, false);
+                let (instruction_count_jit, result) =
+                    vm.execute_program(&executable, &mut ExecutionMode::Jit);
                 assert!(result.is_ok(), "{:?}", result);
                 assert_eq!(instruction_count_jit, instruction_meter);
             });
@@ -282,7 +290,7 @@ fn bench_mem_ldxdw_jit(bencher: &mut Bencher) {
         "#,
         LOAD64_ITERATIONS
     );
-    let mut executable =
+    let executable =
         assemble::<TestContextObject>(&assembly, Arc::new(BuiltinProgram::new_loader(config)))
             .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
@@ -303,7 +311,7 @@ fn bench_mem_ldxdw_jit(bencher: &mut Bencher) {
 
     bencher.iter(|| {
         vm.context_object_pointer.remaining = LOAD64_INSTRUCTION_COUNT;
-        let (instruction_count, result) = vm.execute_program(&executable, false);
+        let (instruction_count, result) = vm.execute_program(&executable, &mut ExecutionMode::Jit);
         assert!(result.is_ok(), "{:?}", result);
         assert_eq!(instruction_count, LOAD64_INSTRUCTION_COUNT);
     });
