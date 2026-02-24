@@ -3905,3 +3905,19 @@ fn test_stack_gaps() {
         ProgramResult::Ok(77),
     );
 }
+
+#[test]
+fn test_regression_interpreter_exit_to_nothing() {
+    test_interpreter_and_jit_asm!(
+        r##"
+        a:
+            exit
+        entrypoint:
+            call -2
+        "##,
+        Config::default(),
+        [],
+        TestContextObject::new(3),
+        ProgramResult::Err(EbpfError::ExecutionOverrun),
+    );
+}
