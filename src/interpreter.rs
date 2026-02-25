@@ -590,7 +590,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                 self.reg[ebpf::FIRST_SCRATCH_REG
                     ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS]
                     .copy_from_slice(&frame.caller_saved_registers);
-                check_pc!(self, next_pc, frame.target_pc);
+                next_pc = frame.target_pc;
             }
             _ => throw_error!(self, EbpfError::UnsupportedInstruction),
         }

@@ -405,8 +405,10 @@ macro_rules! test_interpreter_and_jit_asm {
     ($source:expr, $config:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
         #[allow(unused_mut)]
         {
-            let mut config = $config;
-            config.enable_register_tracing = true;
+            let config = Config {
+                enable_register_tracing: true,
+                ..$config
+            };
             let loader = Arc::new(BuiltinProgram::new_loader(config));
             let mut executable = assemble($source, loader).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
