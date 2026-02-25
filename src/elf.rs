@@ -250,7 +250,7 @@ pub struct Executable<C: ContextObject> {
     loader: Arc<BuiltinProgram<C>>,
     /// Compiled program and argument
     #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-    compiled_program: std::sync::Mutex<Arc<Option<JitProgram>>>,
+    compiled_program: std::sync::Mutex<Option<Arc<JitProgram>>>,
 }
 
 impl<C: PartialEq + ContextObject> PartialEq for Executable<C> {
@@ -268,12 +268,7 @@ impl<C: PartialEq + ContextObject> PartialEq for Executable<C> {
                 {
                     // In order to avoid a deadlock comparing self with self, we gotta make sure
                     // that we clone at least one Arc out of the lock before comparing...
-                    let other = Arc::clone(
-                        &other
-                            .compiled_program
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner()),
-                    );
+                    let other = other.get_compiled_program();
                     let this = self
                         .compiled_program
                         .lock()
@@ -341,14 +336,16 @@ impl<C: ContextObject> Executable<C> {
     }
 
     /// Get the JIT compiled program
+    ///
+    /// This function will not block the calling thread even if there is a concurrent ongoing call
+    /// to [`Self::jit_compile`].
     #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-    pub fn get_compiled_program(&self) -> Arc<Option<JitProgram>> {
-        Arc::clone(
-            &self
-                .compiled_program
-                .lock()
-                .unwrap_or_else(|e| e.into_inner()),
-        )
+    pub fn get_compiled_program(&self) -> Option<Arc<JitProgram>> {
+        self.compiled_program
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .map(Arc::clone)
     }
 
     /// Verify the executable
@@ -362,26 +359,39 @@ impl<C: ContextObject> Executable<C> {
     }
 
     /// JIT compile the executable
+    ///
+    /// This function does not ensure fully sequentially consistent execution ordering between calls
+    /// to it and related calls such as [`Self::get_compiled_program`] or
+    /// [`Self::take_compiled_program`].
+    ///
+    /// This means that there can be some non-trivial interactions in ordering between calls to this
+    /// function and a `get_compiled_program`: concurrent calls to `get_compiled_program` will
+    /// return the previous compiled program or `None` for the duration of the compilation process
+    /// and is only guaranteed to start returning the newly compiled `JitProgram` after this
+    /// function returns.
     #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
     pub fn jit_compile(&self) -> Result<(), crate::error::EbpfError> {
         let jit = JitCompiler::<C>::new(self)?;
-        let compiled = Arc::new(Some(jit.compile()?));
-        let mut prog = self
+        let compiled = Arc::new(jit.compile()?);
+        let mut guard = self
             .compiled_program
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        *prog = compiled;
+        *guard = Some(compiled);
         Ok(())
     }
 
     /// Remove the compiled program.
+    ///
+    /// Note that the results can be unpredictable in presence of concurrent ongoing calls to
+    /// [`Self::jit_compile`]: based on exact execution ordering this function may take out the
+    /// previous program (or `None`) that shorly afterwards gets replaced by a compiled program.
     #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-    pub fn take_compiled_program(&self) -> Arc<Option<JitProgram>> {
-        let mut prog = self
-            .compiled_program
+    pub fn take_compiled_program(&self) -> Option<Arc<JitProgram>> {
+        self.compiled_program
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        std::mem::replace(&mut *prog, Arc::new(None))
+            .unwrap_or_else(|e| e.into_inner())
+            .take()
     }
 
     /// Get the function registry
@@ -425,7 +435,7 @@ impl<C: ContextObject> Executable<C> {
             function_registry,
             loader,
             #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-            compiled_program: Arc::new(None).into(),
+            compiled_program: None.into(),
         })
     }
 
@@ -642,7 +652,7 @@ impl<C: ContextObject> Executable<C> {
             function_registry,
             loader,
             #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-            compiled_program: Arc::new(None).into(),
+            compiled_program: None.into(),
         })
     }
 
@@ -735,7 +745,7 @@ impl<C: ContextObject> Executable<C> {
             function_registry,
             loader,
             #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-            compiled_program: Arc::new(None).into(),
+            compiled_program: None.into(),
         })
     }
 
@@ -759,7 +769,7 @@ impl<C: ContextObject> Executable<C> {
         {
             // compiled programs
             let prog = self.compiled_program.lock().unwrap_or_else(|e| e.into_inner());
-            total = total.saturating_add((**prog).as_ref().map_or(0, |program| program.mem_size()));
+            total = total.saturating_add(prog.as_ref().map_or(0, |program| program.mem_size()));
         }
 
         total
