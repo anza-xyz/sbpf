@@ -341,11 +341,11 @@ impl<C: ContextObject> Executable<C> {
     /// to [`Self::jit_compile`].
     #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
     pub fn get_compiled_program(&self) -> Option<Arc<JitProgram>> {
-        self.compiled_program
+        let guard = self
+            .compiled_program
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(Arc::clone)
+            .unwrap_or_else(|e| e.into_inner());
+        guard.as_ref().map(Arc::clone)
     }
 
     /// Verify the executable
@@ -388,10 +388,11 @@ impl<C: ContextObject> Executable<C> {
     /// previous program (or `None`) that shorly afterwards gets replaced by a compiled program.
     #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
     pub fn take_compiled_program(&self) -> Option<Arc<JitProgram>> {
-        self.compiled_program
+        let mut guard = self
+            .compiled_program
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take()
+            .unwrap_or_else(|e| e.into_inner());
+        guard.take()
     }
 
     /// Get the function registry
