@@ -1468,6 +1468,22 @@ fn test_early_exit() {
 }
 
 #[test]
+fn test_exit_to_nothing_is_capped() {
+    test_interpreter_and_jit_asm!(
+        r##"
+        a:
+            exit
+        entrypoint:
+            call -2
+        "##,
+        Config::default(),
+        [],
+        TestContextObject::new(3),
+        ProgramResult::Err(EbpfError::ExecutionOverrun),
+    );
+}
+
+#[test]
 fn test_ja() {
     test_interpreter_and_jit_asm!(
         "
@@ -3903,21 +3919,5 @@ fn test_stack_gaps() {
         [],
         TestContextObject::new(5),
         ProgramResult::Ok(77),
-    );
-}
-
-#[test]
-fn test_regression_interpreter_exit_to_nothing() {
-    test_interpreter_and_jit_asm!(
-        r##"
-        a:
-            exit
-        entrypoint:
-            call -2
-        "##,
-        Config::default(),
-        [],
-        TestContextObject::new(3),
-        ProgramResult::Err(EbpfError::ExecutionOverrun),
     );
 }
