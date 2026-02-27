@@ -47,7 +47,7 @@ fn bench_init_jit_start(bencher: &mut Bencher) {
     let mut file = File::open("tests/elfs/rodata_section_sbpfv0.so").unwrap();
     let mut elf = Vec::new();
     file.read_to_end(&mut elf).unwrap();
-    let mut executable =
+    let executable =
         Executable::<TestContextObject>::from_elf(&elf, Arc::new(BuiltinProgram::new_mock()))
             .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
@@ -76,7 +76,7 @@ fn bench_jit_vs_interpreter(
     instruction_meter: u64,
     mem: &mut [u8],
 ) {
-    let mut executable = solana_sbpf::assembler::assemble::<TestContextObject>(
+    let executable = solana_sbpf::assembler::assemble::<TestContextObject>(
         assembly,
         Arc::new(BuiltinProgram::new_loader(config)),
     )
@@ -282,7 +282,7 @@ fn bench_mem_ldxdw_jit(bencher: &mut Bencher) {
         "#,
         LOAD64_ITERATIONS
     );
-    let mut executable =
+    let executable =
         assemble::<TestContextObject>(&assembly, Arc::new(BuiltinProgram::new_loader(config)))
             .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
