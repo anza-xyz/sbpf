@@ -25,11 +25,7 @@ fuzz_target!(|data: FuzzData| {
     let config = data.template.into();
 
     #[allow(unused)]
-    let res = RequisiteVerifier::verify(
-        prog.into_bytes(),
-        &config,
-        sbpf_version,
-    );
+    let res = RequisiteVerifier::verify(prog.into_bytes(), &config, sbpf_version);
     #[cfg(feature = "only-verified")]
     assert!(res.is_ok(), "Verification failed: {:?}", res.err());
 });

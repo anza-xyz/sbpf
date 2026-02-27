@@ -75,7 +75,10 @@ impl FuzzedInstruction {
 
 pub type FuzzProgram = Vec<FuzzedInstruction>;
 
-pub fn make_program(prog: &FuzzProgram, sbpf_version: solana_sbpf::program::SBPFVersion) -> BpfCode {
+pub fn make_program(
+    prog: &FuzzProgram,
+    sbpf_version: solana_sbpf::program::SBPFVersion,
+) -> BpfCode {
     let mut code = BpfCode::new(sbpf_version);
     for inst in prog {
         match inst.op {

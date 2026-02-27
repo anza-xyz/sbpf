@@ -8,6 +8,7 @@ use solana_sbpf::{
     memory_region::MemoryRegion,
     program::{BuiltinProgram, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
+    vm::ExecutionMode,
 };
 use test_utils::{create_vm, TestContextObject};
 
@@ -28,13 +29,7 @@ fuzz_target!(|data: DumbFuzzData| {
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
 
-    if RequisiteVerifier::verify(
-        &prog,
-        &config,
-        sbpf_version,
-    )
-    .is_err()
-    {
+    if RequisiteVerifier::verify(&prog, &config, sbpf_version).is_err() {
         // verify please
         return;
     }
@@ -59,7 +54,8 @@ fuzz_target!(|data: DumbFuzzData| {
         None
     );
     #[allow(unused)]
-    let (_interp_ins_count, interp_res) = interp_vm.execute_program(&executable, true);
+    let (_interp_ins_count, interp_res) =
+        interp_vm.execute_program(&executable, &mut ExecutionMode::Interpreted);
     #[allow(unused)]
     let interp_final_pc = interp_vm.registers[11];
 
@@ -77,7 +73,8 @@ fuzz_target!(|data: DumbFuzzData| {
             vec![jit_mem_region],
             None
         );
-        let (_jit_ins_count, jit_res) = jit_vm.execute_program(&executable, false);
+        let (_jit_ins_count, jit_res) =
+            jit_vm.execute_program(&executable, &mut ExecutionMode::Jit);
         let jit_final_pc = jit_vm.registers[11];
         if format!("{:?}", interp_res) != format!("{:?}", jit_res) {
             panic!("Expected {:?}, but got {:?}", interp_res, jit_res);
