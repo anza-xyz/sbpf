@@ -12,6 +12,7 @@ use solana_sbpf::{
     memory_region::MemoryRegion,
     program::{BuiltinProgram, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
+    vm::ExecutionMode,
 };
 use test_utils::{create_vm, TestContextObject};
 
@@ -33,13 +34,7 @@ fuzz_target!(|data: FuzzData| {
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
 
-    if RequisiteVerifier::verify(
-        prog.into_bytes(),
-        &config,
-        sbpf_version,
-    )
-    .is_err()
-    {
+    if RequisiteVerifier::verify(prog.into_bytes(), &config, sbpf_version).is_err() {
         // verify please
         return;
     }
@@ -62,6 +57,7 @@ fuzz_target!(|data: FuzzData| {
         vec![mem_region],
         None
     );
-    let (_interp_ins_count, interp_res) = interp_vm.execute_program(&executable, true);
+    let (_interp_ins_count, interp_res) =
+        interp_vm.execute_program(&executable, &mut ExecutionMode::Interpreted);
     drop(black_box(interp_res));
 });

@@ -8,7 +8,7 @@ use solana_sbpf::{
     program::BuiltinProgram,
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{Config, DynamicAnalysis, EbpfVm},
+    vm::{Config, DynamicAnalysis, EbpfVm, ExecutionMode},
 };
 use std::{fs::File, io::Read, path::Path, sync::Arc};
 use test_utils::TestContextObject;
@@ -120,8 +120,14 @@ fn main() {
             memory
         }
     };
+    let mut mode = if matches.value_of("use").unwrap() != "jit" {
+        ExecutionMode::Interpreted
+    } else {
+        ExecutionMode::Jit
+    };
+
     #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
-    if matches.value_of("use") == Some("jit") {
+    if let ExecutionMode::Jit | ExecutionMode::PreferJit = mode {
         executable.jit_compile().unwrap();
     }
     let mut context_object = TestContextObject::new(
@@ -198,8 +204,7 @@ fn main() {
         _ => {}
     }
 
-    let (instruction_count, result) =
-        vm.execute_program(&executable, matches.value_of("use").unwrap() != "jit");
+    let (instruction_count, result) = vm.execute_program(&executable, &mut mode);
     println!("Result: {result:?}");
     println!("Instruction Count: {instruction_count}");
     if matches.is_present("trace") {

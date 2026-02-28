@@ -21,7 +21,7 @@ impl<'a> Arbitrary<'a> for ConfigTemplate {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let bools = u16::arbitrary(u)?;
         // This is how the arbitrary crate quickly generates an enum variant
-        let variant =  u64::from(u32::arbitrary(u)?) * 5 >> 32;
+        let variant = u64::from(u32::arbitrary(u)?) * 5 >> 32;
         let sbpf_version = match variant {
             0 => SBPFVersion::V0,
             1 => SBPFVersion::V1,

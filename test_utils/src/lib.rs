@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+pub use solana_sbpf;
 use solana_sbpf::{
     aligned_memory::AlignedMemory,
     ebpf::{self, HOST_ALIGN},
@@ -300,7 +301,10 @@ macro_rules! test_interpreter_and_jit {
                 None
             );
             vm.registers[1] = ebpf::MM_INPUT_START;
-            let (instruction_count_interpreter, result_interpreter) = vm.execute_program(&$executable, true);
+            let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
+                &$executable,
+                &mut $crate::solana_sbpf::vm::ExecutionMode::Interpreted,
+            );
             (
                 instruction_count_interpreter,
                 result_interpreter,
@@ -327,7 +331,10 @@ macro_rules! test_interpreter_and_jit {
                 Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
                     vm.registers[1] = ebpf::MM_INPUT_START;
-                    let (instruction_count_jit, result_jit) = vm.execute_program(&$executable, false);
+                    let (instruction_count_jit, result_jit) = vm.execute_program(
+                        &$executable,
+                        &mut $crate::solana_sbpf::vm::ExecutionMode::Jit
+                    );
                     let trace_jit = &vm.register_trace;
                     let mut diverged = false;
                     if format!("{:?}", result_interpreter) != format!("{:?}", result_jit) {

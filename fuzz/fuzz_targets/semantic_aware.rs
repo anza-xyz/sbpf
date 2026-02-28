@@ -3,7 +3,9 @@
 
 use std::num::NonZeroI32;
 
-use solana_sbpf::insn_builder::{Arch, BpfCode, Cond, Endian, Instruction, MemSize, Move, Pqr, PqrOp, Source};
+use solana_sbpf::insn_builder::{
+    Arch, BpfCode, Cond, Endian, Instruction, MemSize, Move, Pqr, PqrOp, Source,
+};
 
 #[derive(arbitrary::Arbitrary, Debug, Eq, PartialEq, Copy, Clone)]
 pub struct Register(u8);
@@ -149,20 +151,34 @@ fn complete_pqr_insn<'i>(insn: Pqr<'i>, dst: &Register, src: &FuzzedNonZeroSourc
 }
 
 /// Determines if an instruction should be skipped for a given SBPF version
-fn should_skip_instruction(insn: &FuzzedInstruction, sbpf_version: solana_sbpf::program::SBPFVersion) -> bool {
+fn should_skip_instruction(
+    insn: &FuzzedInstruction,
+    sbpf_version: solana_sbpf::program::SBPFVersion,
+) -> bool {
     match insn {
         // MUL, DIV, MOD are not valid in V2+ (they use PQR instructions instead)
         FuzzedInstruction::Mul(_, _, _)
         | FuzzedInstruction::Div(_, _, _)
-        | FuzzedInstruction::Modulo(_, _, _) if sbpf_version.enable_pqr() => true,
+        | FuzzedInstruction::Modulo(_, _, _)
+            if sbpf_version.enable_pqr() =>
+        {
+            true
+        }
         // PQR instructions are only valid in V2+
         FuzzedInstruction::Pqr(_, _, _, _) if !sbpf_version.enable_pqr() => true,
         // UHMUL and SHMUL are not supported for 32-bit
         #[cfg(feature = "only-verified")]
         FuzzedInstruction::Pqr(op, Arch::X32, _, _)
-            if matches!(op, PqrOp::Uhmul | PqrOp::Shmul) => true,
+            if matches!(op, PqrOp::Uhmul | PqrOp::Shmul) =>
+        {
+            true
+        }
         // JMP32 instructions are only valid in V3+
-        FuzzedInstruction::JumpC32(_, cond, _, _) if !sbpf_version.enable_jmp32() || matches!(cond, Cond::Abs) => true,
+        FuzzedInstruction::JumpC32(_, cond, _, _)
+            if !sbpf_version.enable_jmp32() || matches!(cond, Cond::Abs) =>
+        {
+            true
+        }
         // HOR64_IMM is only valid when LDDW is disabled (V2)
         FuzzedInstruction::Hor64Imm(_, _) if !sbpf_version.disable_lddw() => true,
         // NEG is disabled in some versions
@@ -180,7 +196,13 @@ fn should_skip_instruction(insn: &FuzzedInstruction, sbpf_version: solana_sbpf::
 }
 
 #[cfg(feature = "only-verified")]
-fn fix_jump(prog: &FuzzProgram, off: i16, pos: usize, len: usize, sbpf_version: solana_sbpf::program::SBPFVersion) -> i16 {
+fn fix_jump(
+    prog: &FuzzProgram,
+    off: i16,
+    pos: usize,
+    len: usize,
+    sbpf_version: solana_sbpf::program::SBPFVersion,
+) -> i16 {
     let target = (off as usize).rem_euclid(len);
     if target == 0 {
         return target as i16 - pos as i16 - 1;
@@ -209,27 +231,38 @@ fn fix_jump(prog: &FuzzProgram, off: i16, pos: usize, len: usize, sbpf_version: 
 }
 
 #[cfg(not(feature = "only-verified"))]
-fn fix_jump(_: &FuzzProgram, off: i16, _: usize, _: usize, _: solana_sbpf::program::SBPFVersion) -> i16 {
+fn fix_jump(
+    _: &FuzzProgram,
+    off: i16,
+    _: usize,
+    _: usize,
+    _: solana_sbpf::program::SBPFVersion,
+) -> i16 {
     off
 }
 
 // lddw is twice length; also account for skipped instructions based on version
 fn calculate_length(prog: &FuzzProgram, sbpf_version: solana_sbpf::program::SBPFVersion) -> usize {
-    prog.iter().map(|insn| {
-        if should_skip_instruction(insn, sbpf_version) {
-            0
-        } else {
-            // LDDW instructions take 2 slots
-            #[cfg(feature = "only-verified")]
-            if matches!(insn, FuzzedInstruction::Load(_, _, _)) {
-                return 2;
+    prog.iter()
+        .map(|insn| {
+            if should_skip_instruction(insn, sbpf_version) {
+                0
+            } else {
+                // LDDW instructions take 2 slots
+                #[cfg(feature = "only-verified")]
+                if matches!(insn, FuzzedInstruction::Load(_, _, _)) {
+                    return 2;
+                }
+                1
             }
-            1
-        }
-    }).sum()
+        })
+        .sum()
 }
 
-pub fn make_program(prog: &FuzzProgram, sbpf_version: solana_sbpf::program::SBPFVersion) -> BpfCode {
+pub fn make_program(
+    prog: &FuzzProgram,
+    sbpf_version: solana_sbpf::program::SBPFVersion,
+) -> BpfCode {
     let mut code = BpfCode::new(sbpf_version);
     let len = calculate_length(prog, sbpf_version);
     let mut pos = 0;
@@ -314,9 +347,9 @@ pub fn make_program(prog: &FuzzProgram, sbpf_version: solana_sbpf::program::SBPF
             #[cfg(not(feature = "only-verified"))]
             FuzzedInstruction::LoadInd(m, s, imm) => {
                 code.load_ind(*m)
-                .set_src(s.to_src())
-                .set_imm(*imm as i64)
-                .push();
+                    .set_src(s.to_src())
+                    .set_imm(*imm as i64)
+                    .push();
             }
             #[cfg(not(feature = "only-verified"))]
             FuzzedInstruction::LoadX(d, m, s, off) => {
@@ -406,7 +439,10 @@ pub fn make_program(prog: &FuzzProgram, sbpf_version: solana_sbpf::program::SBPF
                 };
             }
             FuzzedInstruction::Hor64Imm(d, imm) => {
-                code.hor64_imm().set_dst(d.to_dst()).set_imm(*imm as i64).push();
+                code.hor64_imm()
+                    .set_dst(d.to_dst())
+                    .set_imm(*imm as i64)
+                    .push();
             }
             #[cfg(feature = "only-verified")]
             FuzzedInstruction::StackAdjust(factor) => {

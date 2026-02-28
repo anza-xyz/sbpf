@@ -52,6 +52,18 @@ pub fn get_runtime_environment_key() -> i32 {
     0
 }
 
+/// Specify the execution method.
+pub enum ExecutionMode {
+    /// Execute the program in an interpreted mode.
+    Interpreted,
+    /// Execute the program in JIT mode.
+    ///
+    /// The program must be JIT compiled.
+    Jit,
+    /// Allow JIT execution, if compiled. Otherwise fallback to interpreted.
+    PreferJit,
+}
+
 /// VM configuration settings
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
@@ -231,7 +243,7 @@ pub enum RuntimeEnvironmentSlot {
 ///     memory_region::{MemoryMapping, MemoryRegion},
 ///     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
 ///     verifier::RequisiteVerifier,
-///     vm::{Config, EbpfVm},
+///     vm::{Config, EbpfVm, ExecutionMode},
 /// };
 /// use test_utils::TestContextObject;
 ///
@@ -268,7 +280,10 @@ pub enum RuntimeEnvironmentSlot {
 ///
 /// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, memory_mapping, stack_len);
 ///
-/// let (instruction_count, result) = vm.execute_program(&executable, true);
+/// let (instruction_count, result) = vm.execute_program(
+///     &executable,
+///     &mut ExecutionMode::Interpreted
+/// );
 /// assert_eq!(instruction_count, 2);
 /// assert_eq!(result.unwrap(), 0);
 /// ```
@@ -356,11 +371,14 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
 
     /// Execute the program
     ///
-    /// If interpreted = `false` then the JIT compiled executable is used.
+    /// Use `mode` parameter to request a specific execution type. This function will write back
+    /// the execution mode used back to the reference passed in.
+    ///
+    /// Returns the instruction meter count (CUs) and the execution result of the program.
     pub fn execute_program(
         &mut self,
         executable: &Executable<C>,
-        interpreted: bool,
+        mode: &mut ExecutionMode,
     ) -> (u64, ProgramResult) {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
@@ -369,41 +387,46 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
-        if interpreted {
-            #[cold]
-            #[inline(never)]
-            #[cfg(feature = "debugger")]
-            fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
-                let debug_port = interpreter.vm.debug_port.clone();
-                if let Some(debug_port) = debug_port {
-                    crate::debugger::execute(&mut interpreter, debug_port);
-                } else {
-                    while interpreter.step() {}
+
+        'execute: {
+            match *mode {
+                ExecutionMode::Interpreted => {}
+
+                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                ExecutionMode::PreferJit => {
+                    if let Some(compiled_program) = executable.get_compiled_program() {
+                        *mode = ExecutionMode::Jit;
+                        break 'execute compiled_program.invoke(config, self, self.registers);
+                    }
                 }
+                #[cfg(not(all(
+                    feature = "jit",
+                    not(target_os = "windows"),
+                    target_arch = "x86_64"
+                )))]
+                ExecutionMode::PreferJit => {}
+
+                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                ExecutionMode::Jit => {
+                    let Some(compiled_program) = executable.get_compiled_program() else {
+                        return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
+                    };
+                    *mode = ExecutionMode::Jit;
+                    break 'execute compiled_program.invoke(config, self, self.registers);
+                }
+                #[cfg(not(all(
+                    feature = "jit",
+                    not(target_os = "windows"),
+                    target_arch = "x86_64"
+                )))]
+                ExecutionMode::Jit => return (0, ProgramResult::Err(EbpfError::JitNotCompiled)),
             }
-            #[cold]
-            #[inline(never)]
-            #[cfg(not(feature = "debugger"))]
-            fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
-                while interpreter.step() {}
-            }
+
+            *mode = ExecutionMode::Interpreted;
             let interpreter = Interpreter::new(self, executable, self.registers);
-            run_interpreter(interpreter);
-        } else {
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-            {
-                let compiled_program = executable.get_compiled_program();
-                let compiled_program = match compiled_program {
-                    Some(compiled_program) => compiled_program,
-                    None => return (0, ProgramResult::Err(EbpfError::JitNotCompiled)),
-                };
-                compiled_program.invoke(config, self, self.registers);
-            }
-            #[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64")))]
-            {
-                return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
-            }
-        };
+            break 'execute run_interpreter(interpreter);
+        }
+
         let instruction_count = if config.enable_instruction_meter {
             self.context_object_pointer.consume(self.due_insn_count);
             initial_insn_count.saturating_sub(self.context_object_pointer.get_remaining())
@@ -431,4 +454,23 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             self.registers[5],
         );
     }
+}
+
+#[cold]
+#[inline(never)]
+#[cfg(feature = "debugger")]
+fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
+    let debug_port = interpreter.vm.debug_port.clone();
+    if let Some(debug_port) = debug_port {
+        crate::debugger::execute(&mut interpreter, debug_port);
+    } else {
+        while interpreter.step() {}
+    }
+}
+
+#[cold]
+#[inline(never)]
+#[cfg(not(feature = "debugger"))]
+fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
+    while interpreter.step() {}
 }

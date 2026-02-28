@@ -3097,6 +3097,8 @@ fn test_tcp_sack_nomatch() {
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 fn execute_generated_program(prog: &[u8]) -> bool {
+    use solana_sbpf::vm::ExecutionMode;
+
     let max_instruction_count = 1024;
     let mem_size = 1024 * 1024;
     let executable = Executable::<TestContextObject>::from_text_bytes(
@@ -3108,9 +3110,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         SBPFVersion::V4,
         FunctionRegistry::default(),
     );
-    let executable = if let Ok(executable) = executable {
-        executable
-    } else {
+    let Ok(executable) = executable else {
         return false;
     };
     if executable.verify::<RequisiteVerifier>().is_err() || executable.jit_compile().is_err() {
@@ -3130,7 +3130,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
             None
         );
         let (instruction_count_interpreter, result_interpreter) =
-            vm.execute_program(&executable, true);
+            vm.execute_program(&executable, &mut ExecutionMode::Interpreted);
         let trace_interpreter = vm.register_trace.clone();
         (
             instruction_count_interpreter,
@@ -3150,7 +3150,8 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         vec![mem_region],
         None
     );
-    let (instruction_count_jit, result_jit) = vm.execute_program(&executable, false);
+    let (instruction_count_jit, result_jit) =
+        vm.execute_program(&executable, &mut ExecutionMode::Jit);
     let trace_jit = &vm.register_trace;
     debug_assert!(!trace_interpreter.is_empty());
     if format!("{result_interpreter:?}") != format!("{result_jit:?}")
