@@ -81,6 +81,7 @@ fn test_builtin_program_eq() {
 #[test]
 fn test_gdbstub_architecture() {
     use byteorder::{ReadBytesExt, WriteBytesExt};
+    use solana_sbpf::vm::ExecutionMode;
     use std::io::{BufRead, BufReader, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::time::Duration;
@@ -133,7 +134,9 @@ fn test_gdbstub_architecture() {
             vm.context_object_pointer.remaining = 10_000_000_000;
             vm.debug_port = Some(debug_port);
             vm.debug_metadata = Some(METADATA.into());
-            vm.execute_program(&executable, true).1.unwrap();
+            vm.execute_program(&executable, &mut ExecutionMode::Interpreted)
+                .1
+                .unwrap();
         });
         // If this is set leave the stub port listening hence
         // providing a simple test environment for playing with,
