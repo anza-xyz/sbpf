@@ -39,8 +39,8 @@ jobs:
         cargo build --verbose
         cargo build --features="shuttle-test"
         cargo test --verbose
-        cargo test --all-features --verbose
         cargo test --test exercise_instructions --verbose
+        cargo test --all-features --verbose
       shell: bash
     - name: CLI - Lint
       run: |
