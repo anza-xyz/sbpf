@@ -24,8 +24,8 @@ although the JIT-compiler does not work with Windows at this time.
 
 ## SBPF feature description
 
-The Solana-versioned BPF, namely SBPF, has four versions, each with different 
-functionality. In the table below, we give an overview of which features are 
+The Solana-versioned BPF, namely SBPF, has four versions, each with different
+functionality. In the table below, we give an overview of which features are
 available for each version.
 
 | Feature                       | v0 | v1  | v2  | v3  |
@@ -45,7 +45,7 @@ so it should work out of the box by adding it as a dependency in your
 
 ```toml
 [dependencies]
-solana-sbpf = "0.14.4"
+solana-sbpf = "0.15.0"
 ```
 
 You can also use the development version from this GitHub repository. This
