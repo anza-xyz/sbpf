@@ -195,3 +195,21 @@ declare_builtin_function!(
         Ok(0)
     }
 );
+
+declare_builtin_function!(
+    /// A syscall that uses generics, just for testing the expansion produces valid Rust code.
+    SyscallGenericTest<G: Clone>,
+    fn rust(
+        _context_object: &mut TestContextObject,
+        arg1: u64,
+        arg2: u64,
+        arg3: u64,
+        arg4: u64,
+        arg5: u64,
+        _memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Box<dyn std::error::Error>> {
+        loop {
+            let _ = G::clone;
+        }
+    }
+);

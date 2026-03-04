@@ -348,10 +348,12 @@ macro_rules! declare_builtin_function {
         $jit:ident : &mut $crate::program::JitCompiler<$ContextObject2:ty>,
     ) { $($codegen:tt)* }) => {
         $(#[$attr])*
-        pub struct $name {}
-        impl $name {
+        pub struct $name $(<$($generic_ident),+>)? {
+            $(_phantom: std::marker::PhantomData<($($generic_ident,)+)>)?
+        }
+        impl $(<$($generic_ident : $generic_type),+>)? $name $(<$($generic_ident),+>)? {
             /// Rust interface
-            pub fn rust $(<$($generic_ident : $generic_type),+>)? (
+            pub fn rust(
                 $vm: &mut $ContextObject,
                 $arg_a: u64,
                 $arg_b: u64,
@@ -364,7 +366,7 @@ macro_rules! declare_builtin_function {
             }
             /// VM interface
             #[allow(clippy::too_many_arguments)]
-            pub fn vm $(<$($generic_ident : $generic_type),+>)? (
+            pub fn vm(
                 $vm: *mut $crate::vm::EbpfVm<$ContextObject>,
                 $arg_a: u64,
                 $arg_b: u64,
@@ -380,7 +382,7 @@ macro_rules! declare_builtin_function {
                 if config.enable_instruction_meter {
                     vm.context_object_pointer.consume(vm.previous_instruction_meter - vm.due_insn_count);
                 }
-                let converted_result: $crate::error::ProgramResult = Self::rust $(::<$($generic_ident),+>)?(
+                let converted_result: $crate::error::ProgramResult = Self::rust(
                     vm.context_object_pointer, $arg_a, $arg_b, $arg_c, $arg_d, $arg_e, &mut vm.memory_mapping,
                 ).map_err(|err| $crate::error::EbpfError::SyscallError(err)).into();
                 vm.program_result = converted_result;
@@ -395,8 +397,10 @@ macro_rules! declare_builtin_function {
                 $($codegen)*
             }
             /// Generate an entry for the syscall registry
-            pub const REGISTRY_ENTRY: ($crate::program::BuiltinFunction<$ContextObject>, $crate::program::BuiltinCodegen<$ContextObject>)
-                = (Self::vm, Self::codegen);
+            pub const REGISTRY_ENTRY: (
+                $crate::program::BuiltinFunction<$ContextObject>,
+                $crate::program::BuiltinCodegen<$ContextObject>
+            ) = (Self::vm, Self::codegen);
         }
     };
     ($(#[$attr:meta])* $name:ident $(<$($generic_ident:tt : $generic_type:tt),+>)?, fn rust(
@@ -408,7 +412,7 @@ macro_rules! declare_builtin_function {
         $arg_e:ident : u64,
         $memory_mapping:ident : &mut $MemoryMapping:ty,
     ) -> $Result:ty { $($rust:tt)* }) => {
-        declare_builtin_function!(
+        $crate::declare_builtin_function!(
             $(#[$attr])* $name $(<$($generic_ident : $generic_type),+>)?,
             fn rust(
                 $vm : &mut $ContextObject,
