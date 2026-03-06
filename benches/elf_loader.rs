@@ -21,7 +21,7 @@ use test_utils::{syscalls, TestContextObject};
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
     let mut loader = BuiltinProgram::new_loader(Config::default());
-    syscalls::SyscallString::register_to(&mut loader, "log").unwrap();
+    syscalls::SyscallString::register(&mut loader, "log").unwrap();
     Arc::new(loader)
 }
 

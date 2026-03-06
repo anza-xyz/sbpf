@@ -2351,7 +2351,7 @@ declare_builtin_function!(
                 config.enabled_sbpf_versions = SBPFVersion::V3..=SBPFVersion::V4;
             };
             let mut loader = BuiltinProgram::new_loader(config);
-            SyscallNestedVm::register_to(&mut loader, "nested_vm_syscall").unwrap();
+            SyscallNestedVm::register(&mut loader, "nested_vm_syscall").unwrap();
             let mut executable = assemble::<TestContextObject>(
                 "
                 add64 r10, 0

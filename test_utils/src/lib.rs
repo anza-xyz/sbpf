@@ -438,7 +438,7 @@ macro_rules! test_interpreter_and_jit_asm {
 #[macro_export]
 macro_rules! test_syscall_asm {
     (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
-        let _ = <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_, _>>::register_to(&mut $loader, $syscall_name).unwrap();
+        let _ = <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut config = Config {
@@ -458,7 +458,7 @@ macro_rules! test_syscall_asm {
 #[macro_export]
 macro_rules! test_interpreter_and_jit_elf {
     (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
-        <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_, _>>::register_to(&mut $loader, $syscall_name).unwrap();
+        <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
     };
     ($source:expr, $config:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut file = File::open($source).unwrap();

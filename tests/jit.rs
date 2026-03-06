@@ -21,7 +21,7 @@ use test_utils::{syscalls, TestContextObject};
 fn create_mockup_executable(config: Config, program: &[u8]) -> Executable<TestContextObject> {
     let sbpf_version = *config.enabled_sbpf_versions.end();
     let mut loader = BuiltinProgram::new_loader(config);
-    syscalls::SyscallGatherBytes::register_to(&mut loader, "gather_bytes").unwrap();
+    syscalls::SyscallGatherBytes::register(&mut loader, "gather_bytes").unwrap();
     let mut function_registry = FunctionRegistry::default();
     function_registry
         .register_function(8, *b"function_foo", 8)

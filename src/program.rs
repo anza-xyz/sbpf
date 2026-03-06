@@ -308,26 +308,36 @@ impl<C: ContextObject> BuiltinProgram<C> {
     }
 
     /// Register a function both in the sparse and dense registries
-    pub fn register_function<
-        E: Into<Box<dyn std::error::Error>>,
-        BFD: BuiltinFunctionDefinition<C, E>,
-    >(
+    ///
+    /// This is a low-level function. Prefer using [`Self::register_definition`].
+    pub fn register_function(
         &mut self,
         name: &str,
+        entry: (BuiltinFunction<C>, BuiltinCodegen<C>),
     ) -> Result<(), ElfError> {
         let key = ebpf::hash_symbol_name(name.as_bytes());
         self.sparse_registry
-            .register_function(key, name, (BFD::vm, BFD::codegen))
+            .register_function(key, name, entry)
             .map(|_| ())
+    }
+
+    /// Register a function both in the sparse and dense registries
+    pub fn register_definition<BFD: BuiltinFunctionDefinition<C>>(
+        &mut self,
+        name: &str,
+    ) -> Result<(), ElfError> {
+        self.register_function(name, (BFD::vm, BFD::codegen))
     }
 }
 
 /// Native built-in functions that can be made available to programs to call.
-pub trait BuiltinFunctionDefinition<C, E>
+pub trait BuiltinFunctionDefinition<C>
 where
     C: crate::vm::ContextObject,
-    E: Into<Box<dyn core::error::Error>>,
 {
+    /// Error type returned by this built-in function.
+    type Error: Into<Box<dyn core::error::Error>>;
+
     /// The Rust side of the function logic.
     ///
     /// This is the only method you are required to override.
@@ -339,7 +349,7 @@ where
         arg_d: u64,
         arg_e: u64,
         memory_mapping: &mut MemoryMapping,
-    ) -> Result<u64, E>;
+    ) -> Result<u64, Self::Error>;
 
     /// The VM wrapper.
     #[expect(clippy::arithmetic_side_effects)]
@@ -381,11 +391,11 @@ where
     }
 
     /// Register this syscall to the provided program.
-    fn register_to(program: &mut BuiltinProgram<C>, name: &str) -> Result<(), ElfError>
+    fn register(program: &mut BuiltinProgram<C>, name: &str) -> Result<(), ElfError>
     where
         Self: Sized,
     {
-        program.register_function::<E, Self>(name)
+        program.register_definition::<Self>(name)
     }
 }
 
@@ -430,9 +440,10 @@ macro_rules! declare_builtin_function {
             $(std::marker::PhantomData<($($generic_ident,)+)>)?
         );
         impl $(<$($generic_ident : $generic_type),+>)?
-            $crate::program::BuiltinFunctionDefinition<$ContextObject, $Err> for
+            $crate::program::BuiltinFunctionDefinition<$ContextObject> for
             $name $(<$($generic_ident),+>)?
         {
+            type Error = $Err;
             fn rust(
                 $vm: &mut $ContextObject,
                 $arg_a: u64,
