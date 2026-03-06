@@ -384,8 +384,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         if config.noop_instruction_rate != 0 {
             code_length_estimate += code_length_estimate / config.noop_instruction_rate as usize;
         }
-        if config.instruction_meter_checkpoint_distance != 0 {
-            code_length_estimate += pc / config.instruction_meter_checkpoint_distance * MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT;
+        if let Some(q) = pc.checked_div(config.instruction_meter_checkpoint_distance) {
+            code_length_estimate += q * MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT;
         }
         // Relative jump destinations limit the maximum output size
         debug_assert!(code_length_estimate < (i32::MAX as usize));
@@ -820,7 +820,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     if self.executable.get_sbpf_version().static_syscalls() {
                         let target_pc = (self.pc as i64).saturating_add(insn.imm).saturating_add(1);
                         if ebpf::is_pc_in_program(self.program, target_pc as usize) && insn.src == 1 {
-                            self.emit_internal_call(Value::Constant64(target_pc as i64, true));
+                            self.emit_internal_call(Value::Constant64(target_pc, true));
                             resolved = true;
                         }
                     } else if let Some((_function_name, target_pc)) =
@@ -1562,7 +1562,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Setup the frame pointer for the new frame. What we do depends on whether we're using dynamic or fixed frames.
         if !self.executable.get_sbpf_version().manual_stack_frame_bump() {
             // With fixed frames we start the new frame at the next fixed offset
-            let num_frames = if self.executable.get_sbpf_version().stack_frame_gaps() 
+            let num_frames = if self.executable.get_sbpf_version().stack_frame_gaps()
                 && self.config.enable_stack_frame_gaps {
                 2
             } else {
