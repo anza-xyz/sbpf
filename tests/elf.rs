@@ -20,8 +20,8 @@ type ElfExecutable = Executable<TestContextObject>;
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
     let mut loader = BuiltinProgram::new_loader(Config::default());
-    syscalls::SyscallString::register_to(&mut loader, "log").unwrap();
-    syscalls::SyscallU64::register_to(&mut loader, "log_64").unwrap();
+    syscalls::SyscallString::register(&mut loader, "log").unwrap();
+    syscalls::SyscallU64::register(&mut loader, "log_64").unwrap();
     Arc::new(loader)
 }
 

@@ -58,11 +58,11 @@ fn test_builtin_program_eq() {
     let mut builtin_program_a = BuiltinProgram::new_loader(Config::default());
     let mut builtin_program_b = BuiltinProgram::new_loader(Config::default());
     let mut builtin_program_c = BuiltinProgram::new_loader(Config::default());
-    syscalls::SyscallString::register_to(&mut builtin_program_a, "log").unwrap();
-    syscalls::SyscallU64::register_to(&mut builtin_program_a, "log_64").unwrap();
-    syscalls::SyscallU64::register_to(&mut builtin_program_b, "log_64").unwrap();
-    syscalls::SyscallString::register_to(&mut builtin_program_b, "log").unwrap();
-    syscalls::SyscallU64::register_to(&mut builtin_program_c, "log_64").unwrap();
+    syscalls::SyscallString::register(&mut builtin_program_a, "log").unwrap();
+    syscalls::SyscallU64::register(&mut builtin_program_a, "log_64").unwrap();
+    syscalls::SyscallU64::register(&mut builtin_program_b, "log_64").unwrap();
+    syscalls::SyscallString::register(&mut builtin_program_b, "log").unwrap();
+    syscalls::SyscallU64::register(&mut builtin_program_c, "log_64").unwrap();
     assert_eq!(builtin_program_a, builtin_program_b);
     assert_ne!(builtin_program_a, builtin_program_c);
 }
