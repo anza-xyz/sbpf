@@ -23,7 +23,7 @@ use solana_sbpf::{
     elf::Executable,
     error::{EbpfError, ProgramResult},
     memory_region::{AccessType, MemoryMapping, MemoryRegion},
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
     vm::{Config, ContextObject},
@@ -1625,8 +1625,8 @@ fn test_stack2() {
         exit",
         [],
         (
-            "bpf_mem_frob" => syscalls::SyscallMemFrob::REGISTRY_ENTRY,
-            "bpf_gather_bytes" => syscalls::SyscallGatherBytes::REGISTRY_ENTRY,
+            "bpf_mem_frob" => syscalls::SyscallMemFrob,
+            "bpf_gather_bytes" => syscalls::SyscallGatherBytes,
         ),
         TestContextObject::new(17),
         ProgramResult::Ok(0x01020304),
@@ -1668,7 +1668,7 @@ fn test_string_stack() {
         exit",
         [],
         (
-            "bpf_str_cmp" => syscalls::SyscallStrCmp::REGISTRY_ENTRY,
+            "bpf_str_cmp" => syscalls::SyscallStrCmp,
         ),
         TestContextObject::new(29),
         ProgramResult::Ok(0x0),
@@ -2035,7 +2035,7 @@ fn test_syscall_parameter_on_stack() {
         exit",
         [],
         (
-            "bpf_syscall_string" => syscalls::SyscallString::REGISTRY_ENTRY,
+            "bpf_syscall_string" => syscalls::SyscallString,
         ),
         TestContextObject::new(7),
         ProgramResult::Ok(0),
@@ -2228,7 +2228,7 @@ fn test_err_syscall_string() {
         exit",
         [72, 101, 108, 108, 111],
         (
-            "bpf_syscall_string" => syscalls::SyscallString::REGISTRY_ENTRY,
+            "bpf_syscall_string" => syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -2246,7 +2246,7 @@ fn test_syscall_string() {
         exit",
         [72, 101, 108, 108, 111],
         (
-            "bpf_syscall_string" => syscalls::SyscallString::REGISTRY_ENTRY,
+            "bpf_syscall_string" => syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -2268,7 +2268,7 @@ fn test_syscall() {
         exit",
         [],
         (
-            "bpf_syscall_u64" => syscalls::SyscallU64::REGISTRY_ENTRY,
+            "bpf_syscall_u64" => syscalls::SyscallU64,
         ),
         TestContextObject::new(9),
         ProgramResult::Ok(0),
@@ -2289,7 +2289,7 @@ fn test_call_gather_bytes() {
         exit",
         [],
         (
-            "bpf_gather_bytes" => syscalls::SyscallGatherBytes::REGISTRY_ENTRY,
+            "bpf_gather_bytes" => syscalls::SyscallGatherBytes,
         ),
         TestContextObject::new(8),
         ProgramResult::Ok(0x0102030405),
@@ -2312,7 +2312,7 @@ fn test_call_memfrob() {
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, //
         ],
         (
-            "bpf_mem_frob" => syscalls::SyscallMemFrob::REGISTRY_ENTRY,
+            "bpf_mem_frob" => syscalls::SyscallMemFrob,
         ),
         TestContextObject::new(8),
         ProgramResult::Ok(0x102292e2f2c0708),
@@ -2351,7 +2351,7 @@ declare_builtin_function!(
                 config.enabled_sbpf_versions = SBPFVersion::V3..=SBPFVersion::V4;
             };
             let mut loader = BuiltinProgram::new_loader(config);
-            loader.register_function("nested_vm_syscall", SyscallNestedVm::REGISTRY_ENTRY).unwrap();
+            SyscallNestedVm::register(&mut loader, "nested_vm_syscall").unwrap();
             let mut executable = assemble::<TestContextObject>(
                 "
                 add64 r10, 0
@@ -2466,7 +2466,7 @@ fn test_instruction_count_syscall() {
         exit",
         [72, 101, 108, 108, 111],
         (
-            "bpf_syscall_string" => syscalls::SyscallString::REGISTRY_ENTRY,
+            "bpf_syscall_string" => syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -2484,7 +2484,7 @@ fn test_err_instruction_count_syscall_capped() {
         exit",
         [72, 101, 108, 108, 111],
         (
-            "bpf_syscall_string" => syscalls::SyscallString::REGISTRY_ENTRY,
+            "bpf_syscall_string" => syscalls::SyscallString,
         ),
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
@@ -2670,7 +2670,7 @@ fn test_syscall_static() {
         config,
         [],
         (
-            "log" => syscalls::SyscallString::REGISTRY_ENTRY,
+            "log" => syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -2688,7 +2688,7 @@ fn test_syscall_reloc_64_32() {
         config,
         [],
         (
-            "log" => syscalls::SyscallString::REGISTRY_ENTRY,
+            "log" => syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -3220,7 +3220,7 @@ fn test_call_imm_does_not_dispatch_syscalls() {
         exit",
         [],
         (
-            "bpf_syscall_string" => syscalls::SyscallString::REGISTRY_ENTRY,
+            "bpf_syscall_string" => syscalls::SyscallString,
         ),
         TestContextObject::new(6),
         ProgramResult::Ok(42),
@@ -3870,7 +3870,7 @@ fn test_symbol_relocation() {
         exit",
         [72, 101, 108, 108, 111],
         (
-            "bpf_syscall_string" => syscalls::SyscallString::REGISTRY_ENTRY,
+            "bpf_syscall_string" => syscalls::SyscallString,
         ),
         TestContextObject::new(7),
         ProgramResult::Ok(0),

@@ -28,7 +28,7 @@ use solana_sbpf::{
     assembler::assemble,
     ebpf,
     elf::Executable,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
     verifier::{RequisiteVerifier, Verifier, VerifierError},
     vm::Config,
 };
@@ -336,9 +336,7 @@ fn test_verifier_known_syscall() {
     ];
 
     let mut loader = BuiltinProgram::new_loader(Config::default());
-    loader
-        .register_function("gather_bytes", syscalls::SyscallString::REGISTRY_ENTRY)
-        .unwrap();
+    syscalls::SyscallString::register(&mut loader, "gather_bytes").unwrap();
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
         Arc::new(loader),
