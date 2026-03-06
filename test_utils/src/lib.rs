@@ -437,10 +437,10 @@ macro_rules! test_interpreter_and_jit_asm {
 
 #[macro_export]
 macro_rules! test_syscall_asm {
-    (register, $loader:expr, $syscall_name:expr => $syscall_function:expr) => {
-        let _ = $loader.register_function($syscall_name, $syscall_function).unwrap();
+    (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
+        let _ = <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_, _>>::register_to(&mut $loader, $syscall_name).unwrap();
     };
-    ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+    ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut config = Config {
             enable_register_tracing: true,
             ..Config::default()
@@ -448,7 +448,7 @@ macro_rules! test_syscall_asm {
         for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
             config.enabled_sbpf_versions = sbpf_version..=sbpf_version;
             let mut loader = BuiltinProgram::new_loader(config.clone());
-            $(test_syscall_asm!(register, loader, $syscall_name => $syscall_function);)*
+            $(test_syscall_asm!(register, loader, $syscall_name => $syscall);)*
             let mut executable = assemble($source, Arc::new(loader)).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
         }
@@ -457,17 +457,17 @@ macro_rules! test_syscall_asm {
 
 #[macro_export]
 macro_rules! test_interpreter_and_jit_elf {
-    (register, $loader:expr, $syscall_name:expr => $syscall_function:expr) => {
-        $loader.register_function($syscall_name, $syscall_function).unwrap();
+    (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
+        <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_, _>>::register_to(&mut $loader, $syscall_name).unwrap();
     };
-    ($source:expr, $config:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+    ($source:expr, $config:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut file = File::open($source).unwrap();
         let mut elf = Vec::new();
         file.read_to_end(&mut elf).unwrap();
         #[allow(unused_mut)]
         {
             let mut loader = BuiltinProgram::new_loader($config);
-            $(test_interpreter_and_jit_elf!(register, loader, $syscall_name => $syscall_function);)*
+            $(test_interpreter_and_jit_elf!(register, loader, $syscall_name => $syscall);)*
             let mut executable = Executable::<TestContextObject>::from_elf(&elf, Arc::new(loader)).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
         }

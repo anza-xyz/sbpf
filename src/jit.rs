@@ -384,6 +384,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         if config.noop_instruction_rate != 0 {
             code_length_estimate += code_length_estimate / config.noop_instruction_rate as usize;
         }
+        #[expect(clippy::manual_checked_ops)]
         if config.instruction_meter_checkpoint_distance != 0 {
             code_length_estimate += pc / config.instruction_meter_checkpoint_distance * MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT;
         }
@@ -819,6 +820,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     // Internal call
                     if self.executable.get_sbpf_version().static_syscalls() {
                         let target_pc = (self.pc as i64).saturating_add(insn.imm).saturating_add(1);
+                        #[allow(clippy::unnecessary_cast)]
                         if ebpf::is_pc_in_program(self.program, target_pc as usize) && insn.src == 1 {
                             self.emit_internal_call(Value::Constant64(target_pc as i64, true));
                             resolved = true;
@@ -1562,7 +1564,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Setup the frame pointer for the new frame. What we do depends on whether we're using dynamic or fixed frames.
         if !self.executable.get_sbpf_version().manual_stack_frame_bump() {
             // With fixed frames we start the new frame at the next fixed offset
-            let num_frames = if self.executable.get_sbpf_version().stack_frame_gaps() 
+            let num_frames = if self.executable.get_sbpf_version().stack_frame_gaps()
                 && self.config.enable_stack_frame_gaps {
                 2
             } else {

@@ -10,7 +10,7 @@ use solana_sbpf::{
         Elf64, ElfParserError, SECTION_NAME_LENGTH_MAXIMUM,
     },
     memory_region::{AccessType, MemoryMapping},
-    program::{BuiltinProgram, SBPFVersion},
+    program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
     vm::Config,
 };
 use std::{fs::File, io::Read, sync::Arc};
@@ -20,12 +20,8 @@ type ElfExecutable = Executable<TestContextObject>;
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
     let mut loader = BuiltinProgram::new_loader(Config::default());
-    loader
-        .register_function("log", syscalls::SyscallString::REGISTRY_ENTRY)
-        .unwrap();
-    loader
-        .register_function("log_64", syscalls::SyscallU64::REGISTRY_ENTRY)
-        .unwrap();
+    syscalls::SyscallString::register_to(&mut loader, "log").unwrap();
+    syscalls::SyscallU64::register_to(&mut loader, "log_64").unwrap();
     Arc::new(loader)
 }
 
