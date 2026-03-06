@@ -11,7 +11,7 @@ use solana_sbpf::{
         MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT, MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH,
         MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION,
     },
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::CfgNode,
     vm::Config,
 };
@@ -21,9 +21,7 @@ use test_utils::{syscalls, TestContextObject};
 fn create_mockup_executable(config: Config, program: &[u8]) -> Executable<TestContextObject> {
     let sbpf_version = *config.enabled_sbpf_versions.end();
     let mut loader = BuiltinProgram::new_loader(config);
-    loader
-        .register_function("gather_bytes", syscalls::SyscallGatherBytes::REGISTRY_ENTRY)
-        .unwrap();
+    syscalls::SyscallGatherBytes::register_to(&mut loader, "gather_bytes").unwrap();
     let mut function_registry = FunctionRegistry::default();
     function_registry
         .register_function(8, *b"function_foo", 8)
