@@ -3,6 +3,7 @@ use {
     crate::{
         ebpf,
         elf::ElfError,
+        memory_region::MemoryMapping,
         vm::{Config, ContextObject, EbpfVm},
     },
     std::collections::{btree_map::Entry, BTreeMap},
@@ -307,6 +308,8 @@ impl<C: ContextObject> BuiltinProgram<C> {
     }
 
     /// Register a function both in the sparse and dense registries
+    ///
+    /// This is a low-level function. Prefer using [`Self::register_definition`].
     pub fn register_function(
         &mut self,
         name: &str,
@@ -316,6 +319,83 @@ impl<C: ContextObject> BuiltinProgram<C> {
         self.sparse_registry
             .register_function(key, name, entry)
             .map(|_| ())
+    }
+
+    /// Register a function both in the sparse and dense registries
+    pub fn register_definition<BFD: BuiltinFunctionDefinition<C>>(
+        &mut self,
+        name: &str,
+    ) -> Result<(), ElfError> {
+        self.register_function(name, (BFD::vm, BFD::codegen))
+    }
+}
+
+/// Native built-in functions that can be made available to programs to call.
+pub trait BuiltinFunctionDefinition<C>
+where
+    C: crate::vm::ContextObject,
+{
+    /// Error type returned by this built-in function.
+    type Error: Into<Box<dyn core::error::Error>>;
+
+    /// The Rust side of the function logic.
+    ///
+    /// This is the only method you are required to override.
+    fn rust(
+        vm: &mut C,
+        arg_a: u64,
+        arg_b: u64,
+        arg_c: u64,
+        arg_d: u64,
+        arg_e: u64,
+        memory_mapping: &mut MemoryMapping,
+    ) -> Result<u64, Self::Error>;
+
+    /// The VM wrapper.
+    #[expect(clippy::arithmetic_side_effects)]
+    fn vm(vm: *mut crate::vm::EbpfVm<C>, a: u64, b: u64, c: u64, d: u64, e: u64) {
+        let vm = unsafe {
+            &mut *(vm
+                .cast::<u64>()
+                .offset(-(crate::vm::get_runtime_environment_key() as isize))
+                .cast::<crate::vm::EbpfVm<C>>())
+        };
+        let config = vm.loader.get_config();
+        if config.enable_instruction_meter {
+            vm.context_object_pointer
+                .consume(vm.previous_instruction_meter - vm.due_insn_count);
+        }
+        let converted_result: crate::error::ProgramResult = Self::rust(
+            vm.context_object_pointer,
+            a,
+            b,
+            c,
+            d,
+            e,
+            &mut vm.memory_mapping,
+        )
+        .map_err(|err| crate::error::EbpfError::SyscallError(err.into()))
+        .into();
+        vm.program_result = converted_result;
+        if config.enable_instruction_meter {
+            vm.previous_instruction_meter = vm.context_object_pointer.get_remaining();
+        }
+    }
+
+    /// Hook for the JIT compiler on how to codegen this built-in function.
+    ///
+    /// You could opt to codegen it in-line, but do note that defining the other methods is still
+    /// required for non-JIT execution modes.
+    fn codegen(jit: &mut JitCompiler<C>) {
+        jit.emit_external_call(Self::vm);
+    }
+
+    /// Register this syscall to the provided program.
+    fn register(program: &mut BuiltinProgram<C>, name: &str) -> Result<(), ElfError>
+    where
+        Self: Sized,
+    {
+        program.register_definition::<Self>(name)
     }
 }
 
@@ -335,25 +415,36 @@ impl<C: ContextObject> std::fmt::Debug for BuiltinProgram<C> {
 /// Generates an adapter for a BuiltinFunction between the Rust and the VM interface
 #[macro_export]
 macro_rules! declare_builtin_function {
-    ($(#[$attr:meta])* $name:ident $(<$($generic_ident:tt : $generic_type:tt),+>)?, fn rust(
-        $vm:ident : &mut $ContextObject:ty,
-        $arg_a:ident : u64,
-        $arg_b:ident : u64,
-        $arg_c:ident : u64,
-        $arg_d:ident : u64,
-        $arg_e:ident : u64,
-        $memory_mapping:ident : &mut $MemoryMapping:ty,
-    ) -> $Result:ty { $($rust:tt)* }
-    fn codegen(
-        $jit:ident : &mut $crate::program::JitCompiler<$ContextObject2:ty>,
-    ) { $($codegen:tt)* }) => {
-        $(#[$attr])*
-        pub struct $name $(<$($generic_ident),+>)? {
-            $(_phantom: std::marker::PhantomData<($($generic_ident,)+)>)?
+    (
+        $(#[$attr:meta])*
+        $name:ident $(<$($generic_ident:tt : $generic_type:tt),+>)?,
+        fn rust(
+            $vm:ident : &mut $ContextObject:ty,
+            $arg_a:ident : u64,
+            $arg_b:ident : u64,
+            $arg_c:ident : u64,
+            $arg_d:ident : u64,
+            $arg_e:ident : u64,
+            $memory_mapping:ident : &mut $MemoryMapping:ty,
+        ) -> Result<$Ok:ty, $Err:ty> {
+            $($rust:tt)*
         }
-        impl $(<$($generic_ident : $generic_type),+>)? $name $(<$($generic_ident),+>)? {
-            /// Rust interface
-            pub fn rust(
+        $(fn codegen(
+            $jit:ident : &mut $crate::program::JitCompiler<$ContextObject2:ty>,
+        ) {
+            $($codegen:tt)*
+        })?
+    ) => {
+        $(#[$attr])*
+        pub struct $name $(<$($generic_ident),+>)? (
+            $(std::marker::PhantomData<($($generic_ident,)+)>)?
+        );
+        impl $(<$($generic_ident : $generic_type),+>)?
+            $crate::program::BuiltinFunctionDefinition<$ContextObject> for
+            $name $(<$($generic_ident),+>)?
+        {
+            type Error = $Err;
+            fn rust(
                 $vm: &mut $ContextObject,
                 $arg_a: u64,
                 $arg_b: u64,
@@ -361,75 +452,14 @@ macro_rules! declare_builtin_function {
                 $arg_d: u64,
                 $arg_e: u64,
                 $memory_mapping: &mut $MemoryMapping,
-            ) -> $Result {
+            ) -> core::result::Result<$Ok, $Err> {
                 $($rust)*
             }
-            /// VM interface
-            #[allow(clippy::too_many_arguments)]
-            pub fn vm(
-                $vm: *mut $crate::vm::EbpfVm<$ContextObject>,
-                $arg_a: u64,
-                $arg_b: u64,
-                $arg_c: u64,
-                $arg_d: u64,
-                $arg_e: u64,
-            ) {
-                use $crate::vm::ContextObject;
-                let vm = unsafe {
-                    &mut *($vm.cast::<u64>().offset(-($crate::vm::get_runtime_environment_key() as isize)).cast::<$crate::vm::EbpfVm<$ContextObject>>())
-                };
-                let config = vm.loader.get_config();
-                if config.enable_instruction_meter {
-                    vm.context_object_pointer.consume(vm.previous_instruction_meter - vm.due_insn_count);
-                }
-                let converted_result: $crate::error::ProgramResult = Self::rust(
-                    vm.context_object_pointer, $arg_a, $arg_b, $arg_c, $arg_d, $arg_e, &mut vm.memory_mapping,
-                ).map_err(|err| $crate::error::EbpfError::SyscallError(err)).into();
-                vm.program_result = converted_result;
-                if config.enable_instruction_meter {
-                    vm.previous_instruction_meter = vm.context_object_pointer.get_remaining();
-                }
-            }
-            /// JIT codegen interceptor
-            pub fn codegen(
+            $(fn codegen(
                 $jit: &mut $crate::program::JitCompiler<$ContextObject2>,
             ) {
                 $($codegen)*
-            }
-            /// Generate an entry for the syscall registry
-            pub const REGISTRY_ENTRY: (
-                $crate::program::BuiltinFunction<$ContextObject>,
-                $crate::program::BuiltinCodegen<$ContextObject>
-            ) = (Self::vm, Self::codegen);
+            })?
         }
-    };
-    ($(#[$attr:meta])* $name:ident $(<$($generic_ident:tt : $generic_type:tt),+>)?, fn rust(
-        $vm:ident : &mut $ContextObject:ty,
-        $arg_a:ident : u64,
-        $arg_b:ident : u64,
-        $arg_c:ident : u64,
-        $arg_d:ident : u64,
-        $arg_e:ident : u64,
-        $memory_mapping:ident : &mut $MemoryMapping:ty,
-    ) -> $Result:ty { $($rust:tt)* }) => {
-        $crate::declare_builtin_function!(
-            $(#[$attr])* $name $(<$($generic_ident : $generic_type),+>)?,
-            fn rust(
-                $vm : &mut $ContextObject,
-                $arg_a : u64,
-                $arg_b : u64,
-                $arg_c : u64,
-                $arg_d : u64,
-                $arg_e : u64,
-                $memory_mapping : &mut $MemoryMapping,
-            ) -> $Result {
-                $($rust)*
-            }
-            fn codegen(
-                jit : &mut $crate::program::JitCompiler<$ContextObject>,
-            ) {
-                jit.emit_external_call(Self::vm);
-            }
-        );
     };
 }

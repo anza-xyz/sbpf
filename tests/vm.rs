@@ -2,7 +2,7 @@
 
 use solana_sbpf::{
     elf::Executable,
-    program::BuiltinProgram,
+    program::{BuiltinFunctionDefinition, BuiltinProgram},
     vm::{Config, RuntimeEnvironmentSlot},
 };
 use std::{fs::File, io::Read, sync::Arc};
@@ -58,21 +58,11 @@ fn test_builtin_program_eq() {
     let mut builtin_program_a = BuiltinProgram::new_loader(Config::default());
     let mut builtin_program_b = BuiltinProgram::new_loader(Config::default());
     let mut builtin_program_c = BuiltinProgram::new_loader(Config::default());
-    builtin_program_a
-        .register_function("log", syscalls::SyscallString::REGISTRY_ENTRY)
-        .unwrap();
-    builtin_program_a
-        .register_function("log_64", syscalls::SyscallU64::REGISTRY_ENTRY)
-        .unwrap();
-    builtin_program_b
-        .register_function("log_64", syscalls::SyscallU64::REGISTRY_ENTRY)
-        .unwrap();
-    builtin_program_b
-        .register_function("log", syscalls::SyscallString::REGISTRY_ENTRY)
-        .unwrap();
-    builtin_program_c
-        .register_function("log_64", syscalls::SyscallU64::REGISTRY_ENTRY)
-        .unwrap();
+    syscalls::SyscallString::register(&mut builtin_program_a, "log").unwrap();
+    syscalls::SyscallU64::register(&mut builtin_program_a, "log_64").unwrap();
+    syscalls::SyscallU64::register(&mut builtin_program_b, "log_64").unwrap();
+    syscalls::SyscallString::register(&mut builtin_program_b, "log").unwrap();
+    syscalls::SyscallU64::register(&mut builtin_program_c, "log_64").unwrap();
     assert_eq!(builtin_program_a, builtin_program_b);
     assert_ne!(builtin_program_a, builtin_program_c);
 }
