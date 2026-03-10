@@ -819,7 +819,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     // Internal call
                     if self.executable.get_sbpf_version().static_syscalls() {
                         let target_pc = (self.pc as i64).saturating_add(insn.imm).saturating_add(1);
-                        #[allow(clippy::unnecessary_cast)]
                         if ebpf::is_pc_in_program(self.program, target_pc as usize) && insn.src == 1 {
                             self.emit_internal_call(Value::Constant64(target_pc, true));
                             resolved = true;
