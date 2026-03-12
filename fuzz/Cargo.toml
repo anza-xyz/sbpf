@@ -27,6 +27,12 @@ members = ["."]
 only-verified = []
 
 [[bin]]
+name = "elf-parser"
+path = "fuzz_targets/elf_parser.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "dumb-verify"
 path = "fuzz_targets/dumb_verify.rs"
 test = false

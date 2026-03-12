@@ -25,6 +25,24 @@ jobs:
       - name: Prepare bundle
         run: ./fuzz/build-fuzz-bundle.sh
 
+      - name: Collect elf-parser seed corpus
+        run: |
+          mkdir -p /tmp/elf-parser-corpus
+          cp ./tests/elfs/*.so /tmp/elf-parser-corpus/
+
+      - name: Upload elf-parser corpus to FuzzCorp
+        uses: asymmetric-research/fuzz-upload-action@1140f6fc0fc9c59aa66f3a705c55c93f260f715b # v1.0.4
+        with:
+          upload_type: corpus
+          upload_path: /tmp/elf-parser-corpus
+          upload_args: --lineage elf-parser --kind seed
+        env:
+          FUZZ_API_ORIGIN: ${{ secrets.FUZZ_API_ORIGIN }}
+          FUZZ_ORGANIZATION: anza
+          FUZZ_PROJECT: sbpf
+          FUZZ_USER: ${{ secrets.FUZZ_USER }}
+          FUZZ_PASSWORD: ${{ secrets.FUZZ_PASSWORD }}
+
       - name: Upload bundle to FuzzCorp
         uses: asymmetric-research/fuzz-upload-action@1140f6fc0fc9c59aa66f3a705c55c93f260f715b # v1.0.4
         with:
