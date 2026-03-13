@@ -38,7 +38,7 @@ for target in "${targets[@]}"; do
 done
 
 # Copy coverage binaries to bundle
-RUSTFLAGS="-C instrument-coverage --cfg fuzzing" cargo +nightly fuzz build
+RUSTFLAGS="-C instrument-coverage --cfg fuzzing" cargo +nightly fuzz build -s=none
 for target in "${targets[@]}"; do
     binary_src="./fuzz/target/x86_64-unknown-linux-gnu/release/$target"
     if [ -f "$binary_src" ]; then
@@ -100,7 +100,7 @@ for target in "${targets[@]}"; do
 					"Architecture": {
 						"Name": "amd64"
 					},
-					"MemoryKiB": 1048576,
+					"MemoryKiB": 2097152,
 					"Cores": 1
 				}
 			]
