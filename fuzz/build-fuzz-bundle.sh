@@ -100,7 +100,7 @@ for target in "${targets[@]}"; do
 					"Architecture": {
 						"Name": "amd64"
 					},
-					"MemoryKiB": 1048576,
+					"MemoryKiB": 2097152,
 					"Cores": 1
 				}
 			]
