@@ -120,14 +120,13 @@ impl JitProgram {
         registers: [u64; 12],
     ) {
         unsafe {
-            let runtime_environment = std::ptr::addr_of_mut!(*vm)
-                .cast::<u64>()
-                .offset(get_runtime_environment_key() as isize);
             let instruction_meter =
                 (vm.previous_instruction_meter as i64).wrapping_add(registers[11] as i64);
             let entrypoint = &self.text_section
                 [self.pc_section[registers[11] as usize] as usize & (i32::MAX as u32 as usize)]
                 as *const u8;
+            let host_stack_pointer = &raw mut vm.host_stack_pointer;
+            let vm = vm.address();
             macro_rules! stmt_expr_attribute_asm {
                 ($($prologue:literal,)+ cfg(not(feature = $feature:literal)), $guarded:tt, $($epilogue:tt)+) => {
                     #[cfg(feature = $feature)]
@@ -161,8 +160,8 @@ impl JitProgram {
                 "call [rsp-8]",
                 "pop rbp",
                 "pop rbx",
-                host_stack_pointer = in(reg) &mut vm.host_stack_pointer,
-                inlateout("rdi") runtime_environment => _,
+                host_stack_pointer = in(reg) host_stack_pointer,
+                inlateout("rdi") vm.0 => _,
                 inlateout("r10") instruction_meter => _,
                 inlateout("rax") entrypoint => _,
                 inlateout("r11") &registers => _,
@@ -901,7 +900,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     fn slot_in_vm(&self, slot: RuntimeEnvironmentSlot) -> i32 {
-        slot as i32 - 8 * self.runtime_environment_key
+        (slot as i32) - self.runtime_environment_key
     }
 
     pub(crate) fn emit<T>(&mut self, data: T) {

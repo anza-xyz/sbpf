@@ -4,7 +4,7 @@ use {
         ebpf,
         elf::ElfError,
         memory_region::MemoryMapping,
-        vm::{Config, ContextObject, EbpfVm},
+        vm::{Config, ContextObject, VmAddress},
     },
     std::collections::{btree_map::Entry, BTreeMap},
 };
@@ -226,7 +226,7 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
 }
 
 /// Syscall handler function (ContextObject is derived from VM)
-pub type BuiltinFunction<C> = fn(*mut EbpfVm<C>, u64, u64, u64, u64, u64);
+pub type BuiltinFunction<C> = fn(VmAddress<C>, u64, u64, u64, u64, u64);
 /// Re-export of the JIT compiler for the declare_builtin_function! macro
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 pub type JitCompiler<'a, C> = crate::jit::JitCompiler<'a, C>;
@@ -353,32 +353,31 @@ where
 
     /// The VM wrapper.
     #[expect(clippy::arithmetic_side_effects)]
-    fn vm(vm: *mut crate::vm::EbpfVm<C>, a: u64, b: u64, c: u64, d: u64, e: u64) {
-        let vm = unsafe {
-            &mut *(vm
-                .cast::<u64>()
-                .offset(-(crate::vm::get_runtime_environment_key() as isize))
-                .cast::<crate::vm::EbpfVm<C>>())
-        };
-        let config = vm.loader.get_config();
-        if config.enable_instruction_meter {
-            vm.context_object_pointer
-                .consume(vm.previous_instruction_meter - vm.due_insn_count);
-        }
-        let converted_result: crate::error::ProgramResult = Self::rust(
-            vm.context_object_pointer,
-            a,
-            b,
-            c,
-            d,
-            e,
-            &mut vm.memory_mapping,
-        )
-        .map_err(|err| crate::error::EbpfError::SyscallError(err.into()))
-        .into();
-        vm.program_result = converted_result;
-        if config.enable_instruction_meter {
-            vm.previous_instruction_meter = vm.context_object_pointer.get_remaining();
+    fn vm(mut vm: VmAddress<C>, a: u64, b: u64, c: u64, d: u64, e: u64) {
+        unsafe {
+            // SAFETY: Sound under the stacked lifetimes model – we've only one `VmAddress`.
+            vm.with_vm(|vm| {
+                let config = vm.loader.get_config();
+                if config.enable_instruction_meter {
+                    vm.context_object_pointer
+                        .consume(vm.previous_instruction_meter - vm.due_insn_count);
+                }
+                let converted_result: crate::error::ProgramResult = Self::rust(
+                    vm.context_object_pointer,
+                    a,
+                    b,
+                    c,
+                    d,
+                    e,
+                    &mut vm.memory_mapping,
+                )
+                .map_err(|err| crate::error::EbpfError::SyscallError(err.into()))
+                .into();
+                vm.program_result = converted_result;
+                if config.enable_instruction_meter {
+                    vm.previous_instruction_meter = vm.context_object_pointer.get_remaining();
+                }
+            })
         }
     }
 
