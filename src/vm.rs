@@ -21,7 +21,7 @@ use crate::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::{Analysis, DummyContextObject, RegisterTraceEntry},
 };
-use std::{collections::BTreeMap, fmt::Debug, mem::offset_of};
+use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of};
 
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;
@@ -33,22 +33,15 @@ use rand::{thread_rng, Rng};
 #[cfg(all(feature = "jit", feature = "shuttle-test"))]
 use shuttle::rand::{thread_rng, Rng};
 
-/// Shift the RUNTIME_ENVIRONMENT_KEY by this many bits to the LSB
-///
-/// 3 bits for 8 Byte alignment, and 1 bit to have encoding space for the RuntimeEnvironment.
-#[cfg(feature = "jit")]
-const PROGRAM_ENVIRONMENT_KEY_SHIFT: u32 = 4;
-#[cfg(feature = "jit")]
-static RUNTIME_ENVIRONMENT_KEY: std::sync::OnceLock<i32> = std::sync::OnceLock::<i32>::new();
-
 /// Returns (and if not done before generates) the encryption key for the VM pointer
+#[cfg(feature = "jit")]
 pub fn get_runtime_environment_key() -> i32 {
-    #[cfg(feature = "jit")]
-    {
-        *RUNTIME_ENVIRONMENT_KEY
-            .get_or_init(|| thread_rng().gen::<i32>() >> PROGRAM_ENVIRONMENT_KEY_SHIFT)
-    }
-    #[cfg(not(feature = "jit"))]
+    static RUNTIME_ENVIRONMENT_KEY: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+    *RUNTIME_ENVIRONMENT_KEY.get_or_init(|| thread_rng().gen::<i32>())
+}
+
+#[cfg(not(feature = "jit"))]
+pub fn get_runtime_environment_key() -> i32 {
     0
 }
 
@@ -441,18 +434,58 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
     /// Invokes a built-in function
     pub fn invoke_function(&mut self, function: BuiltinFunction<C>) {
         function(
-            unsafe {
-                std::ptr::addr_of_mut!(*self)
-                    .cast::<u64>()
-                    .offset(get_runtime_environment_key() as isize)
-                    .cast::<Self>()
-            },
+            self.encrypted_host_address(),
             self.registers[1],
             self.registers[2],
             self.registers[3],
             self.registers[4],
             self.registers[5],
         );
+    }
+
+    /// Build a `VmAddress` containing a (potentially) encrypted host pointer to self.
+    ///
+    /// Note that this type is effectively a mutable pointer to `self` and although it valid to
+    /// create multiple of these addresses, using them to violate the Rust mutable references'
+    /// uniqueness rule is not sound.
+    pub(crate) fn encrypted_host_address(&mut self) -> EncryptedHostAddressToEbpfVm<C> {
+        let addr = (&raw mut *self).expose_provenance() as isize;
+        EncryptedHostAddressToEbpfVm(
+            addr.wrapping_add(get_runtime_environment_key() as isize) as usize as u64,
+            PhantomData,
+        )
+    }
+}
+
+/// Encrypted address to the [`EbpfVm`] object.
+#[repr(transparent)]
+pub struct EncryptedHostAddressToEbpfVm<C>(
+    // This ends up having to be public to the crate because inline assembly wants to deal with
+    // integers, not `VmAddress` (even though VmAddress has the same layout.)
+    pub(crate) u64,
+    PhantomData<C>,
+);
+
+impl<C: ContextObject> EncryptedHostAddressToEbpfVm<C> {
+    /// Work on [`EbpfVm`] pointed to by this address.
+    ///
+    /// ## Safety
+    ///
+    /// Multiple concurrently live addresses can reference the same [`EbpfVm`] but under no
+    /// circumstances may they be used to create multiple concurrent mutable references to the
+    /// `EbpfVm`.
+    pub unsafe fn with_vm<R>(&mut self, cb: impl FnOnce(&mut EbpfVm<'_, C>) -> R) -> R {
+        let addr = (self.0 as usize as isize)
+            .wrapping_sub(crate::vm::get_runtime_environment_key() as isize);
+        // SAFETY: we've recovered the same pointer address as that of the reference used to
+        // produce this offset address in the first place.
+        // SAFETY: The mutable reference is unique due to invariant being passed onto the caller.
+        let vm = unsafe {
+            std::ptr::with_exposed_provenance_mut::<crate::vm::EbpfVm<C>>(addr as usize)
+                .as_mut()
+                .unwrap()
+        };
+        cb(vm)
     }
 }
 
