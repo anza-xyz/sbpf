@@ -37,7 +37,7 @@ use shuttle::rand::{thread_rng, Rng};
 #[cfg(feature = "jit")]
 pub fn get_runtime_environment_key() -> i32 {
     static RUNTIME_ENVIRONMENT_KEY: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-    *RUNTIME_ENVIRONMENT_KEY.get_or_init(|| thread_rng().gen::<i32>())
+    *RUNTIME_ENVIRONMENT_KEY.get_or_init(|| thread_rng().gen::<i32>() >> 1)
 }
 
 #[cfg(not(feature = "jit"))]
