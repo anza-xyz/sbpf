@@ -434,7 +434,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
     /// Invokes a built-in function
     pub fn invoke_function(&mut self, function: BuiltinFunction<C>) {
         function(
-            self.address(),
+            self.encrypted_host_address(),
             self.registers[1],
             self.registers[2],
             self.registers[3],
@@ -443,35 +443,35 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         );
     }
 
-    /// Build a `VmAddress` containing a (potentially) mildly mangled pointer to self.
+    /// Build a `VmAddress` containing a (potentially) encrypted host pointer to self.
     ///
     /// Note that this type is effectively a mutable pointer to `self` and although it valid to
     /// create multiple of these addresses, using them to violate the Rust mutable references'
     /// uniqueness rule is not sound.
-    pub(crate) fn address(&mut self) -> VmAddress<C> {
+    pub(crate) fn encrypted_host_address(&mut self) -> EncryptedHostAddressToEbpfVm<C> {
         let addr = (&raw mut *self).expose_provenance() as isize;
-        VmAddress(
+        EncryptedHostAddressToEbpfVm(
             addr.wrapping_add(get_runtime_environment_key() as isize) as usize as u64,
             PhantomData,
         )
     }
 }
 
-/// Mangled address to the [`EbpfVm`] object.
+/// Encrypted address to the [`EbpfVm`] object.
 #[repr(transparent)]
-pub struct VmAddress<C>(
+pub struct EncryptedHostAddressToEbpfVm<C>(
     // This ends up having to be public to the crate because inline assembly wants to deal with
     // integers, not `VmAddress` (even though VmAddress has the same layout.)
     pub(crate) u64,
     PhantomData<C>,
 );
 
-impl<C: ContextObject> VmAddress<C> {
-    /// Convert VM Address back to the
+impl<C: ContextObject> EncryptedHostAddressToEbpfVm<C> {
+    /// Work on [`EbpfVm`] pointed to by this address.
     ///
     /// ## Safety
     ///
-    /// Multiple concurrently live `VmAddress`es can reference the same [`EbpfVm`] but under no
+    /// Multiple concurrently live addresses can reference the same [`EbpfVm`] but under no
     /// circumstances may they be used to create multiple concurrent mutable references to the
     /// `EbpfVm`.
     pub unsafe fn with_vm<R>(&mut self, cb: impl FnOnce(&mut EbpfVm<'_, C>) -> R) -> R {

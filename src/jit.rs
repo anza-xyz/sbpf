@@ -126,7 +126,7 @@ impl JitProgram {
                 [self.pc_section[registers[11] as usize] as usize & (i32::MAX as u32 as usize)]
                 as *const u8;
             let host_stack_pointer = &raw mut vm.host_stack_pointer;
-            let vm = vm.address();
+            let vm = vm.encrypted_host_address();
             macro_rules! stmt_expr_attribute_asm {
                 ($($prologue:literal,)+ cfg(not(feature = $feature:literal)), $guarded:tt, $($epilogue:tt)+) => {
                     #[cfg(feature = $feature)]
