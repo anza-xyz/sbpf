@@ -178,8 +178,8 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
     }
 
     /// Unregister a symbol again
-    pub fn unregister_function(&mut self, key: u32) {
-        self.map.remove(&key);
+    pub fn unregister_function(&mut self, key: u32) -> bool {
+        self.map.remove(&key).is_some()
     }
 
     /// Iterate over all keys
@@ -330,9 +330,9 @@ impl<C: ContextObject> BuiltinProgram<C> {
     }
 
     /// Remove a function by name (if it exists)
-    pub fn unregister_function(&mut self, name: &str) {
+    pub fn unregister_function(&mut self, name: &str) -> bool {
         let key = ebpf::hash_symbol_name(name.as_bytes());
-        self.sparse_registry.unregister_function(key);
+        self.sparse_registry.unregister_function(key)
     }
 }
 
