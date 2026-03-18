@@ -328,6 +328,12 @@ impl<C: ContextObject> BuiltinProgram<C> {
     ) -> Result<(), ElfError> {
         self.register_function(name, (BFD::vm, BFD::codegen))
     }
+
+    /// Remove a function by name (if it exists)
+    pub fn unregister_function(&mut self, name: &str) {
+        let key = ebpf::hash_symbol_name(name.as_bytes());
+        self.sparse_registry.unregister_function(key);
+    }
 }
 
 /// Native built-in functions that can be made available to programs to call.
