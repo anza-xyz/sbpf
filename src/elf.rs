@@ -442,21 +442,8 @@ impl<C: ContextObject> Executable<C> {
 
     /// Fully loads an ELF
     pub fn load(bytes: &[u8], loader: Arc<BuiltinProgram<C>>) -> Result<Self, ElfError> {
-        const E_FLAGS_OFFSET: usize = 48;
-        let e_flags = LittleEndian::read_u32(
-            bytes
-                .get(E_FLAGS_OFFSET..E_FLAGS_OFFSET.saturating_add(std::mem::size_of::<u32>()))
-                .ok_or(ElfParserError::OutOfBounds)?,
-        );
+        let sbpf_version = Self::read_sbpf_version(bytes)?;
         let config = loader.get_config();
-        let sbpf_version = match e_flags {
-            0 => SBPFVersion::V0,
-            1 => SBPFVersion::V1,
-            2 => SBPFVersion::V2,
-            3 => SBPFVersion::V3,
-            4 => SBPFVersion::V4,
-            _ => SBPFVersion::Reserved,
-        };
         if !config.enabled_sbpf_versions.contains(&sbpf_version) {
             return Err(ElfError::UnsupportedSBPFVersion);
         }
@@ -468,6 +455,24 @@ impl<C: ContextObject> Executable<C> {
         };
         executable.sbpf_version = sbpf_version;
         Ok(executable)
+    }
+
+    /// Reads the SBPF version from an ELF's e_flags header field.
+    pub fn read_sbpf_version(bytes: &[u8]) -> Result<SBPFVersion, ElfParserError> {
+        const E_FLAGS_OFFSET: usize = 48;
+        let e_flags = LittleEndian::read_u32(
+            bytes
+                .get(E_FLAGS_OFFSET..E_FLAGS_OFFSET.saturating_add(mem::size_of::<u32>()))
+                .ok_or(ElfParserError::OutOfBounds)?,
+        );
+        Ok(match e_flags {
+            0 => SBPFVersion::V0,
+            1 => SBPFVersion::V1,
+            2 => SBPFVersion::V2,
+            3 => SBPFVersion::V3,
+            4 => SBPFVersion::V4,
+            _ => SBPFVersion::Reserved,
+        })
     }
 
     /// Loads an ELF without relocation
@@ -1264,4 +1269,34 @@ pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
     // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
     // will be unmappable, see MemoryRegion::vm_to_host.
     MemoryRegion::new_readonly(ro_data, offset as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use {super::*, crate::static_analysis::DummyContextObject};
+
+    type Dummy = Executable<DummyContextObject>;
+
+    #[test]
+    fn test_read_sbpf_version() {
+        let mut buf = vec![0u8; 52];
+
+        for (val, expected) in [
+            (0, SBPFVersion::V0),
+            (1, SBPFVersion::V1),
+            (2, SBPFVersion::V2),
+            (3, SBPFVersion::V3),
+            (4, SBPFVersion::V4),
+            (0xFF, SBPFVersion::Reserved),
+        ] {
+            LittleEndian::write_u32(&mut buf[48..52], val);
+            assert_eq!(Dummy::read_sbpf_version(&buf).unwrap(), expected);
+        }
+
+        // OOB case
+        assert_eq!(
+            Dummy::read_sbpf_version(&buf[..48]).unwrap_err(),
+            ElfParserError::OutOfBounds,
+        );
+    }
 }
