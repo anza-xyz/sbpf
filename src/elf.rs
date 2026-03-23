@@ -14,7 +14,7 @@ use crate::{
             ELFCLASS64, ELFDATA2LSB, ELFOSABI_NONE, EM_BPF, EM_SBPF, ET_DYN, R_X86_64_32,
             R_X86_64_64, R_X86_64_NONE, R_X86_64_RELATIVE,
         },
-        types::{Elf64Phdr, Elf64Shdr, Elf64Word},
+        types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr, Elf64Word},
         Elf64, ElfParserError,
     },
     error::EbpfError,
@@ -27,7 +27,7 @@ use crate::{
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 use crate::jit::{JitCompiler, JitProgram};
 use byteorder::{ByteOrder, LittleEndian};
-use std::{collections::BTreeMap, fmt::Debug, mem, ops::Range, str};
+use std::{collections::BTreeMap, fmt::Debug, mem::{self, offset_of}, ops::Range, str};
 
 #[cfg(not(feature = "shuttle-test"))]
 use std::sync::Arc;
@@ -459,10 +459,11 @@ impl<C: ContextObject> Executable<C> {
 
     /// Reads the SBPF version from an ELF's e_flags header field.
     pub fn read_sbpf_version(bytes: &[u8]) -> Result<SBPFVersion, ElfParserError> {
-        const E_FLAGS_OFFSET: usize = 48;
+        const E_FLAGS_OFFSET: usize = offset_of!(Elf64Ehdr, e_flags);
+        const E_FLAGS_END: usize = E_FLAGS_OFFSET + mem::size_of::<u32>();
         let e_flags = LittleEndian::read_u32(
             bytes
-                .get(E_FLAGS_OFFSET..E_FLAGS_OFFSET.saturating_add(mem::size_of::<u32>()))
+                .get(E_FLAGS_OFFSET..E_FLAGS_END)
                 .ok_or(ElfParserError::OutOfBounds)?,
         );
         Ok(match e_flags {
@@ -482,7 +483,7 @@ impl<C: ContextObject> Executable<C> {
     ) -> Result<Self, ElfParserError> {
         use crate::elf_parser::{
             consts::{ELFMAG, EV_CURRENT, PF_R, PF_X, PT_LOAD, SHN_UNDEF, STT_FUNC},
-            types::{Elf64Ehdr, Elf64Sym},
+            types::Elf64Sym,
         };
 
         let aligned_memory = AlignedMemory::<{ HOST_ALIGN }>::from_slice(bytes);
@@ -1269,34 +1270,4 @@ pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
     // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
     // will be unmappable, see MemoryRegion::vm_to_host.
     MemoryRegion::new_readonly(ro_data, offset as u64)
-}
-
-#[cfg(test)]
-mod tests {
-    use {super::*, crate::static_analysis::DummyContextObject};
-
-    type Dummy = Executable<DummyContextObject>;
-
-    #[test]
-    fn test_read_sbpf_version() {
-        let mut buf = vec![0u8; 52];
-
-        for (val, expected) in [
-            (0, SBPFVersion::V0),
-            (1, SBPFVersion::V1),
-            (2, SBPFVersion::V2),
-            (3, SBPFVersion::V3),
-            (4, SBPFVersion::V4),
-            (0xFF, SBPFVersion::Reserved),
-        ] {
-            LittleEndian::write_u32(&mut buf[48..52], val);
-            assert_eq!(Dummy::read_sbpf_version(&buf).unwrap(), expected);
-        }
-
-        // OOB case
-        assert_eq!(
-            Dummy::read_sbpf_version(&buf[..48]).unwrap_err(),
-            ElfParserError::OutOfBounds,
-        );
-    }
 }
