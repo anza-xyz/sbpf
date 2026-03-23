@@ -14,7 +14,7 @@ use crate::{
             ELFCLASS64, ELFDATA2LSB, ELFOSABI_NONE, EM_BPF, EM_SBPF, ET_DYN, R_X86_64_32,
             R_X86_64_64, R_X86_64_NONE, R_X86_64_RELATIVE,
         },
-        types::{Elf64Phdr, Elf64Shdr, Elf64Word},
+        types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr, Elf64Word},
         Elf64, ElfParserError,
     },
     error::EbpfError,
@@ -27,7 +27,13 @@ use crate::{
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 use crate::jit::{JitCompiler, JitProgram};
 use byteorder::{ByteOrder, LittleEndian};
-use std::{collections::BTreeMap, fmt::Debug, mem, ops::Range, str};
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    mem::{self, offset_of},
+    ops::Range,
+    str,
+};
 
 #[cfg(not(feature = "shuttle-test"))]
 use std::sync::Arc;
@@ -442,21 +448,8 @@ impl<C: ContextObject> Executable<C> {
 
     /// Fully loads an ELF
     pub fn load(bytes: &[u8], loader: Arc<BuiltinProgram<C>>) -> Result<Self, ElfError> {
-        const E_FLAGS_OFFSET: usize = 48;
-        let e_flags = LittleEndian::read_u32(
-            bytes
-                .get(E_FLAGS_OFFSET..E_FLAGS_OFFSET.saturating_add(std::mem::size_of::<u32>()))
-                .ok_or(ElfParserError::OutOfBounds)?,
-        );
+        let sbpf_version = get_sbpf_version(bytes)?;
         let config = loader.get_config();
-        let sbpf_version = match e_flags {
-            0 => SBPFVersion::V0,
-            1 => SBPFVersion::V1,
-            2 => SBPFVersion::V2,
-            3 => SBPFVersion::V3,
-            4 => SBPFVersion::V4,
-            _ => SBPFVersion::Reserved,
-        };
         if !config.enabled_sbpf_versions.contains(&sbpf_version) {
             return Err(ElfError::UnsupportedSBPFVersion);
         }
@@ -477,7 +470,7 @@ impl<C: ContextObject> Executable<C> {
     ) -> Result<Self, ElfParserError> {
         use crate::elf_parser::{
             consts::{ELFMAG, EV_CURRENT, PF_R, PF_X, PT_LOAD, SHN_UNDEF, STT_FUNC},
-            types::{Elf64Ehdr, Elf64Sym},
+            types::Elf64Sym,
         };
 
         let aligned_memory = AlignedMemory::<{ HOST_ALIGN }>::from_slice(bytes);
@@ -1251,6 +1244,25 @@ impl<C: ContextObject> Executable<C> {
             }
         }
     }
+}
+
+/// Reads the SBPF version from an ELF's `e_flags` header field.
+pub fn get_sbpf_version(elf_bytes: &[u8]) -> Result<SBPFVersion, ElfParserError> {
+    const E_FLAGS_OFFSET: usize = offset_of!(Elf64Ehdr, e_flags);
+    const E_FLAGS_END: usize = E_FLAGS_OFFSET + mem::size_of::<u32>();
+    let e_flags = LittleEndian::read_u32(
+        elf_bytes
+            .get(E_FLAGS_OFFSET..E_FLAGS_END)
+            .ok_or(ElfParserError::OutOfBounds)?,
+    );
+    Ok(match e_flags {
+        0 => SBPFVersion::V0,
+        1 => SBPFVersion::V1,
+        2 => SBPFVersion::V2,
+        3 => SBPFVersion::V3,
+        4 => SBPFVersion::V4,
+        _ => SBPFVersion::Reserved,
+    })
 }
 
 /// Creates a [MemoryRegion] for the given [Section]
