@@ -27,7 +27,13 @@ use crate::{
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 use crate::jit::{JitCompiler, JitProgram};
 use byteorder::{ByteOrder, LittleEndian};
-use std::{collections::BTreeMap, fmt::Debug, mem::{self, offset_of}, ops::Range, str};
+use std::{
+    collections::BTreeMap,
+    fmt::Debug,
+    mem::{self, offset_of},
+    ops::Range,
+    str,
+};
 
 #[cfg(not(feature = "shuttle-test"))]
 use std::sync::Arc;
@@ -442,7 +448,7 @@ impl<C: ContextObject> Executable<C> {
 
     /// Fully loads an ELF
     pub fn load(bytes: &[u8], loader: Arc<BuiltinProgram<C>>) -> Result<Self, ElfError> {
-        let sbpf_version = Self::read_sbpf_version(bytes)?;
+        let sbpf_version = get_sbpf_version(bytes)?;
         let config = loader.get_config();
         if !config.enabled_sbpf_versions.contains(&sbpf_version) {
             return Err(ElfError::UnsupportedSBPFVersion);
@@ -455,25 +461,6 @@ impl<C: ContextObject> Executable<C> {
         };
         executable.sbpf_version = sbpf_version;
         Ok(executable)
-    }
-
-    /// Reads the SBPF version from an ELF's e_flags header field.
-    pub fn read_sbpf_version(bytes: &[u8]) -> Result<SBPFVersion, ElfParserError> {
-        const E_FLAGS_OFFSET: usize = offset_of!(Elf64Ehdr, e_flags);
-        const E_FLAGS_END: usize = E_FLAGS_OFFSET + mem::size_of::<u32>();
-        let e_flags = LittleEndian::read_u32(
-            bytes
-                .get(E_FLAGS_OFFSET..E_FLAGS_END)
-                .ok_or(ElfParserError::OutOfBounds)?,
-        );
-        Ok(match e_flags {
-            0 => SBPFVersion::V0,
-            1 => SBPFVersion::V1,
-            2 => SBPFVersion::V2,
-            3 => SBPFVersion::V3,
-            4 => SBPFVersion::V4,
-            _ => SBPFVersion::Reserved,
-        })
     }
 
     /// Loads an ELF without relocation
@@ -1257,6 +1244,25 @@ impl<C: ContextObject> Executable<C> {
             }
         }
     }
+}
+
+/// Reads the SBPF version from an ELF's `e_flags` header field.
+pub fn get_sbpf_version(elf_bytes: &[u8]) -> Result<SBPFVersion, ElfParserError> {
+    const E_FLAGS_OFFSET: usize = offset_of!(Elf64Ehdr, e_flags);
+    const E_FLAGS_END: usize = E_FLAGS_OFFSET + mem::size_of::<u32>();
+    let e_flags = LittleEndian::read_u32(
+        elf_bytes
+            .get(E_FLAGS_OFFSET..E_FLAGS_END)
+            .ok_or(ElfParserError::OutOfBounds)?,
+    );
+    Ok(match e_flags {
+        0 => SBPFVersion::V0,
+        1 => SBPFVersion::V1,
+        2 => SBPFVersion::V2,
+        3 => SBPFVersion::V3,
+        4 => SBPFVersion::V4,
+        _ => SBPFVersion::Reserved,
+    })
 }
 
 /// Creates a [MemoryRegion] for the given [Section]
