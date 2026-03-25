@@ -9,6 +9,7 @@ use crate::{
 };
 use std::fmt::Formatter;
 use std::{array, cell::UnsafeCell, fmt, mem, ops::Range, ptr};
+
 /* Explanation of the Gapped Memory
 
     The MemoryMapping supports a special mapping mode which is used for the stack MemoryRegion.
@@ -377,6 +378,7 @@ pub struct MemoryMapping {
     access_violation_handler: AccessViolationHandler,
     max_call_depth: i64,
     stack_frame_size: i64,
+    disable_address_translation: bool,
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
     ty: MemoryMappingType,
@@ -396,8 +398,6 @@ impl fmt::Debug for MemoryMapping {
 /// Maps virtual memory to host memory.
 #[derive(Debug)]
 pub enum MemoryMappingType {
-    /// Used when address translation is disabled
-    Identity,
     /// Aligned memory mapping which uses the upper half of an address to
     /// identify the underlying memory region.
     Aligned(AlignedMemoryMapping),
@@ -406,16 +406,6 @@ pub enum MemoryMappingType {
 }
 
 impl MemoryMapping {
-    pub(crate) fn new_identity() -> Self {
-        Self {
-            access_violation_handler: Box::new(default_access_violation_handler),
-            max_call_depth: 0,
-            stack_frame_size: 0,
-            sbpf_version: SBPFVersion::Reserved,
-            ty: MemoryMappingType::Identity,
-        }
-    }
-
     /// Creates a new memory mapping.
     ///
     /// Uses aligned or unaligned memory mapping depending on the value of
@@ -440,6 +430,7 @@ impl MemoryMapping {
             access_violation_handler: Box::new(access_violation_handler),
             max_call_depth: config.max_call_depth as i64,
             stack_frame_size: config.stack_frame_size as i64,
+            disable_address_translation: !config.enable_address_translation,
             sbpf_version,
             ty,
         })
@@ -463,6 +454,10 @@ impl MemoryMapping {
 
     /// Map virtual memory to host memory.
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
+        if self.disable_address_translation {
+            return ProgramResult::Ok(vm_addr);
+        }
+
         if let Some((_index, region)) = self.find_region(vm_addr) {
             if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
                 return ProgramResult::Ok(host_addr);
@@ -482,6 +477,10 @@ impl MemoryMapping {
         vm_addr: u64,
         len: u64,
     ) -> ProgramResult {
+        if self.disable_address_translation {
+            return ProgramResult::Ok(vm_addr);
+        }
+
         if let Some((index, region)) = self.find_region(vm_addr) {
             if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
                 return ProgramResult::Ok(host_addr);
@@ -533,7 +532,6 @@ impl MemoryMapping {
     #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         match &self.ty {
-            MemoryMappingType::Identity => None,
             MemoryMappingType::Aligned(inner) => inner.find_region(vm_addr),
             MemoryMappingType::Unaligned(inner) => inner.find_region(vm_addr),
         }
@@ -543,7 +541,6 @@ impl MemoryMapping {
     #[inline(always)]
     pub fn get_regions(&self) -> &[MemoryRegion] {
         match &self.ty {
-            MemoryMappingType::Identity => &[],
             MemoryMappingType::Aligned(inner) => &inner.regions,
             MemoryMappingType::Unaligned(inner) => &inner.regions,
         }
@@ -563,7 +560,6 @@ impl MemoryMapping {
             return Err(EbpfError::InvalidMemoryRegion(index));
         }
         match &mut self.ty {
-            MemoryMappingType::Identity => Err(EbpfError::InvalidMemoryRegion(index)),
             MemoryMappingType::Aligned(inner) => inner.replace_region(index, region),
             MemoryMappingType::Unaligned(inner) => inner.replace_region(index, region),
         }
