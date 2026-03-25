@@ -7,8 +7,8 @@ use crate::{
     program::SBPFVersion,
     vm::Config,
 };
+use std::fmt::Formatter;
 use std::{array, cell::UnsafeCell, fmt, mem, ops::Range, ptr};
-
 /* Explanation of the Gapped Memory
 
     The MemoryMapping supports a special mapping mode which is used for the stack MemoryRegion.
@@ -181,62 +181,10 @@ pub enum AccessType {
     Store,
 }
 
-/// Common parts of [UnalignedMemoryMapping] and [AlignedMemoryMapping]
-pub struct CommonMemoryMapping {
-    /// Mapped memory regions
-    regions: Box<[MemoryRegion]>,
-    /// Access violation handler
-    access_violation_handler: AccessViolationHandler,
-    /// VM configuration
-    allow_memory_region_zero: bool,
-    max_call_depth: i64,
-    stack_frame_size: i64,
-    /// Executable sbpf_version
-    sbpf_version: SBPFVersion,
-}
-
-impl CommonMemoryMapping {
-    fn generate_access_violation(
-        &self,
-        access_type: AccessType,
-        vm_addr: u64,
-        len: u64,
-    ) -> ProgramResult {
-        let stack_frame = (vm_addr as i64)
-            .saturating_sub(ebpf::MM_STACK_START as i64)
-            .checked_div(self.stack_frame_size)
-            .unwrap_or(0);
-        if !self.sbpf_version.manual_stack_frame_bump()
-            && (-1..self.max_call_depth.saturating_add(1)).contains(&stack_frame)
-        {
-            ProgramResult::Err(EbpfError::StackAccessViolation(
-                access_type,
-                vm_addr,
-                len,
-                stack_frame,
-            ))
-        } else {
-            let region_name = match vm_addr & (!ebpf::MM_BYTECODE_START.saturating_sub(1)) {
-                ebpf::MM_BYTECODE_START => "program",
-                ebpf::MM_STACK_START => "stack",
-                ebpf::MM_HEAP_START => "heap",
-                ebpf::MM_INPUT_START => "input",
-                _ => "unknown",
-            };
-            ProgramResult::Err(EbpfError::AccessViolation(
-                access_type,
-                vm_addr,
-                len,
-                region_name,
-            ))
-        }
-    }
-}
-
 /// Memory mapping based on eytzinger search.
 pub struct UnalignedMemoryMapping {
     /// Common parts
-    common: CommonMemoryMapping,
+    regions: Box<[MemoryRegion]>,
     /// Regions vm_addr fields in Eytzinger order
     region_addresses: Box<[u64]>,
     /// Converts the Eytzinger order back to the original order
@@ -248,20 +196,20 @@ pub struct UnalignedMemoryMapping {
 impl fmt::Debug for UnalignedMemoryMapping {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UnalignedMemoryMapping")
-            .field("regions", &self.common.regions)
+            .field("regions", &self.regions)
             .field("cache", &self.cache)
             .finish()
     }
 }
 
-impl<'a> UnalignedMemoryMapping {
+impl UnalignedMemoryMapping {
     fn construct_eytzinger_order(&mut self, mut in_index: usize, out_index: usize) -> usize {
-        if out_index >= self.common.regions.len() {
+        if out_index >= self.regions.len() {
             return in_index;
         }
         in_index =
             self.construct_eytzinger_order(in_index, out_index.saturating_mul(2).saturating_add(1));
-        self.region_addresses[out_index] = self.common.regions[in_index].vm_addr;
+        self.region_addresses[out_index] = self.regions[in_index].vm_addr;
         self.region_index_lookup[out_index] = in_index;
         self.construct_eytzinger_order(
             in_index.saturating_add(1),
@@ -270,16 +218,7 @@ impl<'a> UnalignedMemoryMapping {
     }
 
     /// Creates a new MemoryMapping structure from the given regions
-    pub fn new_with_access_violation_handler(
-        mut regions: Vec<MemoryRegion>,
-        config: &'a Config,
-        sbpf_version: SBPFVersion,
-        access_violation_handler: AccessViolationHandler,
-    ) -> Result<Self, EbpfError> {
-        debug_assert!(
-            sbpf_version <= SBPFVersion::V3,
-            "SBPFv4 and later versions do not support unaligned memory"
-        );
+    pub fn new(mut regions: Vec<MemoryRegion>) -> Result<Self, EbpfError> {
         regions.sort();
         let number_of_regions = regions.len();
         for index in 1..number_of_regions {
@@ -290,14 +229,7 @@ impl<'a> UnalignedMemoryMapping {
             }
         }
         let mut result = Self {
-            common: CommonMemoryMapping {
-                regions: regions.into_boxed_slice(),
-                access_violation_handler,
-                allow_memory_region_zero: config.allow_memory_region_zero,
-                max_call_depth: config.max_call_depth as i64,
-                stack_frame_size: config.stack_frame_size as i64,
-                sbpf_version,
-            },
+            regions: regions.into_boxed_slice(),
             region_addresses: vec![0; number_of_regions].into_boxed_slice(),
             region_index_lookup: vec![0; number_of_regions].into_boxed_slice(),
             cache: UnsafeCell::new(MappingCache::new()),
@@ -319,7 +251,7 @@ impl<'a> UnalignedMemoryMapping {
             // Safety:
             // Cached index, we validated it before caching it. See the corresponding safety section
             // in the miss branch.
-            Some((index, unsafe { self.common.regions.get_unchecked(index) }))
+            Some((index, unsafe { self.regions.get_unchecked(index) }))
         } else {
             let mut index = 1;
             while index <= self.region_addresses.len() {
@@ -338,7 +270,7 @@ impl<'a> UnalignedMemoryMapping {
             // we check for index==0 above, and by construction if we get here index
             // must be contained in region
             index = unsafe { *self.region_index_lookup.get_unchecked(index - 1) };
-            let region = unsafe { self.common.regions.get_unchecked(index) };
+            let region = unsafe { self.regions.get_unchecked(index) };
             cache.insert(region.vm_addr_range(), index);
             Some((index, region))
         }
@@ -347,7 +279,7 @@ impl<'a> UnalignedMemoryMapping {
     /// Replaces the `MemoryRegion` at the given index
     #[inline(always)]
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
-        self.common.regions[index] = region;
+        self.regions[index] = region;
         self.cache.get_mut().flush();
         Ok(())
     }
@@ -355,27 +287,15 @@ impl<'a> UnalignedMemoryMapping {
 
 /// Memory mapping that uses the upper half of an address to identify the
 /// underlying memory region.
+#[derive(Debug)]
 pub struct AlignedMemoryMapping {
-    /// Common parts
-    common: CommonMemoryMapping,
-}
-
-impl fmt::Debug for AlignedMemoryMapping {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AlignedMemoryMapping")
-            .field("regions", &self.common.regions)
-            .finish()
-    }
+    regions: Box<[MemoryRegion]>,
+    allow_memory_region_zero: bool,
 }
 
 impl AlignedMemoryMapping {
     /// Creates a new MemoryMapping structure from the given regions
-    pub fn new_with_access_violation_handler(
-        mut regions: Vec<MemoryRegion>,
-        config: &Config,
-        sbpf_version: SBPFVersion,
-        access_violation_handler: AccessViolationHandler,
-    ) -> Result<Self, EbpfError> {
+    pub fn new(mut regions: Vec<MemoryRegion>, config: &Config) -> Result<Self, EbpfError> {
         if config.allow_memory_region_zero {
             regions.sort();
             let mut expected_region_index = 0;
@@ -414,14 +334,8 @@ impl AlignedMemoryMapping {
             }
         }
         Ok(Self {
-            common: CommonMemoryMapping {
-                regions: regions.into_boxed_slice(),
-                access_violation_handler,
-                allow_memory_region_zero: config.allow_memory_region_zero,
-                max_call_depth: config.max_call_depth as i64,
-                stack_frame_size: config.stack_frame_size as i64,
-                sbpf_version,
-            },
+            regions: regions.into_boxed_slice(),
+            allow_memory_region_zero: config.allow_memory_region_zero,
         })
     }
 
@@ -429,10 +343,9 @@ impl AlignedMemoryMapping {
     #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
         let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
-        if index < self.common.regions.len() && (index > 0 || self.common.allow_memory_region_zero)
-        {
+        if index < self.regions.len() && (index > 0 || self.allow_memory_region_zero) {
             // Safety: bounds check above
-            let region = unsafe { self.common.regions.get_unchecked(index) };
+            let region = unsafe { self.regions.get_unchecked(index) };
             return Some((index, region));
         }
         None
@@ -453,14 +366,36 @@ impl AlignedMemoryMapping {
         if begin_index != index || end_index != index {
             return Err(EbpfError::InvalidMemoryRegion(index));
         }
-        self.common.regions[index] = region;
+        self.regions[index] = region;
         Ok(())
+    }
+}
+
+/// Common parts of [UnalignedMemoryMapping] and [AlignedMemoryMapping]
+pub struct MemoryMapping {
+    /// Access violation handler
+    access_violation_handler: AccessViolationHandler,
+    max_call_depth: i64,
+    stack_frame_size: i64,
+    /// Executable sbpf_version
+    sbpf_version: SBPFVersion,
+    ty: MemoryMappingType,
+}
+
+impl fmt::Debug for MemoryMapping {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemoryMapping")
+            .field("max_call_depth", &self.max_call_depth)
+            .field("stack_frame_size", &self.stack_frame_size)
+            .field("sbpf_version", &self.sbpf_version)
+            .field("ty", &self.ty)
+            .finish()
     }
 }
 
 /// Maps virtual memory to host memory.
 #[derive(Debug)]
-pub enum MemoryMapping {
+pub enum MemoryMappingType {
     /// Used when address translation is disabled
     Identity,
     /// Aligned memory mapping which uses the upper half of an address to
@@ -472,7 +407,13 @@ pub enum MemoryMapping {
 
 impl MemoryMapping {
     pub(crate) fn new_identity() -> Self {
-        MemoryMapping::Identity
+        Self {
+            access_violation_handler: Box::new(default_access_violation_handler),
+            max_call_depth: 0,
+            stack_frame_size: 0,
+            sbpf_version: SBPFVersion::Reserved,
+            ty: MemoryMappingType::Identity,
+        }
     }
 
     /// Creates a new memory mapping.
@@ -485,23 +426,23 @@ impl MemoryMapping {
         sbpf_version: SBPFVersion,
         access_violation_handler: AccessViolationHandler,
     ) -> Result<Self, EbpfError> {
-        if sbpf_version >= SBPFVersion::V4 || config.aligned_memory_mapping {
-            AlignedMemoryMapping::new_with_access_violation_handler(
-                regions,
-                config,
-                sbpf_version,
-                access_violation_handler,
-            )
-            .map(MemoryMapping::Aligned)
+        let ty = if sbpf_version >= SBPFVersion::V4 || config.aligned_memory_mapping {
+            AlignedMemoryMapping::new(regions, config).map(MemoryMappingType::Aligned)?
         } else {
-            UnalignedMemoryMapping::new_with_access_violation_handler(
-                regions,
-                config,
-                sbpf_version,
-                access_violation_handler,
-            )
-            .map(MemoryMapping::Unaligned)
-        }
+            debug_assert!(
+                sbpf_version <= SBPFVersion::V3,
+                "SBPFv4 and later versions do not support unaligned memory"
+            );
+            UnalignedMemoryMapping::new(regions).map(MemoryMappingType::Unaligned)?
+        };
+
+        Ok(Self {
+            access_violation_handler: Box::new(access_violation_handler),
+            max_call_depth: config.max_call_depth as i64,
+            stack_frame_size: config.stack_frame_size as i64,
+            sbpf_version,
+            ty,
+        })
     }
 
     /// Creates a new memory mapping for tests and benches.
@@ -527,12 +468,7 @@ impl MemoryMapping {
                 return ProgramResult::Ok(host_addr);
             }
         }
-        let common = match &self {
-            MemoryMapping::Identity => return ProgramResult::Ok(vm_addr),
-            MemoryMapping::Aligned(m) => &m.common,
-            MemoryMapping::Unaligned(m) => &m.common,
-        };
-        common.generate_access_violation(access_type, vm_addr, len)
+        self.generate_access_violation(access_type, vm_addr, len)
     }
 
     /// Map virtual memory to host memory and potentially call the [AccessViolationHandler].
@@ -546,11 +482,6 @@ impl MemoryMapping {
         vm_addr: u64,
         len: u64,
     ) -> ProgramResult {
-        let common = match &self {
-            MemoryMapping::Identity => return ProgramResult::Ok(vm_addr),
-            MemoryMapping::Aligned(m) => &m.common,
-            MemoryMapping::Unaligned(m) => &m.common,
-        };
         if let Some((index, region)) = self.find_region(vm_addr) {
             if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
                 return ProgramResult::Ok(host_addr);
@@ -561,7 +492,7 @@ impl MemoryMapping {
                 .get(index.saturating_add(1))
                 .map_or(u64::MAX, |next_region| next_region.vm_addr)
                 .saturating_sub(region.vm_addr);
-            (common.access_violation_handler)(&mut region, max_len, access_type, vm_addr, len);
+            (self.access_violation_handler)(&mut region, max_len, access_type, vm_addr, len);
             if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
                 if let Err(err) = self.replace_region(index, region) {
                     return ProgramResult::Err(err);
@@ -569,12 +500,7 @@ impl MemoryMapping {
                 return ProgramResult::Ok(host_addr);
             }
         }
-        let common = match &self {
-            MemoryMapping::Identity => return ProgramResult::Ok(vm_addr),
-            MemoryMapping::Aligned(m) => &m.common,
-            MemoryMapping::Unaligned(m) => &m.common,
-        };
-        common.generate_access_violation(access_type, vm_addr, len)
+        self.generate_access_violation(access_type, vm_addr, len)
     }
 
     /// Loads `size_of::<T>()` bytes from the given address.
@@ -606,20 +532,20 @@ impl MemoryMapping {
     /// Returns the `MemoryRegion` which may contain the given address.
     #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
-        match self {
-            MemoryMapping::Identity => None,
-            MemoryMapping::Aligned(m) => m.find_region(vm_addr),
-            MemoryMapping::Unaligned(m) => m.find_region(vm_addr),
+        match &self.ty {
+            MemoryMappingType::Identity => None,
+            MemoryMappingType::Aligned(inner) => inner.find_region(vm_addr),
+            MemoryMappingType::Unaligned(inner) => inner.find_region(vm_addr),
         }
     }
 
     /// Returns the `MemoryRegion`s in this mapping.
     #[inline(always)]
     pub fn get_regions(&self) -> &[MemoryRegion] {
-        match self {
-            MemoryMapping::Identity => &[],
-            MemoryMapping::Aligned(m) => &m.common.regions,
-            MemoryMapping::Unaligned(m) => &m.common.regions,
+        match &self.ty {
+            MemoryMappingType::Identity => &[],
+            MemoryMappingType::Aligned(inner) => &inner.regions,
+            MemoryMappingType::Unaligned(inner) => &inner.regions,
         }
     }
 
@@ -636,10 +562,46 @@ impl MemoryMapping {
         {
             return Err(EbpfError::InvalidMemoryRegion(index));
         }
-        match self {
-            MemoryMapping::Identity => Err(EbpfError::InvalidMemoryRegion(index)),
-            MemoryMapping::Aligned(m) => m.replace_region(index, region),
-            MemoryMapping::Unaligned(m) => m.replace_region(index, region),
+        match &mut self.ty {
+            MemoryMappingType::Identity => Err(EbpfError::InvalidMemoryRegion(index)),
+            MemoryMappingType::Aligned(inner) => inner.replace_region(index, region),
+            MemoryMappingType::Unaligned(inner) => inner.replace_region(index, region),
+        }
+    }
+
+    fn generate_access_violation(
+        &self,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+    ) -> ProgramResult {
+        let stack_frame = (vm_addr as i64)
+            .saturating_sub(ebpf::MM_STACK_START as i64)
+            .checked_div(self.stack_frame_size)
+            .unwrap_or(0);
+        if !self.sbpf_version.manual_stack_frame_bump()
+            && (-1..self.max_call_depth.saturating_add(1)).contains(&stack_frame)
+        {
+            ProgramResult::Err(EbpfError::StackAccessViolation(
+                access_type,
+                vm_addr,
+                len,
+                stack_frame,
+            ))
+        } else {
+            let region_name = match vm_addr & (!ebpf::MM_BYTECODE_START.saturating_sub(1)) {
+                ebpf::MM_BYTECODE_START => "program",
+                ebpf::MM_STACK_START => "stack",
+                ebpf::MM_HEAP_START => "heap",
+                ebpf::MM_INPUT_START => "input",
+                _ => "unknown",
+            };
+            ProgramResult::Err(EbpfError::AccessViolation(
+                access_type,
+                vm_addr,
+                len,
+                region_name,
+            ))
         }
     }
 }
@@ -1449,6 +1411,6 @@ mod test {
         )
         .unwrap();
 
-        assert!(matches!(mapping, MemoryMapping::Aligned(_)));
+        assert!(matches!(mapping.ty, MemoryMappingType::Aligned(_)));
     }
 }
