@@ -180,13 +180,17 @@ fn get_host_ptr<C: ContextObject>(
     {
         vm_addr += ebpf::MM_BYTECODE_START;
     }
-    match interpreter.vm.memory_mapping.map(
-        AccessType::Load,
-        vm_addr,
-        std::mem::size_of::<u8>() as u64,
-    ) {
-        ProgramResult::Ok(host_addr) => Ok(host_addr as *mut u8),
-        ProgramResult::Err(err) => Err(err),
+
+    // SAFETY: The creator of EbpfVm must guarantee the pointer is valid.
+    unsafe {
+        match (&*interpreter.vm.memory_mapping).map(
+            AccessType::Load,
+            vm_addr,
+            std::mem::size_of::<u8>() as u64,
+        ) {
+            ProgramResult::Ok(host_addr) => Ok(host_addr as *mut u8),
+            ProgramResult::Err(err) => Err(err),
+        }
     }
 }
 
