@@ -269,9 +269,10 @@ pub enum RuntimeEnvironmentSlot {
 ///     MemoryRegion::new_writable(mem, ebpf::MM_INPUT_START),
 /// ];
 ///
-/// let memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();
+/// context_object.memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();
 ///
-/// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, memory_mapping, stack_len);
+/// let mapping_ptr = &raw mut context_object.memory_mapping;
+/// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, mapping_ptr, stack_len);
 ///
 /// let (instruction_count, result) = vm.execute_program(
 ///     &executable,
@@ -304,7 +305,7 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// ProgramResult inlined
     pub program_result: ProgramResult,
     /// MemoryMapping inlined
-    pub memory_mapping: MemoryMapping,
+    pub memory_mapping: *mut MemoryMapping,
     /// Stack of CallFrames used by the Interpreter
     pub call_frames: Vec<CallFrame>,
     /// Loader built-in program
@@ -325,7 +326,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         loader: Arc<BuiltinProgram<C>>,
         sbpf_version: SBPFVersion,
         context_object: &'a mut C,
-        memory_mapping: MemoryMapping,
+        memory_mapping: *mut MemoryMapping,
         stack_len: usize,
     ) -> Self {
         let config = loader.get_config();

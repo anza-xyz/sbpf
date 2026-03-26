@@ -15,17 +15,29 @@ use solana_sbpf::{
     elf::Executable,
     error::EbpfError,
     memory_region::{AccessViolationHandler, MemoryMapping, MemoryRegion},
+    program::SBPFVersion,
     static_analysis::RegisterTraceEntry,
-    vm::ContextObject,
+    vm::{Config, ContextObject},
 };
 
 pub mod syscalls;
 
 /// Simple instruction meter for testing
-#[derive(Debug, Clone, Default)]
+#[derive(Debug)]
 pub struct TestContextObject {
     /// Maximal amount of instructions which still can be executed
     pub remaining: u64,
+    pub memory_mapping: MemoryMapping,
+}
+
+impl Default for TestContextObject {
+    fn default() -> Self {
+        Self {
+            remaining: 0,
+            memory_mapping: MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved)
+                .unwrap(),
+        }
+    }
 }
 
 impl ContextObject for TestContextObject {
@@ -41,7 +53,9 @@ impl ContextObject for TestContextObject {
 impl TestContextObject {
     /// Initialize with instruction meter
     pub fn new(remaining: u64) -> Self {
-        Self { remaining }
+        let mut new = TestContextObject::default();
+        new.remaining = remaining;
+        new
     }
 }
 
@@ -250,7 +264,7 @@ macro_rules! create_vm {
         );
         let mut $heap = solana_sbpf::aligned_memory::AlignedMemory::with_capacity(0);
         let stack_len = $stack.len();
-        let memory_mapping = test_utils::create_memory_mapping(
+        $context_object.memory_mapping = test_utils::create_memory_mapping(
             $verified_executable,
             &mut $stack,
             &mut $heap,
@@ -258,11 +272,13 @@ macro_rules! create_vm {
             $access_violation_handler,
         )
         .unwrap();
+
+        let mapping_ptr = &raw mut $context_object.memory_mapping;
         let mut $vm_name = solana_sbpf::vm::EbpfVm::new(
             $verified_executable.get_loader().clone(),
             $verified_executable.get_sbpf_version(),
             $context_object,
-            memory_mapping,
+            mapping_ptr,
             stack_len,
         );
         $vm_name.registers[1] = solana_sbpf::ebpf::MM_INPUT_START;
@@ -286,11 +302,11 @@ macro_rules! test_interpreter_and_jit {
             const INSTRUCTION_METER_BUDGET: u64 = 1024;
             context_object.remaining = INSTRUCTION_METER_BUDGET;
         }
+        let original_budget = context_object.remaining;
         $executable.verify::<RequisiteVerifier>().unwrap();
         let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter) = {
             let mut mem = $mem;
             let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
-            let mut context_object = context_object.clone();
             create_vm!(
                 vm,
                 &$executable,
@@ -314,6 +330,7 @@ macro_rules! test_interpreter_and_jit {
         };
         #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
         {
+            context_object.remaining = original_budget;
             #[allow(unused_mut)]
             let compilation_result = $executable.jit_compile();
             let mut mem = $mem;

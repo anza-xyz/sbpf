@@ -375,7 +375,9 @@ where
                     c,
                     d,
                     e,
-                    &mut vm.memory_mapping,
+                    // This is a temporary solution until we migrate all syscall
+                    // usages to fetch the memory mapping from InvokeContext.
+                    &mut *vm.memory_mapping,
                 )
                 .map_err(|err| crate::error::EbpfError::SyscallError(err.into()))
                 .into();

@@ -23,14 +23,18 @@ use crate::{
 /// Virtual memory operation helper.
 macro_rules! translate_memory_access {
     (_impl, $self:ident, $op:ident, $vm_addr:ident, $T:ty, $($rest:expr),*) => {
-        match $self.vm.memory_mapping.$op::<$T>(
-            $($rest,)*
-            $vm_addr,
-        ) {
-            ProgramResult::Ok(v) => v,
-            ProgramResult::Err(err) => {
-                throw_error!($self, err);
-            },
+        // SAFETY: The memory mapping is only modified here, and we keep it stable
+        // in the validator.
+        unsafe {
+                match (&mut *$self.vm.memory_mapping).$op::<$T>(
+                $($rest,)*
+                $vm_addr,
+            ) {
+                ProgramResult::Ok(v) => v,
+                ProgramResult::Err(err) => {
+                    throw_error!($self, err);
+                },
+            }
         }
     };
 
