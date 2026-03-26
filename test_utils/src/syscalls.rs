@@ -201,11 +201,11 @@ declare_builtin_function!(
     SyscallGenericTest<G: Clone>,
     fn rust(
         _context_object: &mut TestContextObject,
-        arg1: u64,
-        arg2: u64,
-        arg3: u64,
-        arg4: u64,
-        arg5: u64,
+        _arg1: u64,
+        _arg2: u64,
+        _arg3: u64,
+        _arg4: u64,
+        _arg5: u64,
         _memory_mapping: &mut MemoryMapping,
     ) -> Result<u64, Box<dyn std::error::Error>> {
         loop {
