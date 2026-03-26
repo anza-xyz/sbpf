@@ -325,7 +325,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         loader: Arc<BuiltinProgram<C>>,
         sbpf_version: SBPFVersion,
         context_object: &'a mut C,
-        mut memory_mapping: MemoryMapping,
+        memory_mapping: MemoryMapping,
         stack_len: usize,
     ) -> Self {
         let config = loader.get_config();
@@ -336,9 +336,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             } else {
                 stack_len
             } as u64);
-        if !config.enable_address_translation {
-            memory_mapping = MemoryMapping::new_identity();
-        }
+
         EbpfVm {
             host_stack_pointer: std::ptr::null_mut(),
             call_depth: 0,
