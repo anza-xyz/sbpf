@@ -150,6 +150,8 @@ pub trait ContextObject {
     fn consume(&mut self, amount: u64);
     /// Get the number of remaining instructions allowed
     fn get_remaining(&self) -> u64;
+    /// Return a mutable pointer to the active MemoryMapping
+    fn active_mapping_ptr(&mut self) -> *mut MemoryMapping;
 }
 
 /// Statistic of taken branches (from a recorded trace)
@@ -271,8 +273,7 @@ pub enum RuntimeEnvironmentSlot {
 ///
 /// context_object.memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();
 ///
-/// let mapping_ptr = &raw mut context_object.memory_mapping;
-/// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, mapping_ptr, stack_len);
+/// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
 ///
 /// let (instruction_count, result) = vm.execute_program(
 ///     &executable,
@@ -328,7 +329,6 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         loader: Arc<BuiltinProgram<C>>,
         sbpf_version: SBPFVersion,
         context_object: &'a mut C,
-        memory_mapping: *mut MemoryMapping,
         stack_len: usize,
     ) -> Self {
         let config = loader.get_config();
@@ -340,6 +340,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 stack_len
             } as u64);
 
+        let memory_mapping = context_object.active_mapping_ptr();
         EbpfVm {
             host_stack_pointer: std::ptr::null_mut(),
             call_depth: 0,

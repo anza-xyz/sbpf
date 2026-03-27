@@ -48,6 +48,10 @@ impl ContextObject for TestContextObject {
     fn get_remaining(&self) -> u64 {
         self.remaining
     }
+
+    fn active_mapping_ptr(&mut self) -> *mut MemoryMapping {
+        &raw mut self.memory_mapping
+    }
 }
 
 impl TestContextObject {
@@ -273,12 +277,10 @@ macro_rules! create_vm {
         )
         .unwrap();
 
-        let mapping_ptr = &raw mut $context_object.memory_mapping;
         let mut $vm_name = solana_sbpf::vm::EbpfVm::new(
             $verified_executable.get_loader().clone(),
             $verified_executable.get_sbpf_version(),
             $context_object,
-            mapping_ptr,
             stack_len,
         );
         $vm_name.registers[1] = solana_sbpf::ebpf::MM_INPUT_START;
