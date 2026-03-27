@@ -2,6 +2,7 @@
 //! Static Byte Code Analysis
 
 use crate::disassembler::disassemble_instruction;
+use crate::memory_region::MemoryMapping;
 use crate::{
     ebpf,
     elf::Executable,
@@ -131,6 +132,10 @@ impl ContextObject for DummyContextObject {
 
     fn get_remaining(&self) -> u64 {
         0
+    }
+
+    fn active_mapping_ptr(&mut self) -> *mut MemoryMapping {
+        std::ptr::null_mut()
     }
 }
 
