@@ -38,7 +38,9 @@ fn bench_init_interpreter_start(bencher: &mut Bencher) {
         None
     );
     bencher.iter(|| {
-        vm.context_object_pointer.remaining = 37;
+        unsafe {
+            (*vm.context_object_pointer).remaining = 37;
+        }
         vm.execute_program(&executable, &mut ExecutionMode::Interpreted)
             .1
             .unwrap()
@@ -67,7 +69,9 @@ fn bench_init_jit_start(bencher: &mut Bencher) {
         None
     );
     bencher.iter(|| {
-        vm.context_object_pointer.remaining = 37;
+        unsafe {
+            (*vm.context_object_pointer).remaining = 37;
+        }
         vm.execute_program(&executable, &mut ExecutionMode::Jit)
             .1
             .unwrap()
@@ -103,7 +107,9 @@ fn bench_jit_vs_interpreter(
     let interpreter_summary = bencher
         .bench(|bencher| {
             bencher.iter(|| {
-                vm.context_object_pointer.remaining = instruction_meter;
+                unsafe {
+                    (*vm.context_object_pointer).remaining = instruction_meter;
+                }
                 let (instruction_count_interpreter, result) =
                     vm.execute_program(&executable, &mut ExecutionMode::Interpreted);
                 assert!(result.is_ok(), "{:?}", result);
@@ -116,7 +122,9 @@ fn bench_jit_vs_interpreter(
     let jit_summary = bencher
         .bench(|bencher| {
             bencher.iter(|| {
-                vm.context_object_pointer.remaining = instruction_meter;
+                unsafe {
+                    (*vm.context_object_pointer).remaining = instruction_meter;
+                }
                 let (instruction_count_jit, result) =
                     vm.execute_program(&executable, &mut ExecutionMode::Jit);
                 assert!(result.is_ok(), "{:?}", result);
@@ -310,7 +318,9 @@ fn bench_mem_ldxdw_jit(bencher: &mut Bencher) {
     );
 
     bencher.iter(|| {
-        vm.context_object_pointer.remaining = LOAD64_INSTRUCTION_COUNT;
+        unsafe {
+            (*vm.context_object_pointer).remaining = LOAD64_INSTRUCTION_COUNT;
+        }
         let (instruction_count, result) = vm.execute_program(&executable, &mut ExecutionMode::Jit);
         assert!(result.is_ok(), "{:?}", result);
         assert_eq!(instruction_count, LOAD64_INSTRUCTION_COUNT);

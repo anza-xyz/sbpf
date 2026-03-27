@@ -291,7 +291,9 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// config.max_call_depth and to know when to terminate execution.
     pub call_depth: u64,
     /// Pointer to ContextObject
-    pub context_object_pointer: &'a mut C,
+    pub context_object_pointer: *mut C,
+    /// The lifetime for the context object pointer
+    context_object_lifetime: PhantomData<&'a mut C>,
     /// Last return value of instruction_meter.get_remaining()
     pub previous_instruction_meter: u64,
     /// Outstanding value to instruction_meter.consume()
@@ -341,7 +343,8 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         EbpfVm {
             host_stack_pointer: std::ptr::null_mut(),
             call_depth: 0,
-            context_object_pointer: context_object,
+            context_object_pointer: context_object as *mut C,
+            context_object_lifetime: PhantomData,
             previous_instruction_meter: 0,
             due_insn_count: 0,
             stopwatch_numerator: 0,
@@ -375,7 +378,9 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
-        let initial_insn_count = self.context_object_pointer.get_remaining();
+        // SAFETY: The VM expects the context object as a mutable reference, and
+        // expects it to remain valid throughout execution.
+        let initial_insn_count = unsafe { (&*self.context_object_pointer).get_remaining() };
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
@@ -420,8 +425,11 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         }
 
         let instruction_count = if config.enable_instruction_meter {
-            self.context_object_pointer.consume(self.due_insn_count);
-            initial_insn_count.saturating_sub(self.context_object_pointer.get_remaining())
+            // SAFETY: The VM expects the context object as a mutable reference, and
+            // expects it to remain valid throughout execution.
+            let context_object_reference = unsafe { &mut *self.context_object_pointer };
+            context_object_reference.consume(self.due_insn_count);
+            initial_insn_count.saturating_sub(context_object_reference.get_remaining())
         } else {
             0
         };
