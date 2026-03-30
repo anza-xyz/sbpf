@@ -265,8 +265,9 @@ impl<'a, 'b, C: ContextObject> target::ext::base::single_register_access::Single
             BpfRegId::Sp => buf.copy_from_slice(&self.reg[ebpf::FRAME_PTR_REG].to_le_bytes()),
             BpfRegId::Pc => buf.copy_from_slice(&self.get_dbg_pc().to_le_bytes()),
             BpfRegId::InstructionCountRemaining => {
-                // SAFETY: ContextObject carries the lifetime of the pointer in PhantomData
-                let context_object = unsafe { &*self.vm.context_object_pointer };
+                // SAFETY: The NonNull pointer was directly created from a unique mutable reference to
+                // ContextObject, and EpbfVm carries its lifetime.
+                let context_object = unsafe { self.vm.context_object_pointer.as_ref() };
 
                 buf.copy_from_slice(&context_object.get_remaining().to_le_bytes())
             }

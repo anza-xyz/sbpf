@@ -39,7 +39,7 @@ fn bench_init_interpreter_start(bencher: &mut Bencher) {
     );
     bencher.iter(|| {
         unsafe {
-            (*vm.context_object_pointer).remaining = 37;
+            vm.context_object_pointer.as_mut().remaining = 37;
         }
         vm.execute_program(&executable, &mut ExecutionMode::Interpreted)
             .1
@@ -70,7 +70,7 @@ fn bench_init_jit_start(bencher: &mut Bencher) {
     );
     bencher.iter(|| {
         unsafe {
-            (*vm.context_object_pointer).remaining = 37;
+            vm.context_object_pointer.as_mut().remaining = 37;
         }
         vm.execute_program(&executable, &mut ExecutionMode::Jit)
             .1
@@ -108,7 +108,7 @@ fn bench_jit_vs_interpreter(
         .bench(|bencher| {
             bencher.iter(|| {
                 unsafe {
-                    (*vm.context_object_pointer).remaining = instruction_meter;
+                    vm.context_object_pointer.as_mut().remaining = instruction_meter;
                 }
                 let (instruction_count_interpreter, result) =
                     vm.execute_program(&executable, &mut ExecutionMode::Interpreted);
@@ -123,7 +123,7 @@ fn bench_jit_vs_interpreter(
         .bench(|bencher| {
             bencher.iter(|| {
                 unsafe {
-                    (*vm.context_object_pointer).remaining = instruction_meter;
+                    vm.context_object_pointer.as_mut().remaining = instruction_meter;
                 }
                 let (instruction_count_jit, result) =
                     vm.execute_program(&executable, &mut ExecutionMode::Jit);
@@ -319,7 +319,7 @@ fn bench_mem_ldxdw_jit(bencher: &mut Bencher) {
 
     bencher.iter(|| {
         unsafe {
-            (*vm.context_object_pointer).remaining = LOAD64_INSTRUCTION_COUNT;
+            vm.context_object_pointer.as_mut().remaining = LOAD64_INSTRUCTION_COUNT;
         }
         let (instruction_count, result) = vm.execute_program(&executable, &mut ExecutionMode::Jit);
         assert!(result.is_ok(), "{:?}", result);

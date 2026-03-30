@@ -365,11 +365,12 @@ where
             vm.with_vm(|vm| {
                 let config = vm.loader.get_config();
                 if config.enable_instruction_meter {
-                    (&mut *vm.context_object_pointer)
+                    vm.context_object_pointer
+                        .as_mut()
                         .consume(vm.previous_instruction_meter - vm.due_insn_count);
                 }
                 let converted_result: crate::error::ProgramResult = Self::rust(
-                    &mut *vm.context_object_pointer,
+                    vm.context_object_pointer.as_mut(),
                     a,
                     b,
                     c,
@@ -383,7 +384,8 @@ where
                 .into();
                 vm.program_result = converted_result;
                 if config.enable_instruction_meter {
-                    vm.previous_instruction_meter = (&*vm.context_object_pointer).get_remaining();
+                    vm.previous_instruction_meter =
+                        vm.context_object_pointer.as_ref().get_remaining();
                 }
             })
         }

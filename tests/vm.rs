@@ -122,7 +122,7 @@ fn test_gdbstub_architecture() {
                 None
             );
             unsafe {
-                (*vm.context_object_pointer).remaining = 10_000_000_000;
+                vm.context_object_pointer.as_mut().remaining = 10_000_000_000;
             }
             vm.debug_port = Some(debug_port);
             vm.debug_metadata = Some(METADATA.into());
