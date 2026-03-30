@@ -12,6 +12,7 @@ use crate::{
 };
 use rustc_demangle::demangle;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ptr;
 
 /// Register state recorded after executing one instruction
 ///
@@ -134,8 +135,11 @@ impl ContextObject for DummyContextObject {
         0
     }
 
-    fn active_mapping_ptr(&mut self) -> *mut MemoryMapping {
-        std::ptr::null_mut()
+    fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping> {
+        unreachable!(
+            "DummyContextObject is only used in tests, and does not have an instance \
+                        of MemoryMapping"
+        )
     }
 }
 

@@ -183,7 +183,7 @@ fn get_host_ptr<C: ContextObject>(
 
     // SAFETY: The creator of EbpfVm must guarantee the pointer is valid.
     unsafe {
-        match (&*interpreter.vm.memory_mapping).map(
+        match interpreter.vm.memory_mapping.as_ref().map(
             AccessType::Load,
             vm_addr,
             std::mem::size_of::<u8>() as u64,

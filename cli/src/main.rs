@@ -10,6 +10,7 @@ use solana_sbpf::{
     verifier::RequisiteVerifier,
     vm::{Config, DynamicAnalysis, EbpfVm, ExecutionMode},
 };
+use std::cell::UnsafeCell;
 use std::{fs::File, io::Read, path::Path, sync::Arc};
 use test_utils::TestContextObject;
 
@@ -163,7 +164,8 @@ fn main() {
         MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START),
     ];
 
-    context_object.memory_mapping = MemoryMapping::new(regions, config, sbpf_version).unwrap();
+    context_object.memory_mapping =
+        UnsafeCell::new(MemoryMapping::new(regions, config, sbpf_version).unwrap());
 
     let mut vm = EbpfVm::new(
         executable.get_loader().clone(),

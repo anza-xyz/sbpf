@@ -21,7 +21,7 @@ use crate::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::{Analysis, DummyContextObject, RegisterTraceEntry},
 };
-use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of};
+use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of, ptr};
 
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;
@@ -151,7 +151,7 @@ pub trait ContextObject {
     /// Get the number of remaining instructions allowed
     fn get_remaining(&self) -> u64;
     /// Return a mutable pointer to the active MemoryMapping
-    fn active_mapping_ptr(&mut self) -> *mut MemoryMapping;
+    fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping>;
 }
 
 /// Statistic of taken branches (from a recorded trace)
@@ -271,7 +271,7 @@ pub enum RuntimeEnvironmentSlot {
 ///     MemoryRegion::new_writable(mem, ebpf::MM_INPUT_START),
 /// ];
 ///
-/// context_object.memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();
+/// context_object.memory_mapping = std::cell::UnsafeCell::new(MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap());
 ///
 /// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
 ///
@@ -308,7 +308,7 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// ProgramResult inlined
     pub program_result: ProgramResult,
     /// MemoryMapping inlined
-    pub memory_mapping: *mut MemoryMapping,
+    pub memory_mapping: ptr::NonNull<MemoryMapping>,
     /// Stack of CallFrames used by the Interpreter
     pub call_frames: Vec<CallFrame>,
     /// Loader built-in program
