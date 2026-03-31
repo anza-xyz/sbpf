@@ -163,13 +163,12 @@ fn main() {
         MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START),
     ];
 
-    let memory_mapping = MemoryMapping::new(regions, config, sbpf_version).unwrap();
+    context_object.memory_mapping = MemoryMapping::new(regions, config, sbpf_version).unwrap();
 
     let mut vm = EbpfVm::new(
         executable.get_loader().clone(),
         executable.get_sbpf_version(),
         &mut context_object,
-        memory_mapping,
         stack_len,
     );
 

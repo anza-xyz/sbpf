@@ -366,22 +366,26 @@ where
                 let config = vm.loader.get_config();
                 if config.enable_instruction_meter {
                     vm.context_object_pointer
+                        .as_mut()
                         .consume(vm.previous_instruction_meter - vm.due_insn_count);
                 }
                 let converted_result: crate::error::ProgramResult = Self::rust(
-                    vm.context_object_pointer,
+                    vm.context_object_pointer.as_mut(),
                     a,
                     b,
                     c,
                     d,
                     e,
-                    &mut vm.memory_mapping,
+                    // This is a temporary solution until we migrate all syscall
+                    // usages to fetch the memory mapping from InvokeContext.
+                    vm.memory_mapping.as_mut(),
                 )
                 .map_err(|err| crate::error::EbpfError::SyscallError(err.into()))
                 .into();
                 vm.program_result = converted_result;
                 if config.enable_instruction_meter {
-                    vm.previous_instruction_meter = vm.context_object_pointer.get_remaining();
+                    vm.previous_instruction_meter =
+                        vm.context_object_pointer.as_ref().get_remaining();
                 }
             })
         }

@@ -21,7 +21,7 @@ use crate::{
     program::{BuiltinFunction, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::{Analysis, DummyContextObject, RegisterTraceEntry},
 };
-use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of};
+use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of, ptr};
 
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;
@@ -150,6 +150,8 @@ pub trait ContextObject {
     fn consume(&mut self, amount: u64);
     /// Get the number of remaining instructions allowed
     fn get_remaining(&self) -> u64;
+    /// Return a mutable pointer to the active MemoryMapping
+    fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping>;
 }
 
 /// Statistic of taken branches (from a recorded trace)
@@ -269,9 +271,9 @@ pub enum RuntimeEnvironmentSlot {
 ///     MemoryRegion::new_writable(mem, ebpf::MM_INPUT_START),
 /// ];
 ///
-/// let memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();
+/// context_object.memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();
 ///
-/// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, memory_mapping, stack_len);
+/// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
 ///
 /// let (instruction_count, result) = vm.execute_program(
 ///     &executable,
@@ -290,7 +292,9 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// config.max_call_depth and to know when to terminate execution.
     pub call_depth: u64,
     /// Pointer to ContextObject
-    pub context_object_pointer: &'a mut C,
+    pub context_object_pointer: ptr::NonNull<C>,
+    /// The lifetime for the context object pointer
+    context_object_lifetime: PhantomData<&'a mut C>,
     /// Last return value of instruction_meter.get_remaining()
     pub previous_instruction_meter: u64,
     /// Outstanding value to instruction_meter.consume()
@@ -304,7 +308,7 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// ProgramResult inlined
     pub program_result: ProgramResult,
     /// MemoryMapping inlined
-    pub memory_mapping: MemoryMapping,
+    pub memory_mapping: ptr::NonNull<MemoryMapping>,
     /// Stack of CallFrames used by the Interpreter
     pub call_frames: Vec<CallFrame>,
     /// Loader built-in program
@@ -325,7 +329,6 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         loader: Arc<BuiltinProgram<C>>,
         sbpf_version: SBPFVersion,
         context_object: &'a mut C,
-        memory_mapping: MemoryMapping,
         stack_len: usize,
     ) -> Self {
         let config = loader.get_config();
@@ -337,10 +340,12 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 stack_len
             } as u64);
 
+        let memory_mapping = context_object.active_mapping_ptr();
         EbpfVm {
             host_stack_pointer: std::ptr::null_mut(),
             call_depth: 0,
-            context_object_pointer: context_object,
+            context_object_pointer: ptr::NonNull::from_mut(context_object),
+            context_object_lifetime: PhantomData,
             previous_instruction_meter: 0,
             due_insn_count: 0,
             stopwatch_numerator: 0,
@@ -374,7 +379,9 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
-        let initial_insn_count = self.context_object_pointer.get_remaining();
+        // SAFETY: The NonNull pointer was directly created from a unique mutable reference to
+        // ContextObject, and EpbfVm carries its lifetime.
+        let initial_insn_count = unsafe { self.context_object_pointer.as_ref().get_remaining() };
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
@@ -419,8 +426,11 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         }
 
         let instruction_count = if config.enable_instruction_meter {
-            self.context_object_pointer.consume(self.due_insn_count);
-            initial_insn_count.saturating_sub(self.context_object_pointer.get_remaining())
+            // SAFETY: The NonNull pointer was directly created from a unique mutable reference to
+            // ContextObject.
+            let context_object_reference = unsafe { self.context_object_pointer.as_mut() };
+            context_object_reference.consume(self.due_insn_count);
+            initial_insn_count.saturating_sub(context_object_reference.get_remaining())
         } else {
             0
         };

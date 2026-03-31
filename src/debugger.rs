@@ -180,13 +180,17 @@ fn get_host_ptr<C: ContextObject>(
     {
         vm_addr += ebpf::MM_BYTECODE_START;
     }
-    match interpreter.vm.memory_mapping.map(
-        AccessType::Load,
-        vm_addr,
-        std::mem::size_of::<u8>() as u64,
-    ) {
-        ProgramResult::Ok(host_addr) => Ok(host_addr as *mut u8),
-        ProgramResult::Err(err) => Err(err),
+
+    // SAFETY: The creator of EbpfVm must guarantee the pointer is valid.
+    unsafe {
+        match interpreter.vm.memory_mapping.as_ref().map(
+            AccessType::Load,
+            vm_addr,
+            std::mem::size_of::<u8>() as u64,
+        ) {
+            ProgramResult::Ok(host_addr) => Ok(host_addr as *mut u8),
+            ProgramResult::Err(err) => Err(err),
+        }
     }
 }
 
@@ -261,7 +265,11 @@ impl<'a, 'b, C: ContextObject> target::ext::base::single_register_access::Single
             BpfRegId::Sp => buf.copy_from_slice(&self.reg[ebpf::FRAME_PTR_REG].to_le_bytes()),
             BpfRegId::Pc => buf.copy_from_slice(&self.get_dbg_pc().to_le_bytes()),
             BpfRegId::InstructionCountRemaining => {
-                buf.copy_from_slice(&self.vm.context_object_pointer.get_remaining().to_le_bytes())
+                // SAFETY: The NonNull pointer was directly created from a unique mutable reference to
+                // ContextObject, and EpbfVm carries its lifetime.
+                let context_object = unsafe { self.vm.context_object_pointer.as_ref() };
+
+                buf.copy_from_slice(&context_object.get_remaining().to_le_bytes())
             }
         }
         Ok(buf.len())

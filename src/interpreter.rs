@@ -23,14 +23,17 @@ use crate::{
 /// Virtual memory operation helper.
 macro_rules! translate_memory_access {
     (_impl, $self:ident, $op:ident, $vm_addr:ident, $T:ty, $($rest:expr),*) => {
-        match $self.vm.memory_mapping.$op::<$T>(
-            $($rest,)*
-            $vm_addr,
-        ) {
-            ProgramResult::Ok(v) => v,
-            ProgramResult::Err(err) => {
-                throw_error!($self, err);
-            },
+        // SAFETY: The creator of EbpfVm must guarantee the pointer is valid.
+        unsafe {
+                match (*$self.vm.memory_mapping.as_ptr()).$op::<$T>(
+                $($rest,)*
+                $vm_addr,
+            ) {
+                ProgramResult::Ok(v) => v,
+                ProgramResult::Err(err) => {
+                    throw_error!($self, err);
+                },
+            }
         }
     };
 

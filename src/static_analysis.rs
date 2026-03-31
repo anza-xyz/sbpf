@@ -2,6 +2,7 @@
 //! Static Byte Code Analysis
 
 use crate::disassembler::disassemble_instruction;
+use crate::memory_region::MemoryMapping;
 use crate::{
     ebpf,
     elf::Executable,
@@ -11,6 +12,7 @@ use crate::{
 };
 use rustc_demangle::demangle;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ptr;
 
 /// Register state recorded after executing one instruction
 ///
@@ -131,6 +133,13 @@ impl ContextObject for DummyContextObject {
 
     fn get_remaining(&self) -> u64 {
         0
+    }
+
+    fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping> {
+        unreachable!(
+            "DummyContextObject is only used in tests, and does not have an instance \
+                        of MemoryMapping"
+        )
     }
 }
 
