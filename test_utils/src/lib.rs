@@ -19,7 +19,6 @@ use solana_sbpf::{
     static_analysis::RegisterTraceEntry,
     vm::{Config, ContextObject},
 };
-use std::cell::UnsafeCell;
 use std::ptr;
 
 pub mod syscalls;
@@ -29,16 +28,15 @@ pub mod syscalls;
 pub struct TestContextObject {
     /// Maximal amount of instructions which still can be executed
     pub remaining: u64,
-    pub memory_mapping: UnsafeCell<MemoryMapping>,
+    pub memory_mapping: MemoryMapping,
 }
 
 impl Default for TestContextObject {
     fn default() -> Self {
         Self {
             remaining: 0,
-            memory_mapping: UnsafeCell::new(
-                MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved).unwrap(),
-            ),
+            memory_mapping: MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved)
+                .unwrap(),
         }
     }
 }
@@ -53,7 +51,7 @@ impl ContextObject for TestContextObject {
     }
 
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping> {
-        ptr::NonNull::from_ref(self.memory_mapping.get_mut())
+        ptr::NonNull::from_ref(&mut self.memory_mapping)
     }
 }
 
@@ -271,16 +269,14 @@ macro_rules! create_vm {
         );
         let mut $heap = solana_sbpf::aligned_memory::AlignedMemory::with_capacity(0);
         let stack_len = $stack.len();
-        $context_object.memory_mapping = std::cell::UnsafeCell::new(
-            test_utils::create_memory_mapping(
-                $verified_executable,
-                &mut $stack,
-                &mut $heap,
-                $additional_regions,
-                $access_violation_handler,
-            )
-            .unwrap(),
-        );
+        $context_object.memory_mapping = test_utils::create_memory_mapping(
+            $verified_executable,
+            &mut $stack,
+            &mut $heap,
+            $additional_regions,
+            $access_violation_handler,
+        )
+        .unwrap();
 
         let mut $vm_name = solana_sbpf::vm::EbpfVm::new(
             $verified_executable.get_loader().clone(),

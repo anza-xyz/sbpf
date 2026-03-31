@@ -271,7 +271,7 @@ pub enum RuntimeEnvironmentSlot {
 ///     MemoryRegion::new_writable(mem, ebpf::MM_INPUT_START),
 /// ];
 ///
-/// context_object.memory_mapping = std::cell::UnsafeCell::new(MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap());
+/// context_object.memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();
 ///
 /// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
 ///
