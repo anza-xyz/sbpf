@@ -43,6 +43,7 @@ jit-enable-host-stack-frames = ["jit"]
 fuzzer-not-safe-for-production = ["arbitrary"]
 debugger = ["dep:gdbstub"]
 shuttle-test = ["dep:shuttle"]
+conf-stack-frame-size = []
 
 [dev-dependencies]
 elf = "0.0.10"

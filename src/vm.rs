@@ -94,6 +94,38 @@ pub struct Config {
     pub enabled_sbpf_versions: std::ops::RangeInclusive<SBPFVersion>,
 }
 
+/// Returns the stack frame size in bytes.
+///
+/// With the `conf-stack-frame-size` feature enabled, the size can be overridden
+/// at runtime via the `VM_STACK_FRAME_SIZE` environment variable. The value is
+/// read once and cached. Without the feature, the default (4096) is always returned.
+#[inline(always)]
+pub fn get_stack_frame_size() -> usize {
+    const DEFAULT_STACK_FRAME_SIZE: usize = 4_096;
+
+    #[cfg(feature = "conf-stack-frame-size")]
+    {
+        static STACK_FRAME_SIZE_CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *STACK_FRAME_SIZE_CACHE.get_or_init(|| {
+            let size = std::env::var("VM_STACK_FRAME_SIZE")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(DEFAULT_STACK_FRAME_SIZE);
+            if size != DEFAULT_STACK_FRAME_SIZE {
+                log::warn!(
+                    "VM_STACK_FRAME_SIZE is set to {size} (default: {}).",
+                    DEFAULT_STACK_FRAME_SIZE
+                );
+            }
+            size
+        })
+    }
+    #[cfg(not(feature = "conf-stack-frame-size"))]
+    {
+        DEFAULT_STACK_FRAME_SIZE
+    }
+}
+
 impl Config {
     /// Returns the size of the stack memory region
     pub fn stack_size(&self) -> usize {
@@ -105,7 +137,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             max_call_depth: 64,
-            stack_frame_size: 4_096,
+            stack_frame_size: get_stack_frame_size(),
             enable_address_translation: true,
             enable_stack_frame_gaps: true,
             instruction_meter_checkpoint_distance: 10000,
