@@ -218,25 +218,38 @@ impl UnalignedMemoryMapping {
         )
     }
 
-    /// Creates a new MemoryMapping structure from the given regions
-    pub fn new(mut regions: Vec<MemoryRegion>) -> Result<Self, EbpfError> {
-        regions.sort();
+    /// Create an uninitialized UnalignedMapping
+    pub fn new_uninitialized(regions: Vec<MemoryRegion>) -> Self {
         let number_of_regions = regions.len();
-        for index in 1..number_of_regions {
-            let first = &regions[index.saturating_sub(1)];
-            let second = &regions[index];
-            if first.vm_addr_range().end > second.vm_addr {
-                return Err(EbpfError::InvalidMemoryRegion(index));
-            }
-        }
-        let mut result = Self {
+        Self {
             regions: regions.into_boxed_slice(),
             region_addresses: vec![0; number_of_regions].into_boxed_slice(),
             region_index_lookup: vec![0; number_of_regions].into_boxed_slice(),
             cache: UnsafeCell::new(MappingCache::new()),
-        };
-        result.construct_eytzinger_order(0, 0);
-        Ok(result)
+        }
+    }
+
+    /// Creates a new MemoryMapping structure from the given regions
+    pub fn new(regions: Vec<MemoryRegion>) -> Result<Self, EbpfError> {
+        let mut mapping = Self::new_uninitialized(regions);
+        mapping.initialize()?;
+        Ok(mapping)
+    }
+
+    /// Initialize the memory mapping
+    pub fn initialize(&mut self) -> Result<(), EbpfError> {
+        self.regions.sort();
+        let number_of_regions = self.regions.len();
+        for index in 1..number_of_regions {
+            let first = &self.regions[index.saturating_sub(1)];
+            let second = &self.regions[index];
+            if first.vm_addr_range().end > second.vm_addr {
+                return Err(EbpfError::InvalidMemoryRegion(index));
+            }
+        }
+
+        self.construct_eytzinger_order(0, 0);
+        Ok(())
     }
 
     /// Returns the `MemoryRegion` which may contain the given address.
@@ -290,25 +303,41 @@ impl UnalignedMemoryMapping {
 /// underlying memory region.
 #[derive(Debug)]
 pub struct AlignedMemoryMapping {
-    regions: Box<[MemoryRegion]>,
+    regions: Vec<MemoryRegion>,
     allow_memory_region_zero: bool,
 }
 
 impl AlignedMemoryMapping {
-    /// Creates a new MemoryMapping structure from the given regions
-    pub fn new(mut regions: Vec<MemoryRegion>, config: &Config) -> Result<Self, EbpfError> {
-        if config.allow_memory_region_zero {
-            regions.sort();
+    /// Creates a new initialized MemoryMapping structure from the given regions
+    pub fn new(regions: Vec<MemoryRegion>, config: &Config) -> Result<Self, EbpfError> {
+        let mut mapping = Self::new_uninitialized(regions, config);
+        mapping.initialize()?;
+        Ok(mapping)
+    }
+
+    /// Create an uninitialized MemoryMapping
+    pub fn new_uninitialized(regions: Vec<MemoryRegion>, config: &Config) -> Self {
+        Self {
+            regions,
+            allow_memory_region_zero: config.allow_memory_region_zero,
+        }
+    }
+
+    /// Initialize the memory mapping by sorting its regions and filling gaps
+    pub fn initialize(&mut self) -> Result<(), EbpfError> {
+        if self.allow_memory_region_zero {
+            self.regions.sort();
             let mut expected_region_index = 0;
-            while expected_region_index < regions.len() {
-                let actual_region_index = regions
+            while expected_region_index < self.regions.len() {
+                let actual_region_index = self
+                    .regions
                     .get(expected_region_index)
                     .unwrap()
                     .vm_addr
                     .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
                     .unwrap_or(0) as usize;
                 if actual_region_index > expected_region_index {
-                    regions.insert(
+                    self.regions.insert(
                         expected_region_index,
                         MemoryRegion::new_readonly(
                             &[],
@@ -321,9 +350,9 @@ impl AlignedMemoryMapping {
                 expected_region_index = expected_region_index.saturating_add(1);
             }
         } else {
-            regions.insert(0, MemoryRegion::new_readonly(&[], 0));
-            regions.sort();
-            for (index, region) in regions.iter().enumerate() {
+            self.regions.insert(0, MemoryRegion::new_readonly(&[], 0));
+            self.regions.sort();
+            for (index, region) in self.regions.iter().enumerate() {
                 if region
                     .vm_addr
                     .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
@@ -334,10 +363,8 @@ impl AlignedMemoryMapping {
                 }
             }
         }
-        Ok(Self {
-            regions: regions.into_boxed_slice(),
-            allow_memory_region_zero: config.allow_memory_region_zero,
-        })
+
+        Ok(())
     }
 
     /// Returns the `MemoryRegion` which may contain the given address.
@@ -416,24 +443,37 @@ impl MemoryMapping {
         sbpf_version: SBPFVersion,
         access_violation_handler: AccessViolationHandler,
     ) -> Result<Self, EbpfError> {
+        let mut mapping =
+            Self::new_uninitialized(regions, config, sbpf_version, access_violation_handler);
+        mapping.initialize()?;
+        Ok(mapping)
+    }
+
+    /// Creates an unitialized memory mapping
+    pub fn new_uninitialized(
+        regions: Vec<MemoryRegion>,
+        config: &Config,
+        sbpf_version: SBPFVersion,
+        access_violation_handler: AccessViolationHandler,
+    ) -> Self {
         let ty = if sbpf_version >= SBPFVersion::V4 || config.aligned_memory_mapping {
-            AlignedMemoryMapping::new(regions, config).map(MemoryMappingType::Aligned)?
+            MemoryMappingType::Aligned(AlignedMemoryMapping::new_uninitialized(regions, config))
         } else {
             debug_assert!(
                 sbpf_version <= SBPFVersion::V3,
                 "SBPFv4 and later versions do not support unaligned memory"
             );
-            UnalignedMemoryMapping::new(regions).map(MemoryMappingType::Unaligned)?
+            MemoryMappingType::Unaligned(UnalignedMemoryMapping::new_uninitialized(regions))
         };
 
-        Ok(Self {
+        Self {
             access_violation_handler: Box::new(access_violation_handler),
             max_call_depth: config.max_call_depth as i64,
             stack_frame_size: config.stack_frame_size as i64,
             disable_address_translation: !config.enable_address_translation,
             sbpf_version,
             ty,
-        })
+        }
     }
 
     /// Creates a new memory mapping for tests and benches.
@@ -546,6 +586,14 @@ impl MemoryMapping {
         }
     }
 
+    /// Returns the `MemoryRegion`s as mutable
+    pub fn get_regions_mut(&mut self) -> &mut [MemoryRegion] {
+        match &mut self.ty {
+            MemoryMappingType::Aligned(inner) => &mut inner.regions,
+            MemoryMappingType::Unaligned(inner) => &mut inner.regions,
+        }
+    }
+
     /// Replaces the `MemoryRegion` at the given index
     #[inline(always)]
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
@@ -562,6 +610,14 @@ impl MemoryMapping {
         match &mut self.ty {
             MemoryMappingType::Aligned(inner) => inner.replace_region(index, region),
             MemoryMappingType::Unaligned(inner) => inner.replace_region(index, region),
+        }
+    }
+
+    /// Initialize the MemoryMapping
+    pub fn initialize(&mut self) -> Result<(), EbpfError> {
+        match &mut self.ty {
+            MemoryMappingType::Aligned(inner) => inner.initialize(),
+            MemoryMappingType::Unaligned(inner) => inner.initialize(),
         }
     }
 
