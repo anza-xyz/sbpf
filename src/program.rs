@@ -3,7 +3,6 @@ use {
     crate::{
         ebpf,
         elf::ElfError,
-        memory_region::MemoryMapping,
         vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
     },
     std::collections::{btree_map::Entry, BTreeMap},
@@ -354,7 +353,6 @@ where
         arg_c: u64,
         arg_d: u64,
         arg_e: u64,
-        memory_mapping: &mut MemoryMapping,
     ) -> Result<u64, Self::Error>;
 
     /// The VM wrapper.
@@ -363,29 +361,18 @@ where
         unsafe {
             // SAFETY: Sound under the stacked lifetimes model – we've only one `VmAddress`.
             vm.with_vm(|vm| {
-                let config = vm.loader.get_config();
-                if config.enable_instruction_meter {
-                    vm.context_object_pointer
-                        .as_mut()
-                        .consume(vm.previous_instruction_meter - vm.due_insn_count);
+                let enable_insn_meter = vm.loader.get_config().enable_instruction_meter;
+                if enable_insn_meter {
+                    let used_cus = vm.previous_instruction_meter - vm.due_insn_count;
+                    vm.context().consume(used_cus);
                 }
-                let converted_result: crate::error::ProgramResult = Self::rust(
-                    vm.context_object_pointer.as_mut(),
-                    a,
-                    b,
-                    c,
-                    d,
-                    e,
-                    // This is a temporary solution until we migrate all syscall
-                    // usages to fetch the memory mapping from InvokeContext.
-                    vm.memory_mapping.as_mut(),
-                )
-                .map_err(|err| crate::error::EbpfError::SyscallError(err.into()))
-                .into();
+                let converted_result: crate::error::ProgramResult =
+                    Self::rust(vm.context(), a, b, c, d, e)
+                        .map_err(|err| crate::error::EbpfError::SyscallError(err.into()))
+                        .into();
                 vm.program_result = converted_result;
-                if config.enable_instruction_meter {
-                    vm.previous_instruction_meter =
-                        vm.context_object_pointer.as_ref().get_remaining();
+                if enable_insn_meter {
+                    vm.previous_instruction_meter = vm.context().get_remaining();
                 }
             })
         }
@@ -434,7 +421,6 @@ macro_rules! declare_builtin_function {
             $arg_c:ident : u64,
             $arg_d:ident : u64,
             $arg_e:ident : u64,
-            $memory_mapping:ident : &mut $MemoryMapping:ty,
         ) -> Result<$Ok:ty, $Err:ty> {
             $($rust:tt)*
         }
@@ -460,7 +446,6 @@ macro_rules! declare_builtin_function {
                 $arg_c: u64,
                 $arg_d: u64,
                 $arg_e: u64,
-                $memory_mapping: &mut $MemoryMapping,
             ) -> core::result::Result<$Ok, $Err> {
                 $($rust)*
             }

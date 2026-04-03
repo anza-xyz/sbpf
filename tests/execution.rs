@@ -22,7 +22,7 @@ use solana_sbpf::{
     declare_builtin_function, ebpf,
     elf::Executable,
     error::{EbpfError, ProgramResult},
-    memory_region::{AccessType, MemoryMapping, MemoryRegion},
+    memory_region::{AccessType, MemoryRegion},
     program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
@@ -2329,7 +2329,6 @@ declare_builtin_function!(
         version: u64,
         _arg4: u64,
         _arg5: u64,
-        _memory_mapping: &mut MemoryMapping,
     ) -> Result<u64, Box<dyn std::error::Error>> {
         let (result, expected_result): (Result<u64, Box<dyn std::error::Error>>, ProgramResult) =
             if throw == 0 {
@@ -2375,20 +2374,18 @@ declare_builtin_function!(
 
 #[test]
 fn test_nested_vm_syscall() {
-    let config = Config::default();
     let mut context_object = TestContextObject::default();
-    let mut memory_mapping = MemoryMapping::new(vec![], &config, SBPFVersion::V4).unwrap();
 
     // SBPFv0
-    let result = SyscallNestedVm::rust(&mut context_object, 1, 0, 0, 0, 0, &mut memory_mapping);
+    let result = SyscallNestedVm::rust(&mut context_object, 1, 0, 0, 0, 0);
     assert_eq!(result.unwrap(), 42);
-    let result = SyscallNestedVm::rust(&mut context_object, 1, 1, 0, 0, 0, &mut memory_mapping);
+    let result = SyscallNestedVm::rust(&mut context_object, 1, 1, 0, 0, 0);
     assert_error!(result, "CallDepthExceeded");
 
     // SBPFv4
-    let result = SyscallNestedVm::rust(&mut context_object, 1, 0, 3, 0, 0, &mut memory_mapping);
+    let result = SyscallNestedVm::rust(&mut context_object, 1, 0, 3, 0, 0);
     assert_eq!(result.unwrap(), 42);
-    let result = SyscallNestedVm::rust(&mut context_object, 1, 1, 3, 0, 0, &mut memory_mapping);
+    let result = SyscallNestedVm::rust(&mut context_object, 1, 1, 3, 0, 0);
     assert_error!(result, "CallDepthExceeded");
 }
 
