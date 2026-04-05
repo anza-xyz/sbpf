@@ -185,7 +185,7 @@ pub enum AccessType {
 /// Memory mapping based on eytzinger search.
 pub struct UnalignedMemoryMapping {
     /// Common parts
-    regions: Box<[MemoryRegion]>,
+    pub(crate) regions: Box<[MemoryRegion]>,
     /// Regions vm_addr fields in Eytzinger order
     region_addresses: Box<[u64]>,
     /// Converts the Eytzinger order back to the original order
@@ -381,7 +381,7 @@ pub struct MemoryMapping {
     disable_address_translation: bool,
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
-    ty: MemoryMappingType,
+    pub(crate) ty: MemoryMappingType,
 }
 
 impl fmt::Debug for MemoryMapping {

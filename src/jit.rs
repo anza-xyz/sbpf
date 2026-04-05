@@ -32,7 +32,7 @@ use crate::{
     memory_management::{
         allocate_pages, free_pages, get_system_page_size, protect_pages, round_to_page_size,
     },
-    memory_region::{AccessType, MemoryMapping},
+    memory_region::{AccessType, MemoryMapping, MemoryRegion, UnalignedMemoryMapping},
     program::BuiltinFunction,
     vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm, RuntimeEnvironmentSlot},
     x86::{
@@ -1187,15 +1187,19 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             if let Value::RegisterPlusConstant64(src, constant, _user_provided) = vm_addr {
                 if let Some(src_value) = self.constant_values_in_registers[src as usize] {
                     let vm_address = (src_value as i64).wrapping_add(constant) as u64;
-                    if let Some(host_addr) = self.executable.get_ro_region().vm_to_host(AccessType::Load, vm_address, len) {
-                        let data = match len {
-                            1 => unsafe { ptr::read_unaligned::<u8>(host_addr as *const u8) as u64 },
-                            2 => unsafe { ptr::read_unaligned::<u16>(host_addr as *const u16) as u64 },
-                            4 => unsafe { ptr::read_unaligned::<u32>(host_addr as *const u32) as u64 },
-                            8 => unsafe { ptr::read_unaligned::<u64>(host_addr as *const u64) },
+                    let region = self.executable.get_ro_region();
+                    if let Some(host_addr) = region.vm_to_host(AccessType::Load, vm_address, len) {
+                        let offset = host_addr.saturating_sub(region.host_addr) as i32;
+                        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_SCRATCH, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping))));
+                        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_SCRATCH, REGISTER_SCRATCH, X86IndirectAccess::Offset(std::mem::offset_of!(MemoryMapping, ty) as i32 + 8 + std::mem::offset_of!(UnalignedMemoryMapping, regions) as i32)));
+                        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_SCRATCH, REGISTER_SCRATCH, X86IndirectAccess::Offset(std::mem::size_of::<MemoryRegion>() as i32 * 0_i32 + std::mem::offset_of!(MemoryRegion, host_addr) as i32)));
+                        match len {
+                            1 => self.emit_ins(X86Instruction::load(OperandSize::S8, REGISTER_SCRATCH, dst, X86IndirectAccess::Offset(offset))),
+                            2 => self.emit_ins(X86Instruction::load(OperandSize::S16, REGISTER_SCRATCH, dst, X86IndirectAccess::Offset(offset))),
+                            4 => self.emit_ins(X86Instruction::load(OperandSize::S32, REGISTER_SCRATCH, dst, X86IndirectAccess::Offset(offset))),
+                            8 => self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_SCRATCH, dst, X86IndirectAccess::Offset(offset))),
                             _ => unreachable!(),
-                        };
-                        self.emit_ins(X86Instruction::load_immediate(dst, data as i64));
+                        }
                         return;
                     }
                 }
