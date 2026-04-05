@@ -243,7 +243,7 @@ pub struct Executable<C: ContextObject> {
     /// Required SBPF capabilities
     sbpf_version: SBPFVersion,
     /// Read-only section
-    ro_section: Section,
+    pub ro_section: Section,
     /// Text section virtual address
     text_section_vaddr: u64,
     /// Text section range in `elf_bytes`
