@@ -290,7 +290,7 @@ pub enum RuntimeEnvironmentSlot {
 ///     memory_region::{MemoryMapping, MemoryRegion},
 ///     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
 ///     verifier::RequisiteVerifier,
-///     vm::{Config, EbpfVm, ExecutionMode},
+///     vm::{CallFrame, Config, EbpfVm, ExecutionMode},
 /// };
 /// use test_utils::TestContextObject;
 ///
@@ -312,6 +312,7 @@ pub enum RuntimeEnvironmentSlot {
 /// let mut stack = AlignedMemory::<{ebpf::HOST_ALIGN}>::zero_filled(executable.get_config().stack_size());
 /// let stack_len = stack.len();
 /// let mut heap = AlignedMemory::<{ebpf::HOST_ALIGN}>::with_capacity(0);
+/// let mut call_frames = vec![CallFrame::default(); executable.get_config().max_call_depth];
 ///
 /// let regions: Vec<MemoryRegion> = vec![
 ///     executable.get_ro_region(),
@@ -325,7 +326,7 @@ pub enum RuntimeEnvironmentSlot {
 ///
 /// context_object.memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();
 ///
-/// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
+/// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len, &mut call_frames);
 ///
 /// let (instruction_count, result) = vm.execute_program(
 ///     &executable,
@@ -362,7 +363,7 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// MemoryMapping inlined
     pub(crate) memory_mapping: ptr::NonNull<MemoryMapping>,
     /// Stack of CallFrames used by the Interpreter
-    pub call_frames: Vec<CallFrame>,
+    pub call_frames: &'a mut [CallFrame],
     /// Loader built-in program
     pub loader: Arc<BuiltinProgram<C>>,
     /// Collector for the instruction trace
@@ -382,6 +383,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         sbpf_version: SBPFVersion,
         context_object: &'a mut C,
         stack_len: usize,
+        call_frames: &'a mut [CallFrame],
     ) -> Self {
         let config = loader.get_config();
         let mut registers = [0u64; 12];
@@ -405,7 +407,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             registers,
             program_result: ProgramResult::Ok(0),
             memory_mapping,
-            call_frames: vec![CallFrame::default(); config.max_call_depth],
+            call_frames,
             loader,
             #[cfg(feature = "debugger")]
             debug_port: std::env::var("VM_DEBUG_PORT")
@@ -592,6 +594,7 @@ fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
 
 #[cfg(test)]
 mod tests {
+    use super::CallFrame;
     use crate::{
         memory_region::MemoryMapping,
         program::{BuiltinProgram, SBPFVersion},
@@ -617,11 +620,13 @@ mod tests {
         let config = Config::default();
         let mut context_object =
             DummyContextObject(MemoryMapping::new(vec![], &config, version).unwrap());
+        let mut call_frames = vec![CallFrame::default(); config.max_call_depth];
         let env = super::EbpfVm::new(
             Arc::new(BuiltinProgram::new_mock()),
             version,
             &mut context_object,
             4096,
+            &mut call_frames,
         );
 
         macro_rules! check_slot {

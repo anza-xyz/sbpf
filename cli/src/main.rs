@@ -8,7 +8,7 @@ use solana_sbpf::{
     program::BuiltinProgram,
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{Config, DynamicAnalysis, EbpfVm, ExecutionMode},
+    vm::{CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionMode},
 };
 use std::{fs::File, io::Read, path::Path, sync::Arc};
 use test_utils::TestContextObject;
@@ -148,6 +148,7 @@ fn main() {
             .parse::<usize>()
             .unwrap(),
     );
+    let mut call_frames = vec![CallFrame::default(); config.max_call_depth];
     let regions: Vec<MemoryRegion> = vec![
         executable.get_ro_region(),
         MemoryRegion::new_writable_gapped(
@@ -170,6 +171,7 @@ fn main() {
         executable.get_sbpf_version(),
         &mut context_object,
         stack_len,
+        &mut call_frames,
     );
 
     let analysis = if matches.value_of("use") == Some("cfg")

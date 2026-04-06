@@ -277,12 +277,17 @@ macro_rules! create_vm {
             $access_violation_handler,
         )
         .unwrap();
+        let mut call_frames = vec![
+            solana_sbpf::vm::CallFrame::default();
+            $verified_executable.get_config().max_call_depth
+        ];
 
         let mut $vm_name = solana_sbpf::vm::EbpfVm::new(
             $verified_executable.get_loader().clone(),
             $verified_executable.get_sbpf_version(),
             $context_object,
             stack_len,
+            &mut call_frames,
         );
         $vm_name.registers[1] = solana_sbpf::ebpf::MM_INPUT_START;
     };
