@@ -379,9 +379,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
-        // SAFETY: The NonNull pointer was directly created from a unique mutable reference to
-        // ContextObject, and EpbfVm carries its lifetime.
-        let initial_insn_count = unsafe { self.context_object_pointer.as_ref().get_remaining() };
+        let initial_insn_count = self.context().get_remaining();
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
@@ -426,11 +424,10 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         }
 
         let instruction_count = if config.enable_instruction_meter {
-            // SAFETY: The NonNull pointer was directly created from a unique mutable reference to
-            // ContextObject.
-            let context_object_reference = unsafe { self.context_object_pointer.as_mut() };
-            context_object_reference.consume(self.due_insn_count);
-            initial_insn_count.saturating_sub(context_object_reference.get_remaining())
+            let due_insn_count = self.due_insn_count;
+            let context = self.context();
+            context.consume(due_insn_count);
+            initial_insn_count.saturating_sub(context.get_remaining())
         } else {
             0
         };
@@ -466,7 +463,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
 
     /// Get a reference to the context object referenced by this EbpfVm.
     pub fn context(&mut self) -> &mut C {
-        // SAFE: we've the unique reference to self here, so there can't be other live references
+        // SAFETY: we've the unique reference to self here, so there can't be other live references
         // to `C` either, whether via the memory_mapping or the context_object_pointer itself.
         //
         // The `context_object_pointer` is pointing at a valid-to-dereference `C` at all times
@@ -481,7 +478,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
     // Intentionally not public. Users are expected to store their memory mapping inside – and
     // access from – C.
     pub(crate) fn memory(&mut self) -> &mut MemoryMapping {
-        // SAFE: we've the unique reference to self here, so there can't be other live references
+        // SAFETY: we've the unique reference to self here, so there can't be other live references
         // to `C` either, whether via the memory_mapping or the context_object_pointer itself.
         //
         // The `context_object_pointer` is pointing at a valid-to-dereference `C` at all times
