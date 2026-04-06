@@ -47,6 +47,57 @@ pub fn get_runtime_environment_key() -> i32 {
     0
 }
 
+/// Default VM configuration settings.
+pub(crate) mod defaults {
+    const DEFAULT_STACK_FRAME_SIZE: usize = 4_096;
+
+    /// Returns the stack frame size in bytes.
+    ///
+    /// With the `conf-stack-frame-size` feature enabled, the size can be overridden
+    /// at runtime via the `VM_STACK_FRAME_SIZE` environment variable. The value is
+    /// read once and cached. If not set, the default is always returned.
+    ///
+    /// Note: the `conf-stack-frame-size` variant can't be `const fn` (it uses
+    /// `OnceLock`), while the production variant is `const fn`. Callers that need
+    /// `const` evaluation (e.g. array sizes, const generics) should be aware that
+    /// those uses will not compile when `conf-stack-frame-size` is enabled.
+    #[cfg(feature = "conf-stack-frame-size")]
+    #[inline(always)]
+    pub fn get_stack_frame_size() -> usize {
+        static STACK_FRAME_SIZE_CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *STACK_FRAME_SIZE_CACHE.get_or_init(|| {
+            let size = std::env::var("VM_STACK_FRAME_SIZE")
+                .ok()
+                .and_then(|v| {
+                    v.parse::<usize>()
+                        .inspect_err(|_| {
+                            log::warn!(
+                                "Failed to parse VM_STACK_FRAME_SIZE={}, falling back to {}.",
+                                v,
+                                DEFAULT_STACK_FRAME_SIZE
+                            )
+                        })
+                        .ok()
+                })
+                .unwrap_or(DEFAULT_STACK_FRAME_SIZE);
+            if size != DEFAULT_STACK_FRAME_SIZE {
+                log::warn!(
+                    "VM_STACK_FRAME_SIZE is set to {} (default: {}).",
+                    size,
+                    DEFAULT_STACK_FRAME_SIZE
+                );
+            }
+            size
+        })
+    }
+
+    /// Returns the stack frame size in bytes.
+    #[cfg(not(feature = "conf-stack-frame-size"))]
+    pub const fn get_stack_frame_size() -> usize {
+        DEFAULT_STACK_FRAME_SIZE
+    }
+}
+
 /// Specify the execution method.
 pub enum ExecutionMode {
     /// Execute the program in an interpreted mode.
@@ -96,45 +147,6 @@ pub struct Config {
     pub enabled_sbpf_versions: std::ops::RangeInclusive<SBPFVersion>,
 }
 
-/// Default VM configuration settings.
-pub mod defaults {
-    const DEFAULT_STACK_FRAME_SIZE: usize = 4_096;
-
-    /// Returns the stack frame size in bytes.
-    ///
-    /// With the `conf-stack-frame-size` feature enabled, the size can be overridden
-    /// at runtime via the `VM_STACK_FRAME_SIZE` environment variable. The value is
-    /// read once and cached. If not set, the default is always returned.
-    ///
-    /// Note: the `conf-stack-frame-size` variant can't be `const fn` (it uses
-    /// `OnceLock`), while the production variant is `const fn`. Callers that need
-    /// `const` evaluation (e.g. array sizes, const generics) should be aware that
-    /// those uses will not compile when `conf-stack-frame-size` is enabled.
-    #[cfg(feature = "conf-stack-frame-size")]
-    #[inline(always)]
-    pub fn get_stack_frame_size() -> usize {
-        static STACK_FRAME_SIZE_CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-        *STACK_FRAME_SIZE_CACHE.get_or_init(|| {
-            let size = std::env::var("VM_STACK_FRAME_SIZE")
-                .ok()
-                .and_then(|v| v.parse::<usize>().ok())
-                .unwrap_or(DEFAULT_STACK_FRAME_SIZE);
-            if size != DEFAULT_STACK_FRAME_SIZE {
-                log::warn!(
-                    "VM_STACK_FRAME_SIZE is set to {size} (default: {DEFAULT_STACK_FRAME_SIZE})."
-                );
-            }
-            size
-        })
-    }
-
-    /// Returns the stack frame size in bytes.
-    #[cfg(not(feature = "conf-stack-frame-size"))]
-    pub const fn get_stack_frame_size() -> usize {
-        DEFAULT_STACK_FRAME_SIZE
-    }
-}
-
 impl Config {
     /// Returns the size of the stack memory region
     pub fn stack_size(&self) -> usize {
@@ -146,7 +158,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             max_call_depth: 64,
-            stack_frame_size: crate::vm::get_stack_frame_size(),
+            stack_frame_size: defaults::get_stack_frame_size(),
             enable_address_translation: true,
             enable_stack_frame_gaps: true,
             instruction_meter_checkpoint_distance: 10000,
