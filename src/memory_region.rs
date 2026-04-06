@@ -408,6 +408,7 @@ pub struct MemoryMapping {
     disable_address_translation: bool,
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
+    initialized: bool,
     ty: MemoryMappingType,
 }
 
@@ -472,6 +473,7 @@ impl MemoryMapping {
             stack_frame_size: config.stack_frame_size as i64,
             disable_address_translation: !config.enable_address_translation,
             sbpf_version,
+            initialized: false,
             ty,
         }
     }
@@ -494,6 +496,7 @@ impl MemoryMapping {
 
     /// Map virtual memory to host memory.
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
+        debug_assert!(self.initialized);
         if self.disable_address_translation {
             return ProgramResult::Ok(vm_addr);
         }
@@ -517,6 +520,7 @@ impl MemoryMapping {
         vm_addr: u64,
         len: u64,
     ) -> ProgramResult {
+        debug_assert!(self.initialized);
         if self.disable_address_translation {
             return ProgramResult::Ok(vm_addr);
         }
@@ -546,6 +550,7 @@ impl MemoryMapping {
     pub fn load<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> ProgramResult {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
+        debug_assert!(self.initialized);
         match self.map_with_access_violation_handler(AccessType::Load, vm_addr, len) {
             ProgramResult::Ok(host_addr) => {
                 ProgramResult::Ok(unsafe { ptr::read_unaligned::<T>(host_addr as *const T) }.into())
@@ -559,6 +564,7 @@ impl MemoryMapping {
     pub fn store<T: Pod>(&mut self, value: T, vm_addr: u64) -> ProgramResult {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
+        debug_assert!(self.initialized);
         match self.map_with_access_violation_handler(AccessType::Store, vm_addr, len) {
             ProgramResult::Ok(host_addr) => {
                 unsafe { ptr::write_unaligned(host_addr as *mut T, value) };
@@ -571,6 +577,7 @@ impl MemoryMapping {
     /// Returns the `MemoryRegion` which may contain the given address.
     #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
+        debug_assert!(self.initialized);
         match &self.ty {
             MemoryMappingType::Aligned(inner) => inner.find_region(vm_addr),
             MemoryMappingType::Unaligned(inner) => inner.find_region(vm_addr),
@@ -587,16 +594,25 @@ impl MemoryMapping {
     }
 
     /// Returns the `MemoryRegion`s as mutable
-    pub fn get_regions_mut(&mut self) -> &mut [MemoryRegion] {
-        match &mut self.ty {
-            MemoryMappingType::Aligned(inner) => &mut inner.regions,
-            MemoryMappingType::Unaligned(inner) => &mut inner.regions,
+    pub fn get_regions_mut(&mut self) -> Option<&mut [MemoryRegion]> {
+        if self.initialized {
+            // Returning the regions as mutable after initialization might break the initialization
+            // constraints.
+            return None;
         }
+
+        let regions = match &mut self.ty {
+            MemoryMappingType::Aligned(inner) => inner.regions.as_mut_slice(),
+            MemoryMappingType::Unaligned(inner) => &mut inner.regions,
+        };
+
+        Some(regions)
     }
 
     /// Replaces the `MemoryRegion` at the given index
     #[inline(always)]
     pub fn replace_region(&mut self, index: usize, region: MemoryRegion) -> Result<(), EbpfError> {
+        debug_assert!(self.initialized);
         let regions = self.get_regions();
         let next_region_start = regions
             .get(index.saturating_add(1))
@@ -615,10 +631,12 @@ impl MemoryMapping {
 
     /// Initialize the MemoryMapping
     pub fn initialize(&mut self) -> Result<(), EbpfError> {
-        match &mut self.ty {
+        let result = match &mut self.ty {
             MemoryMappingType::Aligned(inner) => inner.initialize(),
             MemoryMappingType::Unaligned(inner) => inner.initialize(),
-        }
+        };
+        self.initialized = result.is_ok();
+        result
     }
 
     fn generate_access_violation(
