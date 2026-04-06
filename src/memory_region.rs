@@ -350,7 +350,7 @@ impl AlignedMemoryMapping {
                 expected_region_index = expected_region_index.saturating_add(1);
             }
         } else {
-            self.regions.insert(0, MemoryRegion::new_readonly(&[], 0));
+            self.regions.push(MemoryRegion::new_readonly(&[], 0));
             self.regions.sort();
             for (index, region) in self.regions.iter().enumerate() {
                 if region
