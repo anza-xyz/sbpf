@@ -69,15 +69,14 @@ pub(crate) mod defaults {
             let size = std::env::var("VM_STACK_FRAME_SIZE")
                 .ok()
                 .and_then(|v| {
-                    v.parse::<usize>()
-                        .inspect_err(|_| {
-                            log::warn!(
-                                "Failed to parse VM_STACK_FRAME_SIZE={}, falling back to {}.",
-                                v,
-                                DEFAULT_STACK_FRAME_SIZE
-                            )
-                        })
-                        .ok()
+                    v.parse::<usize>().ok().filter(|sfz| *sfz > 0).or_else(|| {
+                        log::warn!(
+                            "Invalid VM_STACK_FRAME_SIZE={}, falling back to {}.",
+                            v,
+                            DEFAULT_STACK_FRAME_SIZE
+                        );
+                        None
+                    })
                 })
                 .unwrap_or(DEFAULT_STACK_FRAME_SIZE);
             if size != DEFAULT_STACK_FRAME_SIZE {
