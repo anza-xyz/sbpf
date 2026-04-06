@@ -292,7 +292,7 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// config.max_call_depth and to know when to terminate execution.
     pub call_depth: u64,
     /// Pointer to ContextObject
-    pub context_object_pointer: ptr::NonNull<C>,
+    pub(crate) context_object_pointer: ptr::NonNull<C>,
     /// The lifetime for the context object pointer
     context_object_lifetime: PhantomData<&'a mut C>,
     /// Last return value of instruction_meter.get_remaining()
@@ -308,7 +308,7 @@ pub struct EbpfVm<'a, C: ContextObject> {
     /// ProgramResult inlined
     pub program_result: ProgramResult,
     /// MemoryMapping inlined
-    pub memory_mapping: ptr::NonNull<MemoryMapping>,
+    pub(crate) memory_mapping: ptr::NonNull<MemoryMapping>,
     /// Stack of CallFrames used by the Interpreter
     pub call_frames: Vec<CallFrame>,
     /// Loader built-in program
@@ -379,9 +379,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
-        // SAFETY: The NonNull pointer was directly created from a unique mutable reference to
-        // ContextObject, and EpbfVm carries its lifetime.
-        let initial_insn_count = unsafe { self.context_object_pointer.as_ref().get_remaining() };
+        let initial_insn_count = self.context().get_remaining();
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
@@ -426,11 +424,10 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         }
 
         let instruction_count = if config.enable_instruction_meter {
-            // SAFETY: The NonNull pointer was directly created from a unique mutable reference to
-            // ContextObject.
-            let context_object_reference = unsafe { self.context_object_pointer.as_mut() };
-            context_object_reference.consume(self.due_insn_count);
-            initial_insn_count.saturating_sub(context_object_reference.get_remaining())
+            let due_insn_count = self.due_insn_count;
+            let context = self.context();
+            context.consume(due_insn_count);
+            initial_insn_count.saturating_sub(context.get_remaining())
         } else {
             0
         };
@@ -462,6 +459,31 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             addr.wrapping_add(get_runtime_environment_key() as isize) as usize as u64,
             PhantomData,
         )
+    }
+
+    /// Get a reference to the context object referenced by this EbpfVm.
+    pub fn context(&mut self) -> &mut C {
+        // SAFETY: we've the unique reference to self here, so there can't be other live references
+        // to `C` either, whether via the memory_mapping or the context_object_pointer itself.
+        //
+        // The `context_object_pointer` is pointing at a valid-to-dereference `C` at all times
+        // through the EbpfVm lifetime.
+        //
+        // Note: for that reason we are intentionally tying the lifetime of the returned `C` to the
+        // lifetime of `&mut self`, rather than returning `&'a mut C`, which would allow aliasing
+        // the returned reference.
+        unsafe { self.context_object_pointer.as_mut() }
+    }
+
+    // Intentionally not public. Users are expected to store their memory mapping inside – and
+    // access from – C.
+    pub(crate) fn memory(&mut self) -> &mut MemoryMapping {
+        // SAFETY: we've the unique reference to self here, so there can't be other live references
+        // to `C` either, whether via the memory_mapping or the context_object_pointer itself.
+        //
+        // The `context_object_pointer` is pointing at a valid-to-dereference `C` at all times
+        // through the EbpfVm lifetime.
+        unsafe { self.memory_mapping.as_mut() }
     }
 }
 
@@ -514,4 +536,65 @@ fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
 #[cfg(not(feature = "debugger"))]
 fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
     while interpreter.step() {}
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        memory_region::MemoryMapping,
+        program::{BuiltinProgram, SBPFVersion},
+        vm::{Config, ContextObject, RuntimeEnvironmentSlot},
+    };
+    use std::{ptr::NonNull, sync::Arc};
+
+    #[test]
+    fn test_runtime_environment_slots() {
+        struct DummyContextObject(MemoryMapping);
+        impl ContextObject for DummyContextObject {
+            fn consume(&mut self, _: u64) {
+                todo!()
+            }
+            fn get_remaining(&self) -> u64 {
+                todo!()
+            }
+            fn active_mapping_ptr(&mut self) -> NonNull<MemoryMapping> {
+                NonNull::from_mut(&mut self.0)
+            }
+        }
+        let version = SBPFVersion::V4;
+        let config = Config::default();
+        let mut context_object =
+            DummyContextObject(MemoryMapping::new(vec![], &config, version).unwrap());
+        let env = super::EbpfVm::new(
+            Arc::new(BuiltinProgram::new_mock()),
+            version,
+            &mut context_object,
+            4096,
+        );
+
+        macro_rules! check_slot {
+            ($env:expr, $entry:ident, $slot:ident) => {
+                assert_eq!(
+                    unsafe {
+                        std::ptr::addr_of!($env.$entry)
+                            .cast::<u8>()
+                            .offset_from(std::ptr::addr_of!($env).cast::<u8>()) as usize
+                    },
+                    RuntimeEnvironmentSlot::$slot as usize,
+                );
+            };
+        }
+
+        check_slot!(env, host_stack_pointer, HostStackPointer);
+        check_slot!(env, call_depth, CallDepth);
+        check_slot!(env, context_object_pointer, ContextObjectPointer);
+        check_slot!(env, previous_instruction_meter, PreviousInstructionMeter);
+        check_slot!(env, due_insn_count, DueInsnCount);
+        check_slot!(env, stopwatch_numerator, StopwatchNumerator);
+        check_slot!(env, stopwatch_denominator, StopwatchDenominator);
+        check_slot!(env, registers, Registers);
+        check_slot!(env, program_result, ProgramResult);
+        check_slot!(env, memory_mapping, MemoryMapping);
+        check_slot!(env, register_trace, RegisterTrace);
+    }
 }

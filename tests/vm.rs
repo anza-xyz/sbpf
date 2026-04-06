@@ -1,57 +1,10 @@
 #![allow(clippy::literal_string_with_formatting_args)]
 
 use solana_sbpf::{
-    elf::Executable,
     program::{BuiltinFunctionDefinition, BuiltinProgram},
-    vm::{Config, RuntimeEnvironmentSlot},
+    vm::Config,
 };
-use std::{fs::File, io::Read, sync::Arc};
-use test_utils::{create_vm, syscalls, TestContextObject};
-
-#[test]
-fn test_runtime_environment_slots() {
-    let mut file = File::open("tests/elfs/relative_call_sbpfv0.so").unwrap();
-    let mut elf = Vec::new();
-    file.read_to_end(&mut elf).unwrap();
-    let executable =
-        Executable::<TestContextObject>::from_elf(&elf, Arc::new(BuiltinProgram::new_mock()))
-            .unwrap();
-    let mut context_object = TestContextObject::default();
-    create_vm!(
-        env,
-        &executable,
-        &mut context_object,
-        stack,
-        heap,
-        Vec::new(),
-        None
-    );
-
-    macro_rules! check_slot {
-        ($env:expr, $entry:ident, $slot:ident) => {
-            assert_eq!(
-                unsafe {
-                    std::ptr::addr_of!($env.$entry)
-                        .cast::<u8>()
-                        .offset_from(std::ptr::addr_of!($env).cast::<u8>()) as usize
-                },
-                RuntimeEnvironmentSlot::$slot as usize,
-            );
-        };
-    }
-
-    check_slot!(env, host_stack_pointer, HostStackPointer);
-    check_slot!(env, call_depth, CallDepth);
-    check_slot!(env, context_object_pointer, ContextObjectPointer);
-    check_slot!(env, previous_instruction_meter, PreviousInstructionMeter);
-    check_slot!(env, due_insn_count, DueInsnCount);
-    check_slot!(env, stopwatch_numerator, StopwatchNumerator);
-    check_slot!(env, stopwatch_denominator, StopwatchDenominator);
-    check_slot!(env, registers, Registers);
-    check_slot!(env, program_result, ProgramResult);
-    check_slot!(env, memory_mapping, MemoryMapping);
-    check_slot!(env, register_trace, RegisterTrace);
-}
+use test_utils::syscalls;
 
 #[test]
 fn test_builtin_program_eq() {
@@ -71,10 +24,14 @@ fn test_builtin_program_eq() {
 #[test]
 fn test_gdbstub_architecture() {
     use byteorder::{ReadBytesExt, WriteBytesExt};
+    use solana_sbpf::elf::Executable;
     use solana_sbpf::vm::ExecutionMode;
-    use std::io::{BufRead, BufReader, Write};
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
     use std::time::Duration;
+    use test_utils::{create_vm, TestContextObject};
 
     const GDBSTUB_TEST_DEBUG_PORT: &'static str = "11212";
     const METADATA: &'static str = "6CSmiViMaAguKgxNVwU8TWMPViQbtL5KKoFrDwWwtYNR";
@@ -121,9 +78,7 @@ fn test_gdbstub_architecture() {
                 Vec::new(),
                 None
             );
-            unsafe {
-                vm.context_object_pointer.as_mut().remaining = 10_000_000_000;
-            }
+            vm.context().remaining = 10_000_000_000;
             vm.debug_port = Some(debug_port);
             vm.debug_metadata = Some(METADATA.into());
             vm.execute_program(&executable, &mut ExecutionMode::Interpreted)
