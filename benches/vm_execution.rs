@@ -15,7 +15,7 @@ use solana_sbpf::{
     elf::Executable,
     program::BuiltinProgram,
     verifier::RequisiteVerifier,
-    vm::{CallFrame, Config, ExecutionRequest},
+    vm::{CallFrame, Config, ExecutionMode},
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test::Bencher;
@@ -45,9 +45,8 @@ fn bench_init_interpreter_start(bencher: &mut Bencher) {
         vm.context().remaining = 37;
         vm.execute_program(
             &executable,
-            ExecutionRequest::Interpreted {
-                call_frames: &mut call_frames,
-            },
+            &mut ExecutionMode::Interpreted,
+            &mut call_frames,
         )
         .1
         .unwrap()
@@ -77,7 +76,7 @@ fn bench_init_jit_start(bencher: &mut Bencher) {
     );
     bencher.iter(|| {
         vm.context().remaining = 37;
-        vm.execute_program(&executable, ExecutionRequest::Jit)
+        vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut [])
             .1
             .unwrap()
     });
@@ -114,11 +113,10 @@ fn bench_jit_vs_interpreter(
         .bench(|bencher| {
             bencher.iter(|| {
                 vm.context().remaining = instruction_meter;
-                let (instruction_count_interpreter, result, _) = vm.execute_program(
+                let (instruction_count_interpreter, result) = vm.execute_program(
                     &executable,
-                    ExecutionRequest::Interpreted {
-                        call_frames: &mut call_frames,
-                    },
+                    &mut ExecutionMode::Interpreted,
+                    &mut call_frames,
                 );
                 assert!(result.is_ok(), "{:?}", result);
                 assert_eq!(instruction_count_interpreter, instruction_meter);
@@ -131,8 +129,8 @@ fn bench_jit_vs_interpreter(
         .bench(|bencher| {
             bencher.iter(|| {
                 vm.context().remaining = instruction_meter;
-                let (instruction_count_jit, result, _) =
-                    vm.execute_program(&executable, ExecutionRequest::Jit);
+                let (instruction_count_jit, result) =
+                    vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut []);
                 assert!(result.is_ok(), "{:?}", result);
                 assert_eq!(instruction_count_jit, instruction_meter);
             });
@@ -325,7 +323,8 @@ fn bench_mem_ldxdw_jit(bencher: &mut Bencher) {
 
     bencher.iter(|| {
         vm.context().remaining = LOAD64_INSTRUCTION_COUNT;
-        let (instruction_count, result, _) = vm.execute_program(&executable, ExecutionRequest::Jit);
+        let (instruction_count, result) =
+            vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut []);
         assert!(result.is_ok(), "{:?}", result);
         assert_eq!(instruction_count, LOAD64_INSTRUCTION_COUNT);
     });

@@ -8,7 +8,7 @@ use solana_sbpf::{
     program::BuiltinProgram,
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionRequest},
+    vm::{CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionMode},
 };
 use std::{fs::File, io::Read, path::Path, sync::Arc};
 use test_utils::TestContextObject;
@@ -120,19 +120,14 @@ fn main() {
             memory
         }
     };
-
-    let config = executable.get_config();
-    let mut call_frames = vec![CallFrame::default(); config.max_call_depth];
-    let request = if matches.value_of("use").unwrap() != "jit" {
-        ExecutionRequest::Interpreted {
-            call_frames: &mut call_frames,
-        }
+    let mut mode = if matches.value_of("use").unwrap() != "jit" {
+        ExecutionMode::Interpreted
     } else {
-        ExecutionRequest::Jit
+        ExecutionMode::Jit
     };
 
     #[cfg(all(not(target_os = "windows"), target_arch = "x86_64"))]
-    if let ExecutionRequest::Jit | ExecutionRequest::PreferJit { .. } = request {
+    if let ExecutionMode::Jit | ExecutionMode::PreferJit = mode {
         executable.jit_compile().unwrap();
     }
     let mut context_object = TestContextObject::new(
@@ -142,6 +137,7 @@ fn main() {
             .parse::<u64>()
             .unwrap(),
     );
+    let config = executable.get_config();
     let sbpf_version = executable.get_sbpf_version();
     let mut stack = AlignedMemory::<{ ebpf::HOST_ALIGN }>::zero_filled(config.stack_size());
     let stack_len = stack.len();
@@ -207,7 +203,8 @@ fn main() {
         _ => {}
     }
 
-    let (instruction_count, result, _) = vm.execute_program(&executable, request);
+    let mut call_frames = vec![CallFrame::default(); config.max_call_depth];
+    let (instruction_count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
     println!("Result: {result:?}");
     println!("Instruction Count: {instruction_count}");
     if matches.is_present("trace") {

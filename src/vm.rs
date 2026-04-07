@@ -25,8 +25,6 @@ use crate::{
 pub use defaults::get_stack_frame_size;
 use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of, ptr};
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-use crate::jit::JitProgram;
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;
 #[cfg(not(feature = "shuttle-test"))]
@@ -100,84 +98,15 @@ pub(crate) mod defaults {
 }
 
 /// Specify the execution method.
-/// The execution mode used to execute the program.
 pub enum ExecutionMode {
-    /// Program was executed in interpreted mode.
-    Interpreted,
-    /// Program was executed in JIT mode.
-    Jit,
-}
-
-/// Specify the desired execution method.
-pub enum ExecutionRequest<'a> {
     /// Execute the program in an interpreted mode.
-    Interpreted {
-        /// Call frames to use for interpreted execution.
-        call_frames: &'a mut [CallFrame],
-    },
-    /// Allow JIT execution, if compiled. Otherwise fallback to interpreted.
-    PreferJit {
-        /// Call frames to use for interpreted execution in case of fallback.
-        call_frames: &'a mut [CallFrame],
-    },
+    Interpreted,
     /// Execute the program in JIT mode.
     ///
     /// The program must be JIT compiled.
     Jit,
-}
-
-/// An [`ExecutionRequest`] evaluated against an [`Executable`].
-enum ExecutionPlan<'a> {
-    Interpreted {
-        call_frames: &'a mut [CallFrame],
-    },
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-    Jit {
-        compiled_program: Arc<JitProgram>,
-    },
-    JitError(EbpfError),
-}
-
-impl<'a> ExecutionRequest<'a> {
-    /// Evaluates the [`ExecutionRequest`] against the given executable into an [`ExecutionPlan`].
-    ///
-    /// Resolution rules:
-    /// - [`ExecutionRequest::Interpreted`] always becomes [`ExecutionPlan::Interpreted`].
-    /// - [`ExecutionRequest::PreferJit`] becomes [`ExecutionPlan::Jit`] only when JIT is supported
-    ///   on the platform and `executable` has a compiled program; otherwise it becomes
-    ///   [`ExecutionPlan::Interpreted`].
-    /// - [`ExecutionRequest::Jit`] becomes [`ExecutionPlan::Jit`] only when JIT is supported on the
-    ///   platform and `executable` has a compiled program; otherwise it returns [`ExecutionPlan::JitError`].
-    #[allow(unused_variables)]
-    fn evaluate<C: ContextObject>(self, executable: &Executable<C>) -> ExecutionPlan<'a> {
-        match self {
-            ExecutionRequest::Interpreted { call_frames } => {
-                ExecutionPlan::Interpreted { call_frames }
-            }
-
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-            ExecutionRequest::PreferJit { call_frames } => {
-                match executable.get_compiled_program() {
-                    Some(compiled_program) => ExecutionPlan::Jit { compiled_program },
-                    None => ExecutionPlan::Interpreted { call_frames },
-                }
-            }
-
-            #[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64")))]
-            ExecutionRequest::PreferJit { call_frames } => {
-                ExecutionPlan::Interpreted { call_frames }
-            }
-
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-            ExecutionRequest::Jit => match executable.get_compiled_program() {
-                Some(compiled_program) => ExecutionPlan::Jit { compiled_program },
-                None => ExecutionPlan::JitError(EbpfError::JitNotCompiled),
-            },
-
-            #[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64")))]
-            ExecutionRequest::Jit => ExecutionPlan::JitError(EbpfError::JitNotCompiled),
-        }
-    }
+    /// Allow JIT execution, if compiled. Otherwise fallback to interpreted.
+    PreferJit,
 }
 
 /// VM configuration settings
@@ -361,7 +290,7 @@ pub enum RuntimeEnvironmentSlot {
 ///     memory_region::{MemoryMapping, MemoryRegion},
 ///     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
 ///     verifier::RequisiteVerifier,
-///     vm::{CallFrame, Config, EbpfVm, ExecutionRequest},
+///     vm::{CallFrame, Config, EbpfVm, ExecutionMode},
 /// };
 /// use test_utils::TestContextObject;
 ///
@@ -399,9 +328,10 @@ pub enum RuntimeEnvironmentSlot {
 /// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
 ///
 /// let mut call_frames = vec![CallFrame::default(); executable.get_config().max_call_depth];
-/// let (instruction_count, result, execution_mode) = vm.execute_program(
+/// let (instruction_count, result) = vm.execute_program(
 ///     &executable,
-///     ExecutionRequest::Interpreted { call_frames: &mut call_frames }
+///     &mut ExecutionMode::Interpreted,
+///     &mut call_frames,
 /// );
 /// assert_eq!(instruction_count, 2);
 /// assert_eq!(result.unwrap(), 0);
@@ -488,15 +418,20 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
 
     /// Execute the program
     ///
-    /// Use `request` parameter to request a specific execution type.
+    /// Use `mode` parameter to request a specific execution type. This function will write back
+    /// the execution mode used back to the reference passed in.
     ///
-    /// Returns the instruction meter count (CUs), the execution result of the program, and
-    /// the execution mode used.
+    /// It is required to provide `call_frames` when executing in interpreted mode.
+    /// `call_frames` must be large enough to hold the executable config's `max_call_depth`
+    /// frames.
+    ///
+    /// Returns the instruction meter count (CUs) and the execution result of the program.
     pub fn execute_program(
         &mut self,
         executable: &Executable<C>,
-        request: ExecutionRequest,
-    ) -> (u64, ProgramResult, ExecutionMode) {
+        mode: &mut ExecutionMode,
+        call_frames: &mut [CallFrame],
+    ) -> (u64, ProgramResult) {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
@@ -505,25 +440,44 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
 
-        let execution_mode = match request.evaluate(executable) {
-            ExecutionPlan::Interpreted { call_frames } => {
-                let interpreter = Interpreter::new(self, executable, self.registers, call_frames);
-                run_interpreter(interpreter);
+        'execute: {
+            match *mode {
+                ExecutionMode::Interpreted => {}
 
-                ExecutionMode::Interpreted
+                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                ExecutionMode::PreferJit => {
+                    if let Some(compiled_program) = executable.get_compiled_program() {
+                        *mode = ExecutionMode::Jit;
+                        break 'execute compiled_program.invoke(config, self, self.registers);
+                    }
+                }
+                #[cfg(not(all(
+                    feature = "jit",
+                    not(target_os = "windows"),
+                    target_arch = "x86_64"
+                )))]
+                ExecutionMode::PreferJit => {}
+
+                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                ExecutionMode::Jit => {
+                    let Some(compiled_program) = executable.get_compiled_program() else {
+                        return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
+                    };
+                    *mode = ExecutionMode::Jit;
+                    break 'execute compiled_program.invoke(config, self, self.registers);
+                }
+                #[cfg(not(all(
+                    feature = "jit",
+                    not(target_os = "windows"),
+                    target_arch = "x86_64"
+                )))]
+                ExecutionMode::Jit => return (0, ProgramResult::Err(EbpfError::JitNotCompiled)),
             }
 
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-            ExecutionPlan::Jit { compiled_program } => {
-                compiled_program.invoke(config, self, self.registers);
-
-                ExecutionMode::Jit
-            }
-
-            ExecutionPlan::JitError(e) => {
-                return (0, ProgramResult::Err(e), ExecutionMode::Jit);
-            }
-        };
+            *mode = ExecutionMode::Interpreted;
+            let interpreter = Interpreter::new(self, executable, self.registers, call_frames);
+            break 'execute run_interpreter(interpreter);
+        }
 
         let instruction_count = if config.enable_instruction_meter {
             let due_insn_count = self.due_insn_count;
@@ -535,7 +489,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         };
         let mut result = ProgramResult::Ok(0);
         std::mem::swap(&mut result, &mut self.program_result);
-        (instruction_count, result, execution_mode)
+        (instruction_count, result)
     }
 
     /// Invokes a built-in function

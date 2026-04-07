@@ -10,7 +10,7 @@ use solana_sbpf::{
     memory_region::MemoryRegion,
     program::{BuiltinProgram, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
-    vm::{CallFrame, ExecutionRequest},
+    vm::{CallFrame, ExecutionMode},
 };
 use test_utils::{create_vm, TestContextObject};
 
@@ -70,11 +70,10 @@ fuzz_target!(|data: FuzzData| {
     let mut interp_call_frames =
         vec![CallFrame::default(); executable.get_config().max_call_depth];
     #[allow(unused)]
-    let (_interp_ins_count, interp_res, _) = interp_vm.execute_program(
+    let (_interp_ins_count, interp_res) = interp_vm.execute_program(
         &executable,
-        ExecutionRequest::Interpreted {
-            call_frames: &mut interp_call_frames,
-        },
+        &mut ExecutionMode::Interpreted,
+        &mut interp_call_frames,
     );
     #[allow(unused)]
     let interp_final_pc = interp_vm.registers[11];
@@ -93,8 +92,8 @@ fuzz_target!(|data: FuzzData| {
             vec![jit_mem_region],
             None
         );
-        let (_jit_ins_count, jit_res, _) =
-            jit_vm.execute_program(&executable, ExecutionRequest::Jit);
+        let (_jit_ins_count, jit_res) =
+            jit_vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut []);
         let jit_final_pc = jit_vm.registers[11];
         if format!("{:?}", interp_res) != format!("{:?}", jit_res) {
             panic!("Expected {:?}, but got {:?}", interp_res, jit_res);

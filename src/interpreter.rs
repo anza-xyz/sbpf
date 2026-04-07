@@ -102,7 +102,8 @@ pub struct Interpreter<'a, 'b, 'c, C: ContextObject> {
 impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
     /// Creates a new interpreter state
     ///
-    /// Note: `call_frames` must be at least `config.max_call_depth` in length.
+    /// Note: `call_frames` must be large enough to hold the executable
+    /// config's `max_call_depth` frames.
     pub fn new(
         vm: &'a mut EbpfVm<'b, C>,
         executable: &'a Executable<C>,
@@ -119,8 +120,8 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             executable,
             program,
             program_vm_addr,
-            reg: registers,
             call_frames,
+            reg: registers,
             #[cfg(feature = "debugger")]
             debug_state: DebugState::Continue,
             #[cfg(feature = "debugger")]

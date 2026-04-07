@@ -3094,7 +3094,7 @@ fn test_tcp_sack_nomatch() {
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 fn execute_generated_program(prog: &[u8]) -> bool {
-    use solana_sbpf::vm::{CallFrame, ExecutionRequest};
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
 
     let max_instruction_count = 1024;
     let mem_size = 1024 * 1024;
@@ -3127,11 +3127,10 @@ fn execute_generated_program(prog: &[u8]) -> bool {
             vec![mem_region],
             None
         );
-        let (instruction_count_interpreter, result_interpreter, _) = vm.execute_program(
+        let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
             &executable,
-            ExecutionRequest::Interpreted {
-                call_frames: &mut call_frames,
-            },
+            &mut ExecutionMode::Interpreted,
+            &mut call_frames,
         );
         let trace_interpreter = vm.register_trace.clone();
         (
@@ -3152,8 +3151,8 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         vec![mem_region],
         None
     );
-    let (instruction_count_jit, result_jit, _) =
-        vm.execute_program(&executable, ExecutionRequest::Jit);
+    let (instruction_count_jit, result_jit) =
+        vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut []);
     let trace_jit = &vm.register_trace;
     debug_assert!(!trace_interpreter.is_empty());
     if format!("{result_interpreter:?}") != format!("{result_jit:?}")

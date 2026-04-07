@@ -324,9 +324,10 @@ macro_rules! test_interpreter_and_jit {
                 None
             );
             vm.registers[1] = ebpf::MM_INPUT_START;
-            let (instruction_count_interpreter, result_interpreter, _) = vm.execute_program(
+            let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
                 &$executable,
-                $crate::solana_sbpf::vm::ExecutionRequest::Interpreted { call_frames: &mut call_frames },
+                &mut $crate::solana_sbpf::vm::ExecutionMode::Interpreted,
+                &mut call_frames,
             );
             (
                 instruction_count_interpreter,
@@ -355,9 +356,10 @@ macro_rules! test_interpreter_and_jit {
                 Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
                     vm.registers[1] = ebpf::MM_INPUT_START;
-                    let (instruction_count_jit, result_jit, _) = vm.execute_program(
+                    let (instruction_count_jit, result_jit) = vm.execute_program(
                         &$executable,
-                        $crate::solana_sbpf::vm::ExecutionRequest::Jit,
+                        &mut $crate::solana_sbpf::vm::ExecutionMode::Jit,
+                        &mut []
                     );
                     let trace_jit = &vm.register_trace;
                     let mut diverged = false;

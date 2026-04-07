@@ -25,7 +25,7 @@ fn test_builtin_program_eq() {
 fn test_gdbstub_architecture() {
     use byteorder::{ReadBytesExt, WriteBytesExt};
     use solana_sbpf::elf::Executable;
-    use solana_sbpf::vm::{CallFrame, ExecutionRequest};
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
     use std::fs::File;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -84,9 +84,8 @@ fn test_gdbstub_architecture() {
             vm.debug_metadata = Some(METADATA.into());
             vm.execute_program(
                 &executable,
-                ExecutionRequest::Interpreted {
-                    call_frames: &mut call_frames,
-                },
+                &mut ExecutionMode::Interpreted,
+                &mut call_frames,
             )
             .1
             .unwrap();
