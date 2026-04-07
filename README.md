@@ -31,7 +31,7 @@ available for each version.
 | Feature                       | v0 | v1  | v2  | v3  |
 |-------------------------------|----|-----|-----|-----|
 | Static syscalls               | no | no  | no  | yes |
-| Dynamic stack frames          | no | yes | yes | yes |
+| Dynamic stack frames          | no | yes | yes | no  |
 | PQR instructions              | no | no  | yes | no  |
 | Explicit sign extension       | no | no  | yes | yes |
 | Compatibility with eBPFv3 ISA | no | no  | no  | yes |
