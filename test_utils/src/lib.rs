@@ -277,17 +277,12 @@ macro_rules! create_vm {
             $access_violation_handler,
         )
         .unwrap();
-        let mut call_frames = vec![
-            solana_sbpf::vm::CallFrame::default();
-            $verified_executable.get_config().max_call_depth
-        ];
 
         let mut $vm_name = solana_sbpf::vm::EbpfVm::new(
             $verified_executable.get_loader().clone(),
             $verified_executable.get_sbpf_version(),
             $context_object,
             stack_len,
-            &mut call_frames,
         );
         $vm_name.registers[1] = solana_sbpf::ebpf::MM_INPUT_START;
     };
@@ -315,6 +310,10 @@ macro_rules! test_interpreter_and_jit {
         let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter) = {
             let mut mem = $mem;
             let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
+            let mut call_frames = vec![
+                solana_sbpf::vm::CallFrame::default();
+                $executable.get_config().max_call_depth
+            ];
             create_vm!(
                 vm,
                 &$executable,
@@ -325,9 +324,9 @@ macro_rules! test_interpreter_and_jit {
                 None
             );
             vm.registers[1] = ebpf::MM_INPUT_START;
-            let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
+            let (instruction_count_interpreter, result_interpreter, _) = vm.execute_program(
                 &$executable,
-                &mut $crate::solana_sbpf::vm::ExecutionMode::Interpreted,
+                $crate::solana_sbpf::vm::ExecutionRequest::Interpreted { call_frames: &mut call_frames },
             );
             (
                 instruction_count_interpreter,
@@ -356,9 +355,9 @@ macro_rules! test_interpreter_and_jit {
                 Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
                     vm.registers[1] = ebpf::MM_INPUT_START;
-                    let (instruction_count_jit, result_jit) = vm.execute_program(
+                    let (instruction_count_jit, result_jit, _) = vm.execute_program(
                         &$executable,
-                        &mut $crate::solana_sbpf::vm::ExecutionMode::Jit
+                        $crate::solana_sbpf::vm::ExecutionRequest::Jit,
                     );
                     let trace_jit = &vm.register_trace;
                     let mut diverged = false;

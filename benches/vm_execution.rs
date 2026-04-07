@@ -10,9 +10,12 @@ extern crate solana_sbpf;
 extern crate test;
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-use solana_sbpf::{ebpf, memory_region::MemoryRegion, program::SBPFVersion, vm::Config};
+use solana_sbpf::{ebpf, memory_region::MemoryRegion, program::SBPFVersion};
 use solana_sbpf::{
-    elf::Executable, program::BuiltinProgram, verifier::RequisiteVerifier, vm::ExecutionMode,
+    elf::Executable,
+    program::BuiltinProgram,
+    verifier::RequisiteVerifier,
+    vm::{CallFrame, Config, ExecutionRequest},
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test::Bencher;
@@ -37,11 +40,17 @@ fn bench_init_interpreter_start(bencher: &mut Bencher) {
         Vec::new(),
         None
     );
+    let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
     bencher.iter(|| {
         vm.context().remaining = 37;
-        vm.execute_program(&executable, &mut ExecutionMode::Interpreted)
-            .1
-            .unwrap()
+        vm.execute_program(
+            &executable,
+            ExecutionRequest::Interpreted {
+                call_frames: &mut call_frames,
+            },
+        )
+        .1
+        .unwrap()
     });
 }
 
@@ -68,7 +77,7 @@ fn bench_init_jit_start(bencher: &mut Bencher) {
     );
     bencher.iter(|| {
         vm.context().remaining = 37;
-        vm.execute_program(&executable, &mut ExecutionMode::Jit)
+        vm.execute_program(&executable, ExecutionRequest::Jit)
             .1
             .unwrap()
     });
@@ -100,12 +109,17 @@ fn bench_jit_vs_interpreter(
         vec![mem_region],
         None
     );
+    let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
     let interpreter_summary = bencher
         .bench(|bencher| {
             bencher.iter(|| {
                 vm.context().remaining = instruction_meter;
-                let (instruction_count_interpreter, result) =
-                    vm.execute_program(&executable, &mut ExecutionMode::Interpreted);
+                let (instruction_count_interpreter, result, _) = vm.execute_program(
+                    &executable,
+                    ExecutionRequest::Interpreted {
+                        call_frames: &mut call_frames,
+                    },
+                );
                 assert!(result.is_ok(), "{:?}", result);
                 assert_eq!(instruction_count_interpreter, instruction_meter);
             });
@@ -117,8 +131,8 @@ fn bench_jit_vs_interpreter(
         .bench(|bencher| {
             bencher.iter(|| {
                 vm.context().remaining = instruction_meter;
-                let (instruction_count_jit, result) =
-                    vm.execute_program(&executable, &mut ExecutionMode::Jit);
+                let (instruction_count_jit, result, _) =
+                    vm.execute_program(&executable, ExecutionRequest::Jit);
                 assert!(result.is_ok(), "{:?}", result);
                 assert_eq!(instruction_count_jit, instruction_meter);
             });
@@ -311,7 +325,7 @@ fn bench_mem_ldxdw_jit(bencher: &mut Bencher) {
 
     bencher.iter(|| {
         vm.context().remaining = LOAD64_INSTRUCTION_COUNT;
-        let (instruction_count, result) = vm.execute_program(&executable, &mut ExecutionMode::Jit);
+        let (instruction_count, result, _) = vm.execute_program(&executable, ExecutionRequest::Jit);
         assert!(result.is_ok(), "{:?}", result);
         assert_eq!(instruction_count, LOAD64_INSTRUCTION_COUNT);
     });

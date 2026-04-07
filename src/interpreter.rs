@@ -17,7 +17,7 @@ use crate::{
     elf::Executable,
     error::{EbpfError, ProgramResult},
     program::BuiltinFunction,
-    vm::{Config, ContextObject, EbpfVm},
+    vm::{CallFrame, Config, ContextObject, EbpfVm},
 };
 
 /// Virtual memory operation helper.
@@ -83,11 +83,12 @@ pub enum DebugState {
 }
 
 /// State of an interpreter
-pub struct Interpreter<'a, 'b, C: ContextObject> {
+pub struct Interpreter<'a, 'b, 'c, C: ContextObject> {
     pub(crate) vm: &'a mut EbpfVm<'b, C>,
     pub(crate) executable: &'a Executable<C>,
     pub(crate) program: &'a [u8],
     pub(crate) program_vm_addr: u64,
+    pub(crate) call_frames: &'c mut [CallFrame],
 
     /// General purpose registers and pc
     pub reg: [u64; 12],
@@ -98,20 +99,28 @@ pub struct Interpreter<'a, 'b, C: ContextObject> {
     pub(crate) breakpoints: Vec<u64>,
 }
 
-impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
+impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
     /// Creates a new interpreter state
+    ///
+    /// Note: `call_frames` must be at least `config.max_call_depth` in length.
     pub fn new(
         vm: &'a mut EbpfVm<'b, C>,
         executable: &'a Executable<C>,
         registers: [u64; 12],
+        call_frames: &'c mut [CallFrame],
     ) -> Self {
         let (program_vm_addr, program) = executable.get_text_bytes();
+        assert!(
+            call_frames.len() >= executable.get_config().max_call_depth,
+            "call_frames must be large enough for the maximum call depth"
+        );
         Self {
             vm,
             executable,
             program,
             program_vm_addr,
             reg: registers,
+            call_frames,
             #[cfg(feature = "debugger")]
             debug_state: DebugState::Continue,
             #[cfg(feature = "debugger")]
@@ -126,7 +135,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
     }
 
     fn push_frame(&mut self, config: &Config) -> bool {
-        let frame = &mut self.vm.call_frames[self.vm.call_depth as usize];
+        let frame = &mut self.call_frames[self.vm.call_depth as usize];
         frame.caller_saved_registers.copy_from_slice(
             &self.reg[ebpf::FIRST_SCRATCH_REG..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS],
         );
@@ -585,7 +594,7 @@ impl<'a, 'b, C: ContextObject> Interpreter<'a, 'b, C> {
                 }
                 // Return from BPF to BPF call
                 self.vm.call_depth -= 1;
-                let frame = &self.vm.call_frames[self.vm.call_depth as usize];
+                let frame = &self.call_frames[self.vm.call_depth as usize];
                 self.reg[ebpf::FRAME_PTR_REG] = frame.frame_pointer;
                 self.reg[ebpf::FIRST_SCRATCH_REG
                     ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS]

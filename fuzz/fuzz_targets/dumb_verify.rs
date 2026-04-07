@@ -10,7 +10,7 @@ use solana_sbpf::{
     memory_region::MemoryRegion,
     program::{BuiltinProgram, FunctionRegistry},
     verifier::{RequisiteVerifier, Verifier},
-    vm::ExecutionMode,
+    vm::{CallFrame, ExecutionRequest},
 };
 use test_utils::{create_vm, TestContextObject};
 
@@ -54,8 +54,13 @@ fuzz_target!(|data: DumbFuzzData| {
         vec![mem_region],
         None
     );
+    let mut call_frames = vec![CallFrame::default(); executable.get_config().max_call_depth];
 
-    let (_interp_ins_count, interp_res) =
-        interp_vm.execute_program(&executable, &mut ExecutionMode::Interpreted);
+    let (_interp_ins_count, interp_res, _) = interp_vm.execute_program(
+        &executable,
+        ExecutionRequest::Interpreted {
+            call_frames: &mut call_frames,
+        },
+    );
     drop(black_box(interp_res));
 });
