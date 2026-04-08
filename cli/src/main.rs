@@ -8,7 +8,7 @@ use solana_sbpf::{
     program::BuiltinProgram,
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{Config, DynamicAnalysis, EbpfVm, ExecutionMode},
+    vm::{CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionMode},
 };
 use std::{fs::File, io::Read, path::Path, sync::Arc};
 use test_utils::TestContextObject;
@@ -203,7 +203,8 @@ fn main() {
         _ => {}
     }
 
-    let (instruction_count, result) = vm.execute_program(&executable, &mut mode);
+    let mut call_frames = vec![CallFrame::default(); config.max_call_depth];
+    let (instruction_count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
     println!("Result: {result:?}");
     println!("Instruction Count: {instruction_count}");
     if matches.is_present("trace") {

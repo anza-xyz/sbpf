@@ -25,7 +25,7 @@ fn test_builtin_program_eq() {
 fn test_gdbstub_architecture() {
     use byteorder::{ReadBytesExt, WriteBytesExt};
     use solana_sbpf::elf::Executable;
-    use solana_sbpf::vm::ExecutionMode;
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
     use std::fs::File;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -69,6 +69,7 @@ fn test_gdbstub_architecture() {
             )
             .unwrap();
             let mut context_object = TestContextObject::default();
+            let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
             create_vm!(
                 vm,
                 &executable,
@@ -81,9 +82,13 @@ fn test_gdbstub_architecture() {
             vm.context().remaining = 10_000_000_000;
             vm.debug_port = Some(debug_port);
             vm.debug_metadata = Some(METADATA.into());
-            vm.execute_program(&executable, &mut ExecutionMode::Interpreted)
-                .1
-                .unwrap();
+            vm.execute_program(
+                &executable,
+                &mut ExecutionMode::Interpreted,
+                &mut call_frames,
+            )
+            .1
+            .unwrap();
         });
         // If this is set leave the stub port listening hence
         // providing a simple test environment for playing with,

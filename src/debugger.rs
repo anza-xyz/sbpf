@@ -122,7 +122,7 @@ pub fn execute<C: ContextObject>(interpreter: &mut Interpreter<C>, port: u16) {
     }
 }
 
-impl<'a, 'b, C: ContextObject> Target for Interpreter<'a, 'b, C> {
+impl<'a, 'b, 'c, C: ContextObject> Target for Interpreter<'a, 'b, 'c, C> {
     type Arch = Bpf;
     type Error = &'static str;
 
@@ -194,7 +194,7 @@ fn get_host_ptr<C: ContextObject>(
     }
 }
 
-impl<'a, 'b, C: ContextObject> SingleThreadBase for Interpreter<'a, 'b, C> {
+impl<'a, 'b, 'c, C: ContextObject> SingleThreadBase for Interpreter<'a, 'b, 'c, C> {
     fn read_registers(&mut self, regs: &mut BpfRegs) -> TargetResult<(), Self> {
         for i in 0..10 {
             regs.r[i] = self.reg[i];
@@ -248,8 +248,9 @@ impl<'a, 'b, C: ContextObject> SingleThreadBase for Interpreter<'a, 'b, C> {
     }
 }
 
-impl<'a, 'b, C: ContextObject> target::ext::base::single_register_access::SingleRegisterAccess<()>
-    for Interpreter<'a, 'b, C>
+impl<'a, 'b, 'c, C: ContextObject>
+    target::ext::base::single_register_access::SingleRegisterAccess<()>
+    for Interpreter<'a, 'b, 'c, C>
 {
     fn read_register(
         &mut self,
@@ -291,7 +292,7 @@ impl<'a, 'b, C: ContextObject> target::ext::base::single_register_access::Single
     }
 }
 
-impl<'a, 'b, C: ContextObject> SingleThreadResume for Interpreter<'a, 'b, C> {
+impl<'a, 'b, 'c, C: ContextObject> SingleThreadResume for Interpreter<'a, 'b, 'c, C> {
     fn resume(&mut self, signal: Option<Signal>) -> Result<(), Self::Error> {
         if signal.is_some() {
             return Err("no support for continuing with signal");
@@ -310,8 +311,8 @@ impl<'a, 'b, C: ContextObject> SingleThreadResume for Interpreter<'a, 'b, C> {
     }
 }
 
-impl<'a, 'b, C: ContextObject> target::ext::base::singlethread::SingleThreadSingleStep
-    for Interpreter<'a, 'b, C>
+impl<'a, 'b, 'c, C: ContextObject> target::ext::base::singlethread::SingleThreadSingleStep
+    for Interpreter<'a, 'b, 'c, C>
 {
     fn step(&mut self, signal: Option<Signal>) -> Result<(), Self::Error> {
         if signal.is_some() {
@@ -324,8 +325,8 @@ impl<'a, 'b, C: ContextObject> target::ext::base::singlethread::SingleThreadSing
     }
 }
 
-impl<'a, 'b, C: ContextObject> target::ext::section_offsets::SectionOffsets
-    for Interpreter<'a, 'b, C>
+impl<'a, 'b, 'c, C: ContextObject> target::ext::section_offsets::SectionOffsets
+    for Interpreter<'a, 'b, 'c, C>
 {
     fn get_section_offsets(&mut self) -> Result<Offsets<u64>, Self::Error> {
         Ok(Offsets::Sections {
@@ -336,7 +337,9 @@ impl<'a, 'b, C: ContextObject> target::ext::section_offsets::SectionOffsets
     }
 }
 
-impl<'a, 'b, C: ContextObject> target::ext::breakpoints::Breakpoints for Interpreter<'a, 'b, C> {
+impl<'a, 'b, 'c, C: ContextObject> target::ext::breakpoints::Breakpoints
+    for Interpreter<'a, 'b, 'c, C>
+{
     #[inline(always)]
     fn support_sw_breakpoint(
         &mut self,
@@ -345,7 +348,9 @@ impl<'a, 'b, C: ContextObject> target::ext::breakpoints::Breakpoints for Interpr
     }
 }
 
-impl<'a, 'b, C: ContextObject> target::ext::breakpoints::SwBreakpoint for Interpreter<'a, 'b, C> {
+impl<'a, 'b, 'c, C: ContextObject> target::ext::breakpoints::SwBreakpoint
+    for Interpreter<'a, 'b, 'c, C>
+{
     fn add_sw_breakpoint(
         &mut self,
         addr: u64,
@@ -370,14 +375,15 @@ impl<'a, 'b, C: ContextObject> target::ext::breakpoints::SwBreakpoint for Interp
     }
 }
 
-impl<'a, 'b, C: ContextObject> target::ext::lldb_register_info_override::LldbRegisterInfoOverride
-    for Interpreter<'a, 'b, C>
+impl<'a, 'b, 'c, C: ContextObject>
+    target::ext::lldb_register_info_override::LldbRegisterInfoOverride
+    for Interpreter<'a, 'b, 'c, C>
 {
-    fn lldb_register_info<'c>(
+    fn lldb_register_info<'d>(
         &mut self,
         reg_id: usize,
-        reg_info: Callback<'c>,
-    ) -> Result<CallbackToken<'c>, Self::Error> {
+        reg_info: Callback<'d>,
+    ) -> Result<CallbackToken<'d>, Self::Error> {
         match BpfRegId::from_raw_id(reg_id) {
             Some((_, None)) | None => Ok(reg_info.done()),
             Some((r, Some(size))) => {
@@ -580,9 +586,9 @@ mod bpf_arch {
     }
 }
 
-impl<'a, 'b, C: ContextObject>
+impl<'a, 'b, 'c, C: ContextObject>
     target::ext::target_description_xml_override::TargetDescriptionXmlOverride
-    for Interpreter<'a, 'b, C>
+    for Interpreter<'a, 'b, 'c, C>
 {
     fn target_description_xml(
         &self,
@@ -671,7 +677,7 @@ impl std::fmt::Display for GdbStubArch {
     }
 }
 
-impl<'a, 'b, C: ContextObject> MonitorCmd for Interpreter<'a, 'b, C> {
+impl<'a, 'b, 'c, C: ContextObject> MonitorCmd for Interpreter<'a, 'b, 'c, C> {
     fn handle_monitor_cmd(
         &mut self,
         cmd: &[u8],

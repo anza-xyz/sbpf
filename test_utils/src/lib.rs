@@ -310,6 +310,10 @@ macro_rules! test_interpreter_and_jit {
         let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter) = {
             let mut mem = $mem;
             let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
+            let mut call_frames = vec![
+                solana_sbpf::vm::CallFrame::default();
+                $executable.get_config().max_call_depth
+            ];
             create_vm!(
                 vm,
                 &$executable,
@@ -323,6 +327,7 @@ macro_rules! test_interpreter_and_jit {
             let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
                 &$executable,
                 &mut $crate::solana_sbpf::vm::ExecutionMode::Interpreted,
+                &mut call_frames,
             );
             (
                 instruction_count_interpreter,
@@ -353,7 +358,8 @@ macro_rules! test_interpreter_and_jit {
                     vm.registers[1] = ebpf::MM_INPUT_START;
                     let (instruction_count_jit, result_jit) = vm.execute_program(
                         &$executable,
-                        &mut $crate::solana_sbpf::vm::ExecutionMode::Jit
+                        &mut $crate::solana_sbpf::vm::ExecutionMode::Jit,
+                        &mut []
                     );
                     let trace_jit = &vm.register_trace;
                     let mut diverged = false;

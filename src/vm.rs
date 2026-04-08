@@ -290,7 +290,7 @@ pub enum RuntimeEnvironmentSlot {
 ///     memory_region::{MemoryMapping, MemoryRegion},
 ///     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
 ///     verifier::RequisiteVerifier,
-///     vm::{Config, EbpfVm, ExecutionMode},
+///     vm::{CallFrame, Config, EbpfVm, ExecutionMode},
 /// };
 /// use test_utils::TestContextObject;
 ///
@@ -327,9 +327,11 @@ pub enum RuntimeEnvironmentSlot {
 ///
 /// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
 ///
+/// let mut call_frames = vec![CallFrame::default(); executable.get_config().max_call_depth];
 /// let (instruction_count, result) = vm.execute_program(
 ///     &executable,
-///     &mut ExecutionMode::Interpreted
+///     &mut ExecutionMode::Interpreted,
+///     &mut call_frames,
 /// );
 /// assert_eq!(instruction_count, 2);
 /// assert_eq!(result.unwrap(), 0);
@@ -361,8 +363,6 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub program_result: ProgramResult,
     /// MemoryMapping inlined
     pub(crate) memory_mapping: ptr::NonNull<MemoryMapping>,
-    /// Stack of CallFrames used by the Interpreter
-    pub call_frames: Vec<CallFrame>,
     /// Loader built-in program
     pub loader: Arc<BuiltinProgram<C>>,
     /// Collector for the instruction trace
@@ -405,7 +405,6 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             registers,
             program_result: ProgramResult::Ok(0),
             memory_mapping,
-            call_frames: vec![CallFrame::default(); config.max_call_depth],
             loader,
             #[cfg(feature = "debugger")]
             debug_port: std::env::var("VM_DEBUG_PORT")
@@ -422,11 +421,16 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
     /// Use `mode` parameter to request a specific execution type. This function will write back
     /// the execution mode used back to the reference passed in.
     ///
+    /// It is required to provide `call_frames` when executing in interpreted mode.
+    /// `call_frames` must be large enough to hold the executable config's `max_call_depth`
+    /// frames.
+    ///
     /// Returns the instruction meter count (CUs) and the execution result of the program.
     pub fn execute_program(
         &mut self,
         executable: &Executable<C>,
         mode: &mut ExecutionMode,
+        call_frames: &mut [CallFrame],
     ) -> (u64, ProgramResult) {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
@@ -471,7 +475,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             }
 
             *mode = ExecutionMode::Interpreted;
-            let interpreter = Interpreter::new(self, executable, self.registers);
+            let interpreter = Interpreter::new(self, executable, self.registers, call_frames);
             break 'execute run_interpreter(interpreter);
         }
 

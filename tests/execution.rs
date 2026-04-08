@@ -3094,7 +3094,7 @@ fn test_tcp_sack_nomatch() {
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 fn execute_generated_program(prog: &[u8]) -> bool {
-    use solana_sbpf::vm::ExecutionMode;
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
 
     let max_instruction_count = 1024;
     let mem_size = 1024 * 1024;
@@ -3117,6 +3117,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         let mut mem = vec![0u8; mem_size];
         let mut context_object = TestContextObject::new(max_instruction_count);
         let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
+        let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
         create_vm!(
             vm,
             &executable,
@@ -3126,8 +3127,11 @@ fn execute_generated_program(prog: &[u8]) -> bool {
             vec![mem_region],
             None
         );
-        let (instruction_count_interpreter, result_interpreter) =
-            vm.execute_program(&executable, &mut ExecutionMode::Interpreted);
+        let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
+            &executable,
+            &mut ExecutionMode::Interpreted,
+            &mut call_frames,
+        );
         let trace_interpreter = vm.register_trace.clone();
         (
             instruction_count_interpreter,
@@ -3148,7 +3152,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         None
     );
     let (instruction_count_jit, result_jit) =
-        vm.execute_program(&executable, &mut ExecutionMode::Jit);
+        vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut []);
     let trace_jit = &vm.register_trace;
     debug_assert!(!trace_interpreter.is_empty());
     if format!("{result_interpreter:?}") != format!("{result_jit:?}")
