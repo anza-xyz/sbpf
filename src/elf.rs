@@ -303,11 +303,20 @@ impl<C: ContextObject> Executable<C> {
     }
 
     /// Get the .text section virtual address and bytes
+    #[allow(clippy::arithmetic_side_effects)]
     pub fn get_text_bytes(&self) -> (u64, &[u8]) {
-        (
-            self.text_section_vaddr,
-            &self.elf_bytes.as_slice()[self.text_section_range.clone()],
-        )
+        let text_len = self.text_section_range.len();
+        let text_bytes = match &self.ro_section {
+            // Use the owned data (not elf_bytes) to ensure the text section
+            // is consistent with the ro_section if the sections overlap.
+            Section::Owned(offset, data) => {
+                let text_offset = self.text_section_vaddr as usize - offset;
+                &data[text_offset..text_offset + text_len]
+            }
+            Section::Borrowed(_, _) => &self.elf_bytes.as_slice()[self.text_section_range.clone()],
+        };
+
+        (self.text_section_vaddr, text_bytes)
     }
 
     /// Get the concatenated read-only sections (including the text section)
