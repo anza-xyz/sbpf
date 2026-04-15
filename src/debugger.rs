@@ -266,11 +266,11 @@ impl<'a, 'b, 'c, C: ContextObject>
             BpfRegId::Sp => buf.copy_from_slice(&self.reg[ebpf::FRAME_PTR_REG].to_le_bytes()),
             BpfRegId::Pc => buf.copy_from_slice(&self.get_dbg_pc().to_le_bytes()),
             BpfRegId::InstructionCountRemaining => {
-                // SAFETY: The NonNull pointer was directly created from a unique mutable reference to
-                // ContextObject, and EpbfVm carries its lifetime.
-                let context_object = unsafe { self.vm.context_object_pointer.as_ref() };
-
-                buf.copy_from_slice(&context_object.get_remaining().to_le_bytes())
+                let remaining = self
+                    .vm
+                    .previous_instruction_meter
+                    .saturating_sub(self.vm.due_insn_count);
+                buf.copy_from_slice(&remaining.to_le_bytes())
             }
         }
         Ok(buf.len())
