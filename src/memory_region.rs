@@ -59,7 +59,13 @@ pub struct MemoryRegion {
 }
 
 impl MemoryRegion {
-    fn new(slice: &[u8], vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
+    fn new_from_pointer(
+        pointer: u64,
+        len: u64,
+        vm_addr: u64,
+        vm_gap_size: u64,
+        writable: bool,
+    ) -> Self {
         let mut vm_gap_shift = (std::mem::size_of::<u64>() as u8)
             .saturating_mul(8)
             .saturating_sub(1);
@@ -68,13 +74,28 @@ impl MemoryRegion {
             debug_assert_eq!(Some(vm_gap_size), 1_u64.checked_shl(vm_gap_shift as u32));
         };
         MemoryRegion {
-            host_addr: slice.as_ptr() as u64,
+            host_addr: pointer,
             vm_addr,
-            len: slice.len() as u64,
+            len,
             vm_gap_shift,
             writable,
             access_violation_handler_payload: None,
         }
+    }
+
+    /// Used to create a region for an object other than a slice
+    pub fn new_readonly_gapless_from_pointer(pointer: u64, vm_addr: u64, len: u64) -> Self {
+        Self::new_from_pointer(pointer, len, vm_addr, 0, false)
+    }
+
+    fn new(slice: &[u8], vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
+        Self::new_from_pointer(
+            slice.as_ptr() as u64,
+            slice.len() as u64,
+            vm_addr,
+            vm_gap_size,
+            writable,
+        )
     }
 
     /// Only to be used in tests and benches
