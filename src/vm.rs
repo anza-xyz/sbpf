@@ -298,9 +298,7 @@ pub enum RuntimeEnvironmentSlot {
 ///     0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r0, 0
 ///     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00  // exit
 /// ];
-/// let mem = &mut [
-///     0xaa, 0xbb, 0x11, 0x22, 0xcc, 0xdd
-/// ];
+/// let mut mem: [u8; _] = [0xaa, 0xbb, 0x11, 0x22, 0xcc, 0xdd];
 ///
 /// let loader = std::sync::Arc::new(BuiltinProgram::new_mock());
 /// let function_registry = FunctionRegistry::default();
@@ -315,12 +313,9 @@ pub enum RuntimeEnvironmentSlot {
 ///
 /// let regions: Vec<MemoryRegion> = vec![
 ///     executable.get_ro_region(),
-///     MemoryRegion::new_writable(
-///         stack.as_slice_mut(),
-///         ebpf::MM_STACK_START,
-///     ),
-///     MemoryRegion::new_writable(heap.as_slice_mut(), ebpf::MM_HEAP_START),
-///     MemoryRegion::new_writable(mem, ebpf::MM_INPUT_START),
+///     MemoryRegion::new(&raw const stack, ebpf::MM_STACK_START),
+///     MemoryRegion::new(&raw mut heap, ebpf::MM_HEAP_START),
+///     MemoryRegion::new(&raw mut mem, ebpf::MM_INPUT_START),
 /// ];
 ///
 /// context_object.memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();

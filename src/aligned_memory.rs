@@ -6,6 +6,8 @@ use std::{
     ptr::NonNull,
 };
 
+use crate::memory_region::HostMemoryObject;
+
 /// Scalar types, aka "plain old data"
 pub trait Pod: Copy {}
 
@@ -187,6 +189,26 @@ impl<const ALIGN: usize, T: AsRef<[u8]>> From<T> for AlignedMemory<ALIGN> {
     }
 }
 
+unsafe impl<const A: usize> HostMemoryObject for *const AlignedMemory<A> {
+    const WRITABLE: bool = false;
+    fn host_address(self) -> usize {
+        unsafe { (*self).mem.ptr.as_ptr().expose_provenance() }
+    }
+    fn byte_length(self) -> usize {
+        unsafe { (*self).len() }
+    }
+}
+
+unsafe impl<const A: usize> HostMemoryObject for *mut AlignedMemory<A> {
+    const WRITABLE: bool = true;
+    fn host_address(self) -> usize {
+        unsafe { (*self).mem.ptr.as_ptr().expose_provenance() }
+    }
+    fn byte_length(self) -> usize {
+        unsafe { (*self).len() }
+    }
+}
+
 /// Returns true if `ptr` is aligned to `align`.
 pub fn is_memory_aligned(ptr: usize, align: usize) -> bool {
     ptr.checked_rem(align)
@@ -261,7 +283,7 @@ impl<const ALIGN: usize> AlignedVec<ALIGN> {
     }
 
     fn as_slice(&self) -> &[u8] {
-        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr().cast_const(), self.length) }
+        unsafe { core::slice::from_raw_parts(self.ptr.as_ptr(), self.length) }
     }
 
     fn as_slice_mut(&mut self) -> &mut [u8] {

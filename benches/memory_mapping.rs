@@ -30,13 +30,12 @@ fn generate_memory_regions(
             Some(prng) => (*prng).gen::<u8>() as u64 + 4,
             None => 4,
         };
-        let content = vec![0; length as usize];
-        memory_regions.push(MemoryRegion::new_for_testing(
-            &content[..],
-            offset,
-            0,
-            writable,
-        ));
+        let mut content = vec![0; length as usize];
+        if writable {
+            memory_regions.push(MemoryRegion::new(&raw mut content[..], offset));
+        } else {
+            memory_regions.push(MemoryRegion::new(&raw const content[..], offset));
+        }
         offset += 0x100000000;
     }
     (memory_regions, offset)
@@ -67,12 +66,8 @@ macro_rules! bench_gapped_randomized_access_with_1024_entries {
             };
             bencher
                 .bench(|bencher| {
-                    let memory_regions = vec![MemoryRegion::new_for_testing(
-                        &content[..],
-                        0x100000000,
-                        frame_size,
-                        false,
-                    )];
+                    let memory_regions =
+                        vec![MemoryRegion::new(&raw const content[..], 0x100000000)];
                     let memory_mapping =
                         MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
                     let mut prng = new_prng!();
@@ -110,7 +105,7 @@ macro_rules! bench_randomized_access_with_0001_entry {
         #[bench]
         fn $name(bencher: &mut Bencher) {
             let content = vec![0; 1024 * 2];
-            let memory_regions = vec![MemoryRegion::new_readonly(&content[..], 0x100000000)];
+            let memory_regions = vec![MemoryRegion::new(&raw const content[..], 0x100000000)];
             let config = Config {
                 aligned_memory_mapping: $aligned_memory_mapping,
                 ..Config::default()
@@ -313,8 +308,8 @@ fn do_bench_mapping_operation(bencher: &mut Bencher, op: MemoryOperation) {
     };
     let mut memory_mapping = MemoryMapping::new(
         vec![
-            MemoryRegion::new_writable(&raw mut mem1[..], vm_addr),
-            MemoryRegion::new_writable(&raw mut mem2[..], vm_addr + 8),
+            MemoryRegion::new(&raw mut mem1[..], vm_addr),
+            MemoryRegion::new(&raw mut mem2[..], vm_addr + 8),
         ],
         &config,
         SBPFVersion::V3,

@@ -40,6 +40,101 @@ pub fn default_access_violation_handler(
 ) {
 }
 
+/// Types that can be used as backing memory for memory mappings.
+///
+/// ## Safety
+///
+/// The implementers must ensure that the returned address and byte length are contained by the
+/// implementing type's objects.
+pub unsafe trait HostMemoryObject: Copy {
+    /// Should the mapping region constructed by this object be considered writable?
+    const WRITABLE: bool;
+
+    /// The provenance-exposed address in the host address space for this object.
+    ///
+    /// Normally this is just an address of the pointer.
+    fn host_address(self) -> usize;
+    /// Number of contiguous bytes this object occupies.
+    fn byte_length(self) -> usize;
+}
+
+unsafe impl HostMemoryObject for *const [u8] {
+    const WRITABLE: bool = false;
+    fn host_address(self) -> usize {
+        self.expose_provenance()
+    }
+    fn byte_length(self) -> usize {
+        self.len()
+    }
+}
+
+unsafe impl HostMemoryObject for *mut [u8] {
+    const WRITABLE: bool = true;
+    fn host_address(self) -> usize {
+        self.expose_provenance()
+    }
+    fn byte_length(self) -> usize {
+        self.len()
+    }
+}
+
+unsafe impl<const N: usize> HostMemoryObject for *const [u8; N] {
+    const WRITABLE: bool = false;
+    fn host_address(self) -> usize {
+        self.expose_provenance()
+    }
+    fn byte_length(self) -> usize {
+        N
+    }
+}
+
+unsafe impl<const N: usize> HostMemoryObject for *mut [u8; N] {
+    const WRITABLE: bool = true;
+    fn host_address(self) -> usize {
+        self.expose_provenance()
+    }
+    fn byte_length(self) -> usize {
+        N
+    }
+}
+
+/// Types that can be directly mapped into VM memory space should implement this trait.
+///
+/// The blanket implementations of `HostMemoryObject` for `*const T` and `*mut T` where `T:
+/// VmExposable` allow exposing the implementing types to the guests directly.
+pub trait VmExposable {}
+
+/// Types that can be directly and mutably mapped into VM memory space.
+///
+/// The blanket implementations of `HostMemoryObject` for `*const T` and `*mut T` where `T:
+/// VmExposable` allow exposing the implementing types to the guests directly.
+///
+/// ## Safety
+///
+/// The type must not have any invariants that could be broken by the guest's modifications to the
+/// data within objects of this type.
+pub unsafe trait VmExposableMut {}
+
+unsafe impl<T: VmExposable> HostMemoryObject for *const T {
+    const WRITABLE: bool = false;
+    fn host_address(self) -> usize {
+        self.expose_provenance()
+    }
+    fn byte_length(self) -> usize {
+        std::mem::size_of::<T>()
+    }
+}
+
+unsafe impl<T: VmExposable> HostMemoryObject for *mut T {
+    const WRITABLE: bool = true;
+    fn host_address(self) -> usize {
+        self.expose_provenance()
+    }
+    fn byte_length(self) -> usize {
+        std::mem::size_of::<T>()
+    }
+}
+
 /// Memory region for bounds checking and address translation
 #[derive(Default, Eq, PartialEq, Clone)]
 #[repr(C, align(32))]
@@ -62,7 +157,13 @@ impl MemoryRegion {
     /// Create a VM memory region with host `address` pointing to a `len` bytes of data.
     ///
     /// This region will be made available in the guest at `vm_addr`.
-    fn new(address: usize, len: usize, vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
+    fn new_internal(
+        address: usize,
+        len: usize,
+        vm_addr: u64,
+        vm_gap_size: u64,
+        writable: bool,
+    ) -> Self {
         let mut vm_gap_shift = (std::mem::size_of::<u64>() as u8)
             .saturating_mul(8)
             .saturating_sub(1);
@@ -80,52 +181,29 @@ impl MemoryRegion {
         }
     }
 
-    /// Used to create a memory region for a host object.
-    pub fn new_readonly_object<T>(object: *const T, vm_addr: u64) -> Self {
-        Self::new(
-            object.expose_provenance() as _,
-            std::mem::size_of::<T>() as _,
+    /// Creates a new `MemoryRegion` backed by the provided host memory.
+    ///
+    /// The backing memory must remain allocated for the duration of the returned `MemoryRegion`.
+    pub fn new<HO: HostMemoryObject>(host: HO, vm_addr: u64) -> Self {
+        Self::new_internal(
+            host.host_address(),
+            host.byte_length(),
             vm_addr,
             0,
-            false,
+            HO::WRITABLE,
         )
     }
 
-    /// Only to be used in tests and benches
-    pub fn new_for_testing(slice: &[u8], vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
-        Self::new(
-            slice.as_ptr().expose_provenance(),
-            slice.len(),
+    /// Creates a new gapped `MemoryRegion` backed by the provided host memory.
+    ///
+    /// The backing memory must remain allocated for the duration of the returned `MemoryRegion`.
+    pub fn new_gapped<HO: HostMemoryObject>(host: HO, vm_addr: u64, vm_gap_size: u64) -> Self {
+        Self::new_internal(
+            host.host_address(),
+            host.byte_length(),
             vm_addr,
             vm_gap_size,
-            writable,
-        )
-    }
-
-    /// Creates a new readonly MemoryRegion from a slice.
-    ///
-    /// The backing data must remain allocated for the duration of the returned `MemoryRegion`.
-    pub fn new_readonly(slice: *const [u8], vm_addr: u64) -> Self {
-        Self::new(slice.expose_provenance(), slice.len(), vm_addr, 0, false)
-    }
-
-    /// Creates a new writable MemoryRegion from a mutable slice
-    ///
-    /// The backing data must remain allocated for the duration of the returned `MemoryRegion`.
-    pub fn new_writable(slice: *mut [u8], vm_addr: u64) -> Self {
-        Self::new(slice.expose_provenance(), slice.len(), vm_addr, 0, true)
-    }
-
-    /// Creates a new writable gapped MemoryRegion from a mutable slice
-    ///
-    /// The backing data must remain allocated for the duration of the returned `MemoryRegion`.
-    pub fn new_writable_gapped(slice: *mut [u8], vm_addr: u64, vm_gap_size: u64) -> Self {
-        Self::new(
-            slice.expose_provenance(),
-            slice.len(),
-            vm_addr,
-            vm_gap_size,
-            true,
+            HO::WRITABLE,
         )
     }
 
@@ -194,11 +272,13 @@ impl fmt::Debug for MemoryRegion {
         )
     }
 }
+
 impl std::cmp::PartialOrd for MemoryRegion {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
+
 impl std::cmp::Ord for MemoryRegion {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.vm_addr.cmp(&other.vm_addr)
@@ -357,6 +437,7 @@ impl AlignedMemoryMapping {
 
     /// Initialize the memory mapping by sorting its regions and filling gaps
     pub fn initialize(&mut self) -> Result<(), EbpfError> {
+        static EMPTY_SLICE: &[u8] = &[];
         if self.allow_memory_region_zero {
             self.regions.sort();
             let mut expected_region_index = 0;
@@ -371,8 +452,8 @@ impl AlignedMemoryMapping {
                 if actual_region_index > expected_region_index {
                     self.regions.insert(
                         expected_region_index,
-                        MemoryRegion::new_readonly(
-                            &[],
+                        MemoryRegion::new(
+                            &raw const *EMPTY_SLICE,
                             (expected_region_index as u64).saturating_mul(ebpf::MM_REGION_SIZE),
                         ),
                     );
@@ -382,7 +463,8 @@ impl AlignedMemoryMapping {
                 expected_region_index = expected_region_index.saturating_add(1);
             }
         } else {
-            self.regions.push(MemoryRegion::new_readonly(&[], 0));
+            self.regions
+                .push(MemoryRegion::new(&raw const *EMPTY_SLICE, 0));
             self.regions.sort();
             for (index, region) in self.regions.iter().enumerate() {
                 if region
@@ -849,14 +931,11 @@ mod test {
                 ..Config::default()
             };
             let mut mem1 = [0xff; 8];
+            let mem2 = [0; 8];
             let mut m = MemoryMapping::new(
                 vec![
-                    MemoryRegion::new_readonly(&[0; 8], ebpf::MM_REGION_SIZE),
-                    MemoryRegion::new_writable_gapped(
-                        &raw mut mem1[..],
-                        ebpf::MM_REGION_SIZE * 2,
-                        2,
-                    ),
+                    MemoryRegion::new(&raw const mem2[..], ebpf::MM_REGION_SIZE),
+                    MemoryRegion::new_gapped(&raw mut mem1[..], ebpf::MM_REGION_SIZE * 2, 2),
                 ],
                 &config,
                 SBPFVersion::V3,
@@ -886,8 +965,11 @@ mod test {
         assert_error!(
             MemoryMapping::new(
                 vec![
-                    MemoryRegion::new_readonly(&mem1, ebpf::MM_REGION_SIZE),
-                    MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64 - 1),
+                    MemoryRegion::new(&raw const mem1, ebpf::MM_REGION_SIZE),
+                    MemoryRegion::new(
+                        &raw const mem2,
+                        ebpf::MM_REGION_SIZE + mem1.len() as u64 - 1
+                    ),
                 ],
                 &config,
                 SBPFVersion::V3,
@@ -896,8 +978,8 @@ mod test {
         );
         assert!(MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
+                MemoryRegion::new(&raw const mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
             ],
             &config,
             SBPFVersion::V3,
@@ -917,14 +999,14 @@ mod test {
         let mem4 = [44, 44];
         let m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&mut mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
-                MemoryRegion::new_readonly(
-                    &mem3,
+                MemoryRegion::new(&raw mut mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
+                MemoryRegion::new(
+                    &raw const mem3,
                     ebpf::MM_REGION_SIZE + (mem1.len() + mem2.len()) as u64,
                 ),
-                MemoryRegion::new_readonly(
-                    &mem4,
+                MemoryRegion::new(
+                    &raw const mem4,
                     ebpf::MM_REGION_SIZE + (mem1.len() + mem2.len() + mem3.len()) as u64,
                 ),
             ],
@@ -999,8 +1081,8 @@ mod test {
         let mem2 = [0xDD; 4];
         let m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&raw const mem2[..], ebpf::MM_REGION_SIZE + 4),
+                MemoryRegion::new(&raw mut mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const mem2, ebpf::MM_REGION_SIZE + 4),
             ],
             &config,
             SBPFVersion::V3,
@@ -1037,8 +1119,8 @@ mod test {
         let mem2 = [0xDD; 4];
         let m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&raw const mem2[..], ebpf::MM_REGION_SIZE * 2),
+                MemoryRegion::new(&raw mut mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const mem2, ebpf::MM_REGION_SIZE * 2),
             ],
             &config,
             SBPFVersion::V4,
@@ -1078,8 +1160,8 @@ mod test {
         let mem2 = [0x33];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
+                MemoryRegion::new(&raw const mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
             ],
             &config,
             SBPFVersion::V3,
@@ -1101,11 +1183,8 @@ mod test {
         let mut mem2 = [0xff];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_writable(
-                    &raw mut mem2[..],
-                    ebpf::MM_REGION_SIZE + mem1.len() as u64,
-                ),
+                MemoryRegion::new(&raw mut mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw mut mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
             ],
             &config,
             SBPFVersion::V3,
@@ -1130,10 +1209,7 @@ mod test {
 
         let mut mem1 = [0xFF];
         let mut m = MemoryMapping::new(
-            vec![MemoryRegion::new_writable(
-                &raw mut mem1[..],
-                ebpf::MM_REGION_SIZE,
-            )],
+            vec![MemoryRegion::new(&raw mut mem1, ebpf::MM_REGION_SIZE)],
             &config,
             SBPFVersion::V3,
         )
@@ -1149,8 +1225,8 @@ mod test {
         let mut mem2 = [0xDD; 4];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_writable(&raw mut mem2[..], ebpf::MM_REGION_SIZE + 4),
+                MemoryRegion::new(&raw mut mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw mut mem2, ebpf::MM_REGION_SIZE + 4),
             ],
             &config,
             SBPFVersion::V3,
@@ -1171,10 +1247,7 @@ mod test {
 
         let mem1 = [0xff];
         let mut m = MemoryMapping::new(
-            vec![MemoryRegion::new_readonly(
-                &raw const mem1[..],
-                ebpf::MM_REGION_SIZE,
-            )],
+            vec![MemoryRegion::new(&raw const mem1, ebpf::MM_REGION_SIZE)],
             &config,
             SBPFVersion::V3,
         )
@@ -1188,8 +1261,8 @@ mod test {
         let mem2 = [0xDD; 4];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&raw const mem1[..], ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&raw const mem2[..], ebpf::MM_REGION_SIZE + 4),
+                MemoryRegion::new(&raw const mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const mem2, ebpf::MM_REGION_SIZE + 4),
             ],
             &config,
             SBPFVersion::V3,
@@ -1209,11 +1282,8 @@ mod test {
         let mem2 = [0xff, 0xff];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(
-                    &raw const mem2[..],
-                    ebpf::MM_REGION_SIZE + mem1.len() as u64,
-                ),
+                MemoryRegion::new(&raw mut mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
             ],
             &config,
             SBPFVersion::V3,
@@ -1233,8 +1303,8 @@ mod test {
         let mem3 = [33];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
+                MemoryRegion::new(&raw const mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
             ],
             &config,
             SBPFVersion::V3,
@@ -1259,7 +1329,7 @@ mod test {
         assert_error!(
             m.replace_region(
                 2,
-                MemoryRegion::new_readonly(&mem3, ebpf::MM_REGION_SIZE + mem1.len() as u64)
+                MemoryRegion::new(&raw const mem3, ebpf::MM_REGION_SIZE + mem1.len() as u64)
             ),
             "InvalidMemoryRegion(2)"
         );
@@ -1274,7 +1344,10 @@ mod test {
         assert_error!(
             m.replace_region(
                 region_index,
-                MemoryRegion::new_readonly(&mem3, ebpf::MM_REGION_SIZE + mem1.len() as u64 + 1)
+                MemoryRegion::new(
+                    &raw const mem3,
+                    ebpf::MM_REGION_SIZE + mem1.len() as u64 + 1
+                )
             ),
             "InvalidMemoryRegion({})",
             region_index
@@ -1282,7 +1355,7 @@ mod test {
 
         m.replace_region(
             region_index,
-            MemoryRegion::new_readonly(&mem3, ebpf::MM_REGION_SIZE + mem1.len() as u64),
+            MemoryRegion::new(&raw const mem3, ebpf::MM_REGION_SIZE + mem1.len() as u64),
         )
         .unwrap();
 
@@ -1308,8 +1381,8 @@ mod test {
         let mem3 = [33, 33];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE * 2),
+                MemoryRegion::new(&raw const mem1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const mem2, ebpf::MM_REGION_SIZE * 2),
             ],
             &config,
             SBPFVersion::V4,
@@ -1326,7 +1399,7 @@ mod test {
         assert_error!(
             m.replace_region(
                 3,
-                MemoryRegion::new_readonly(&mem3, ebpf::MM_REGION_SIZE * 2)
+                MemoryRegion::new(&raw const mem3, ebpf::MM_REGION_SIZE * 2)
             ),
             "InvalidMemoryRegion(3)"
         );
@@ -1335,7 +1408,7 @@ mod test {
         assert_error!(
             m.replace_region(
                 2,
-                MemoryRegion::new_readonly(&mem3, ebpf::MM_REGION_SIZE * 3)
+                MemoryRegion::new(&raw const mem3, ebpf::MM_REGION_SIZE * 3)
             ),
             "InvalidMemoryRegion(2)"
         );
@@ -1344,14 +1417,14 @@ mod test {
         assert_error!(
             m.replace_region(
                 2,
-                MemoryRegion::new_readonly(&mem3, ebpf::MM_REGION_SIZE * 3 - 1)
+                MemoryRegion::new(&raw const mem3, ebpf::MM_REGION_SIZE * 3 - 1)
             ),
             "InvalidMemoryRegion(2)"
         );
 
         m.replace_region(
             2,
-            MemoryRegion::new_readonly(&mem3, ebpf::MM_REGION_SIZE * 2),
+            MemoryRegion::new(&raw const mem3, ebpf::MM_REGION_SIZE * 2),
         )
         .unwrap();
 
@@ -1371,7 +1444,7 @@ mod test {
             };
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
-            let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_REGION_SIZE)];
+            let mut regions = vec![MemoryRegion::new(&raw const original, ebpf::MM_REGION_SIZE)];
             regions[0].access_violation_handler_payload = Some(0);
 
             let c = Rc::clone(&copied);
@@ -1409,7 +1482,7 @@ mod test {
             };
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
-            let mut regions = vec![MemoryRegion::new_readonly(&original, ebpf::MM_REGION_SIZE)];
+            let mut regions = vec![MemoryRegion::new(&raw const original, ebpf::MM_REGION_SIZE)];
             regions[0].access_violation_handler_payload = Some(0);
 
             let c = Rc::clone(&copied);
@@ -1453,8 +1526,8 @@ mod test {
             let copied = Rc::new(RefCell::new(Vec::new()));
 
             let mut regions = vec![
-                MemoryRegion::new_readonly(&original1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&original2, ebpf::MM_REGION_SIZE * 2),
+                MemoryRegion::new(&raw const original1, ebpf::MM_REGION_SIZE),
+                MemoryRegion::new(&raw const original2, ebpf::MM_REGION_SIZE * 2),
             ];
             regions[0].access_violation_handler_payload = Some(42);
 
@@ -1487,7 +1560,7 @@ mod test {
         let original = [11, 22];
 
         let m = MemoryMapping::new_with_access_violation_handler(
-            vec![MemoryRegion::new_readonly(&original, ebpf::MM_REGION_SIZE)],
+            vec![MemoryRegion::new(&raw const original, ebpf::MM_REGION_SIZE)],
             &config,
             SBPFVersion::V4,
             Box::new(default_access_violation_handler),
@@ -1504,7 +1577,7 @@ mod test {
         let original = [11, 22];
 
         let mut m = MemoryMapping::new_with_access_violation_handler(
-            vec![MemoryRegion::new_readonly(&original, ebpf::MM_REGION_SIZE)],
+            vec![MemoryRegion::new(&raw const original, ebpf::MM_REGION_SIZE)],
             &config,
             SBPFVersion::V4,
             Box::new(default_access_violation_handler),
@@ -1521,8 +1594,9 @@ mod test {
             ..Config::default()
         };
 
+        let mem = [11, 12];
         let mapping = MemoryMapping::new_with_access_violation_handler(
-            vec![MemoryRegion::new_readonly(&[11, 12], ebpf::MM_REGION_SIZE)],
+            vec![MemoryRegion::new(&raw const mem, ebpf::MM_REGION_SIZE)],
             &config,
             SBPFVersion::V4,
             Box::new(default_access_violation_handler),
