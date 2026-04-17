@@ -848,7 +848,7 @@ mod test {
                 aligned_memory_mapping,
                 ..Config::default()
             };
-            let mut mem1 = vec![0xff; 8];
+            let mut mem1 = [0xff; 8];
             let mut m = MemoryMapping::new(
                 vec![
                     MemoryRegion::new_readonly(&[0; 8], ebpf::MM_REGION_SIZE),
@@ -995,8 +995,8 @@ mod test {
             ..Config::default()
         };
 
-        let mut mem1 = vec![0xFF; 4];
-        let mem2 = vec![0xDD; 4];
+        let mut mem1 = [0xFF; 4];
+        let mem2 = [0xDD; 4];
         let m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
@@ -1033,8 +1033,8 @@ mod test {
             ..Config::default()
         };
 
-        let mut mem1 = vec![0xFF; 4];
-        let mem2 = vec![0xDD; 4];
+        let mut mem1 = [0xFF; 4];
+        let mem2 = [0xDD; 4];
         let m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
@@ -1097,8 +1097,8 @@ mod test {
             aligned_memory_mapping: false,
             ..Config::default()
         };
-        let mut mem1 = vec![0xff, 0xff];
-        let mut mem2 = vec![0xff];
+        let mut mem1 = [0xff, 0xff];
+        let mut mem2 = [0xff];
         let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
@@ -1128,7 +1128,7 @@ mod test {
             ..Config::default()
         };
 
-        let mut mem1 = vec![0xFF];
+        let mut mem1 = [0xFF];
         let mut m = MemoryMapping::new(
             vec![MemoryRegion::new_writable(
                 &raw mut mem1[..],
@@ -1145,8 +1145,8 @@ mod test {
         // outside the address space (the case above is just on the edge)
         assert_error!(m.store(0x11u8, ebpf::MM_REGION_SIZE + 2), "AccessViolation");
 
-        let mut mem1 = vec![0xFF; 4];
-        let mut mem2 = vec![0xDD; 4];
+        let mut mem1 = [0xFF; 4];
+        let mut mem2 = [0xDD; 4];
         let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
@@ -1169,7 +1169,7 @@ mod test {
             ..Config::default()
         };
 
-        let mem1 = vec![0xff];
+        let mem1 = [0xff];
         let mut m = MemoryMapping::new(
             vec![MemoryRegion::new_readonly(
                 &raw const mem1[..],
@@ -1184,8 +1184,8 @@ mod test {
         assert_error!(m.load::<u8>(ebpf::MM_REGION_SIZE + 1), "AccessViolation");
         assert_error!(m.load::<u8>(ebpf::MM_REGION_SIZE + 2), "AccessViolation");
 
-        let mem1 = vec![0xFF; 4];
-        let mem2 = vec![0xDD; 4];
+        let mem1 = [0xFF; 4];
+        let mem2 = [0xDD; 4];
         let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_readonly(&raw const mem1[..], ebpf::MM_REGION_SIZE),
@@ -1205,8 +1205,8 @@ mod test {
             aligned_memory_mapping: false,
             ..Config::default()
         };
-        let mut mem1 = vec![0xff, 0xff];
-        let mem2 = vec![0xff, 0xff];
+        let mut mem1 = [0xff, 0xff];
+        let mem2 = [0xff, 0xff];
         let mut m = MemoryMapping::new(
             vec![
                 MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
