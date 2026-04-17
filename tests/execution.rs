@@ -3116,7 +3116,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     let (instruction_count_interpreter, trace_interpreter, result_interpreter) = {
         let mut mem = vec![0u8; mem_size];
         let mut context_object = TestContextObject::new(max_instruction_count);
-        let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
+        let mem_region = MemoryRegion::new_writable(&raw mut mem[..], ebpf::MM_INPUT_START);
         let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
         create_vm!(
             vm,
@@ -3141,7 +3141,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     };
     let mut mem = vec![0u8; mem_size];
     let mut context_object = TestContextObject::new(max_instruction_count);
-    let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
+    let mem_region = MemoryRegion::new_writable(&raw mut mem[..], ebpf::MM_INPUT_START);
     create_vm!(
         vm,
         &executable,

@@ -59,13 +59,10 @@ pub struct MemoryRegion {
 }
 
 impl MemoryRegion {
-    fn new_from_pointer(
-        pointer: u64,
-        len: u64,
-        vm_addr: u64,
-        vm_gap_size: u64,
-        writable: bool,
-    ) -> Self {
+    /// Create a VM memory region with host `address` pointing to a `len` bytes of data.
+    ///
+    /// This region will be made available in the guest at `vm_addr`.
+    fn new(address: usize, len: usize, vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
         let mut vm_gap_shift = (std::mem::size_of::<u64>() as u8)
             .saturating_mul(8)
             .saturating_sub(1);
@@ -74,48 +71,62 @@ impl MemoryRegion {
             debug_assert_eq!(Some(vm_gap_size), 1_u64.checked_shl(vm_gap_shift as u32));
         };
         MemoryRegion {
-            host_addr: pointer,
+            host_addr: address as u64,
             vm_addr,
-            len,
+            len: len as u64,
             vm_gap_shift,
             writable,
             access_violation_handler_payload: None,
         }
     }
 
-    /// Used to create a region for an object other than a slice
-    pub fn new_readonly_gapless_from_pointer(pointer: u64, vm_addr: u64, len: u64) -> Self {
-        Self::new_from_pointer(pointer, len, vm_addr, 0, false)
+    /// Used to create a memory region for a host object.
+    pub fn new_readonly_object<T>(object: *const T, vm_addr: u64) -> Self {
+        Self::new(
+            object.expose_provenance() as _,
+            std::mem::size_of::<T>() as _,
+            vm_addr,
+            0,
+            false,
+        )
     }
 
-    fn new(slice: &[u8], vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
-        Self::new_from_pointer(
-            slice.as_ptr() as u64,
-            slice.len() as u64,
+    /// Only to be used in tests and benches
+    pub fn new_for_testing(slice: &[u8], vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
+        Self::new(
+            slice.as_ptr().expose_provenance(),
+            slice.len(),
             vm_addr,
             vm_gap_size,
             writable,
         )
     }
 
-    /// Only to be used in tests and benches
-    pub fn new_for_testing(slice: &[u8], vm_addr: u64, vm_gap_size: u64, writable: bool) -> Self {
-        Self::new(slice, vm_addr, vm_gap_size, writable)
-    }
-
-    /// Creates a new readonly MemoryRegion from a slice
-    pub fn new_readonly(slice: &[u8], vm_addr: u64) -> Self {
-        Self::new(slice, vm_addr, 0, false)
+    /// Creates a new readonly MemoryRegion from a slice.
+    ///
+    /// The backing data must remain allocated for the duration of the returned `MemoryRegion`.
+    pub fn new_readonly(slice: *const [u8], vm_addr: u64) -> Self {
+        Self::new(slice.expose_provenance(), slice.len(), vm_addr, 0, false)
     }
 
     /// Creates a new writable MemoryRegion from a mutable slice
-    pub fn new_writable(slice: &mut [u8], vm_addr: u64) -> Self {
-        Self::new(&*slice, vm_addr, 0, true)
+    ///
+    /// The backing data must remain allocated for the duration of the returned `MemoryRegion`.
+    pub fn new_writable(slice: *mut [u8], vm_addr: u64) -> Self {
+        Self::new(slice.expose_provenance(), slice.len(), vm_addr, 0, true)
     }
 
     /// Creates a new writable gapped MemoryRegion from a mutable slice
-    pub fn new_writable_gapped(slice: &mut [u8], vm_addr: u64, vm_gap_size: u64) -> Self {
-        Self::new(&*slice, vm_addr, vm_gap_size, true)
+    ///
+    /// The backing data must remain allocated for the duration of the returned `MemoryRegion`.
+    pub fn new_writable_gapped(slice: *mut [u8], vm_addr: u64, vm_gap_size: u64) -> Self {
+        Self::new(
+            slice.expose_provenance(),
+            slice.len(),
+            vm_addr,
+            vm_gap_size,
+            true,
+        )
     }
 
     /// Returns the vm address space covered by this MemoryRegion
@@ -841,7 +852,11 @@ mod test {
             let mut m = MemoryMapping::new(
                 vec![
                     MemoryRegion::new_readonly(&[0; 8], ebpf::MM_REGION_SIZE),
-                    MemoryRegion::new_writable_gapped(&mut mem1, ebpf::MM_REGION_SIZE * 2, 2),
+                    MemoryRegion::new_writable_gapped(
+                        &raw mut mem1[..],
+                        ebpf::MM_REGION_SIZE * 2,
+                        2,
+                    ),
                 ],
                 &config,
                 SBPFVersion::V3,
@@ -984,8 +999,8 @@ mod test {
         let mem2 = vec![0xDD; 4];
         let m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&mut mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE + 4),
+                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
+                MemoryRegion::new_readonly(&raw const mem2[..], ebpf::MM_REGION_SIZE + 4),
             ],
             &config,
             SBPFVersion::V3,
@@ -1022,8 +1037,8 @@ mod test {
         let mem2 = vec![0xDD; 4];
         let m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&mut mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE * 2),
+                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
+                MemoryRegion::new_readonly(&raw const mem2[..], ebpf::MM_REGION_SIZE * 2),
             ],
             &config,
             SBPFVersion::V4,
@@ -1086,8 +1101,11 @@ mod test {
         let mut mem2 = vec![0xff];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&mut mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_writable(&mut mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
+                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
+                MemoryRegion::new_writable(
+                    &raw mut mem2[..],
+                    ebpf::MM_REGION_SIZE + mem1.len() as u64,
+                ),
             ],
             &config,
             SBPFVersion::V3,
@@ -1112,7 +1130,10 @@ mod test {
 
         let mut mem1 = vec![0xFF];
         let mut m = MemoryMapping::new(
-            vec![MemoryRegion::new_writable(&mut mem1, ebpf::MM_REGION_SIZE)],
+            vec![MemoryRegion::new_writable(
+                &raw mut mem1[..],
+                ebpf::MM_REGION_SIZE,
+            )],
             &config,
             SBPFVersion::V3,
         )
@@ -1128,8 +1149,8 @@ mod test {
         let mut mem2 = vec![0xDD; 4];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&mut mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_writable(&mut mem2, ebpf::MM_REGION_SIZE + 4),
+                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
+                MemoryRegion::new_writable(&raw mut mem2[..], ebpf::MM_REGION_SIZE + 4),
             ],
             &config,
             SBPFVersion::V3,
@@ -1150,7 +1171,10 @@ mod test {
 
         let mem1 = vec![0xff];
         let mut m = MemoryMapping::new(
-            vec![MemoryRegion::new_readonly(&mem1, ebpf::MM_REGION_SIZE)],
+            vec![MemoryRegion::new_readonly(
+                &raw const mem1[..],
+                ebpf::MM_REGION_SIZE,
+            )],
             &config,
             SBPFVersion::V3,
         )
@@ -1164,8 +1188,8 @@ mod test {
         let mem2 = vec![0xDD; 4];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_readonly(&mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE + 4),
+                MemoryRegion::new_readonly(&raw const mem1[..], ebpf::MM_REGION_SIZE),
+                MemoryRegion::new_readonly(&raw const mem2[..], ebpf::MM_REGION_SIZE + 4),
             ],
             &config,
             SBPFVersion::V3,
@@ -1185,8 +1209,11 @@ mod test {
         let mem2 = vec![0xff, 0xff];
         let mut m = MemoryMapping::new(
             vec![
-                MemoryRegion::new_writable(&mut mem1, ebpf::MM_REGION_SIZE),
-                MemoryRegion::new_readonly(&mem2, ebpf::MM_REGION_SIZE + mem1.len() as u64),
+                MemoryRegion::new_writable(&raw mut mem1[..], ebpf::MM_REGION_SIZE),
+                MemoryRegion::new_readonly(
+                    &raw const mem2[..],
+                    ebpf::MM_REGION_SIZE + mem1.len() as u64,
+                ),
             ],
             &config,
             SBPFVersion::V3,

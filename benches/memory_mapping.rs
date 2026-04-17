@@ -313,8 +313,8 @@ fn do_bench_mapping_operation(bencher: &mut Bencher, op: MemoryOperation) {
     };
     let mut memory_mapping = MemoryMapping::new(
         vec![
-            MemoryRegion::new_writable(&mut mem1, vm_addr),
-            MemoryRegion::new_writable(&mut mem2, vm_addr + 8),
+            MemoryRegion::new_writable(&raw mut mem1[..], vm_addr),
+            MemoryRegion::new_writable(&raw mut mem2[..], vm_addr + 8),
         ],
         &config,
         SBPFVersion::V3,
