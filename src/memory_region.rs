@@ -593,20 +593,18 @@ impl MemoryMapping {
         }
     }
 
-    /// Returns the `MemoryRegion`s as mutable
-    pub fn get_regions_mut(&mut self) -> Option<&mut [MemoryRegion]> {
-        if self.initialized {
-            // Returning the regions as mutable after initialization might break the initialization
-            // constraints.
-            return None;
-        }
+    /// Returns the `MemoryRegion`s as mutable, and uninitialize the mapping.
+    /// Modifying the regions might break the initialization constraints, so this function
+    /// uninitializes the mapping.
+    pub fn get_regions_mut(&mut self) -> &mut [MemoryRegion] {
+        self.initialized = false;
 
         let regions = match &mut self.ty {
             MemoryMappingType::Aligned(inner) => inner.regions.as_mut_slice(),
             MemoryMappingType::Unaligned(inner) => &mut inner.regions,
         };
 
-        Some(regions)
+        regions
     }
 
     /// Replaces the `MemoryRegion` at the given index
