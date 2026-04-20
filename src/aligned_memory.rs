@@ -189,23 +189,23 @@ impl<const ALIGN: usize, T: AsRef<[u8]>> From<T> for AlignedMemory<ALIGN> {
     }
 }
 
-unsafe impl<const A: usize> HostMemoryObject for *const AlignedMemory<A> {
+unsafe impl<const A: usize> HostMemoryObject for &AlignedMemory<A> {
     const WRITABLE: bool = false;
     fn host_address(self) -> usize {
-        unsafe { (*self).mem.ptr.as_ptr().expose_provenance() }
+        self.mem.ptr.as_ptr().expose_provenance()
     }
-    fn byte_length(self) -> usize {
-        unsafe { (*self).len() }
+    fn byte_length(&self) -> usize {
+        self.len()
     }
 }
 
-unsafe impl<const A: usize> HostMemoryObject for *mut AlignedMemory<A> {
+unsafe impl<const A: usize> HostMemoryObject for &mut AlignedMemory<A> {
     const WRITABLE: bool = true;
     fn host_address(self) -> usize {
-        unsafe { (*self).mem.ptr.as_ptr().expose_provenance() }
+        self.mem.ptr.as_ptr().expose_provenance()
     }
-    fn byte_length(self) -> usize {
-        unsafe { (*self).len() }
+    fn byte_length(&self) -> usize {
+        self.len()
     }
 }
 

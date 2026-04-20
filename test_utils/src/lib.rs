@@ -35,8 +35,10 @@ impl Default for TestContextObject {
     fn default() -> Self {
         Self {
             remaining: 0,
-            memory_mapping: MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved)
-                .unwrap(),
+            memory_mapping: unsafe {
+                MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved)
+            }
+            .unwrap(),
         }
     }
 }
@@ -247,7 +249,7 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
     .chain(additional_regions.into_iter())
     .collect();
 
-    Ok(
+    Ok(unsafe {
         if let Some(access_violation_handler) = access_violation_handler {
             MemoryMapping::new_with_access_violation_handler(
                 regions,
@@ -257,8 +259,8 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
             )?
         } else {
             MemoryMapping::new(regions, config, sbpf_version)?
-        },
-    )
+        }
+    })
 }
 
 #[macro_export]

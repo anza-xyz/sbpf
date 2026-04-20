@@ -313,12 +313,14 @@ pub enum RuntimeEnvironmentSlot {
 ///
 /// let regions: Vec<MemoryRegion> = vec![
 ///     executable.get_ro_region(),
-///     MemoryRegion::new(&raw const stack, ebpf::MM_STACK_START),
-///     MemoryRegion::new(&raw mut heap, ebpf::MM_HEAP_START),
+///     MemoryRegion::new(&mut stack, ebpf::MM_STACK_START),
+///     MemoryRegion::new(&mut heap, ebpf::MM_HEAP_START),
 ///     MemoryRegion::new(&raw mut mem, ebpf::MM_INPUT_START),
 /// ];
-///
-/// context_object.memory_mapping = MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap();
+///;
+/// context_object.memory_mapping = unsafe {
+///     MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap()
+/// };
 ///
 /// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
 ///
@@ -615,7 +617,7 @@ mod tests {
         let version = SBPFVersion::V4;
         let config = Config::default();
         let mut context_object =
-            DummyContextObject(MemoryMapping::new(vec![], &config, version).unwrap());
+            unsafe { DummyContextObject(MemoryMapping::new(vec![], &config, version).unwrap()) };
         let env = super::EbpfVm::new(
             Arc::new(BuiltinProgram::new_mock()),
             version,
