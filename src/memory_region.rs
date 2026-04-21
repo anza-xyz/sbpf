@@ -88,7 +88,7 @@ unsafe impl<T: VmExposable> HostMemoryObject for *const T {
     }
 }
 
-unsafe impl<T: VmExposable> HostMemoryObject for *mut T {
+unsafe impl<T: VmExposableMut> HostMemoryObject for *mut T {
     const WRITABLE: bool = true;
     fn host_address(self) -> usize {
         self.expose_provenance()
@@ -118,7 +118,7 @@ unsafe impl<T: VmExposableMut> HostMemoryObject for *mut [T] {
     }
 }
 
-unsafe impl<T: VmExposableMut, const N: usize> HostMemoryObject for *const [T; N] {
+unsafe impl<T: VmExposable, const N: usize> HostMemoryObject for *const [T; N] {
     const WRITABLE: bool = false;
     fn host_address(self) -> usize {
         self.expose_provenance()
@@ -128,7 +128,7 @@ unsafe impl<T: VmExposableMut, const N: usize> HostMemoryObject for *const [T; N
     }
 }
 
-unsafe impl<T: VmExposable, const N: usize> HostMemoryObject for *mut [T; N] {
+unsafe impl<T: VmExposableMut, const N: usize> HostMemoryObject for *mut [T; N] {
     const WRITABLE: bool = true;
     fn host_address(self) -> usize {
         self.expose_provenance()
