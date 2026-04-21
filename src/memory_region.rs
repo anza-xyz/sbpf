@@ -60,14 +60,14 @@ pub unsafe trait HostMemoryObject {
 
 /// Types that can be directly mapped into VM memory space should implement this trait.
 ///
-/// The blanket implementations of `HostMemoryObject` for `*const T` and `*mut T` where `T:
-/// VmExposable` allow exposing the implementing types to the guests directly.
+/// The blanket implementations of [`HostMemoryObject`] for `*const T` where `T: VmExposable` allow
+/// exposing the implementing types to the guests directly.
 pub trait VmExposable {}
 
 /// Types that can be directly and mutably mapped into VM memory space.
 ///
-/// The blanket implementations of `HostMemoryObject` for `*const T` and `*mut T` where `T:
-/// VmExposable` allow exposing the implementing types to the guests directly.
+/// The blanket implementations of [`HostMemoryObject`] for `*mut T` where `T: VmExposableMut` allow
+/// mutably exposing the implementing types to the guests directly.
 ///
 /// ## Safety
 ///
