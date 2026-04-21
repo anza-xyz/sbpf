@@ -1640,7 +1640,7 @@ mod test {
                     &config,
                     SBPFVersion::V3,
                     Box::new(move |region, _, _, _, _| {
-                        // check that the argument passed to MemoryRegion::new_readonly is then passed to the
+                        // check that the argument passed to MemoryRegion::new is then passed to the
                         // callback
                         assert_eq!(region.access_violation_handler_payload, Some(42));
                         c.borrow_mut().extend_from_slice(&original1);

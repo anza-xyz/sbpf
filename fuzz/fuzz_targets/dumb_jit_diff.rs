@@ -43,7 +43,7 @@ fuzz_target!(|data: DumbFuzzData| {
     .unwrap();
     let mut interp_mem = data.mem.clone();
     let mut interp_context_object = TestContextObject::new(1 << 16);
-    let interp_mem_region = MemoryRegion::new_writable(&mut interp_mem, ebpf::MM_INPUT_START);
+    let interp_mem_region = MemoryRegion::new(&raw mut interp_mem[..], ebpf::MM_INPUT_START);
     create_vm!(
         interp_vm,
         &executable,
@@ -67,7 +67,7 @@ fuzz_target!(|data: DumbFuzzData| {
     if executable.jit_compile().is_ok() {
         let mut jit_mem = data.mem.clone();
         let mut jit_context_object = TestContextObject::new(1 << 16);
-        let jit_mem_region = MemoryRegion::new_writable(&mut jit_mem, ebpf::MM_INPUT_START);
+        let jit_mem_region = MemoryRegion::new(&raw mut jit_mem[..], ebpf::MM_INPUT_START);
         create_vm!(
             jit_vm,
             &executable,
