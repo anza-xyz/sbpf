@@ -593,9 +593,11 @@ impl MemoryMapping {
         }
     }
 
-    /// Returns the `MemoryRegion`s as mutable, and uninitialize the mapping.
+    /// Returns the [`MemoryRegion`]s as mutable.
+    ///
     /// Modifying the regions might break the initialization constraints, so this function
-    /// uninitializes the mapping.
+    /// uninitializes the mapping. The memory mappings must be initialized
+    /// again with [`Self::initialize`] before further use.
     pub fn get_regions_mut(&mut self) -> &mut [MemoryRegion] {
         self.initialized = false;
 
