@@ -88,7 +88,7 @@ fn bench_jit_vs_interpreter(
     assembly: &str,
     config: Config,
     instruction_meter: u64,
-    mem: &mut [u8],
+    mem: *mut [u8],
 ) {
     let executable = solana_sbpf::assembler::assemble::<TestContextObject>(
         assembly,
@@ -98,7 +98,7 @@ fn bench_jit_vs_interpreter(
     executable.verify::<RequisiteVerifier>().unwrap();
     executable.jit_compile().unwrap();
     let mut context_object = TestContextObject::default();
-    let mem_region = MemoryRegion::new_writable(mem, ebpf::MM_INPUT_START);
+    let mem_region = MemoryRegion::new(mem, ebpf::MM_INPUT_START);
     create_vm!(
         vm,
         &executable,
@@ -310,7 +310,7 @@ fn bench_mem_ldxdw_jit(bencher: &mut Bencher) {
 
     let mut context_object = TestContextObject::default();
     let mut input = [0u8; 8];
-    let mem_region = MemoryRegion::new_writable(&mut input, ebpf::MM_INPUT_START);
+    let mem_region = MemoryRegion::new(&raw mut input, ebpf::MM_INPUT_START);
     create_vm!(
         vm,
         &executable,

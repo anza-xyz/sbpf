@@ -150,8 +150,8 @@ fn main() {
     );
     let regions: Vec<MemoryRegion> = vec![
         executable.get_ro_region(),
-        MemoryRegion::new_writable_gapped(
-            stack.as_slice_mut(),
+        MemoryRegion::new_gapped(
+            &raw mut *stack.as_slice_mut(),
             ebpf::MM_STACK_START,
             if sbpf_version.stack_frame_gaps() && config.enable_stack_frame_gaps {
                 config.stack_frame_size as u64
@@ -159,11 +159,12 @@ fn main() {
                 0
             },
         ),
-        MemoryRegion::new_writable(heap.as_slice_mut(), ebpf::MM_HEAP_START),
-        MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START),
+        MemoryRegion::new(&raw mut *heap.as_slice_mut(), ebpf::MM_HEAP_START),
+        MemoryRegion::new(&raw mut mem[..], ebpf::MM_INPUT_START),
     ];
 
-    context_object.memory_mapping = MemoryMapping::new(regions, config, sbpf_version).unwrap();
+    context_object.memory_mapping =
+        unsafe { MemoryMapping::new(regions, config, sbpf_version).unwrap() };
 
     let mut vm = EbpfVm::new(
         executable.get_loader().clone(),

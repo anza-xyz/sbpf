@@ -35,8 +35,10 @@ impl Default for TestContextObject {
     fn default() -> Self {
         Self {
             remaining: 0,
-            memory_mapping: MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved)
-                .unwrap(),
+            memory_mapping: unsafe {
+                MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved)
+            }
+            .unwrap(),
         }
     }
 }
@@ -232,8 +234,8 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
     let sbpf_version = executable.get_sbpf_version();
     let regions: Vec<MemoryRegion> = vec![
         executable.get_ro_region(),
-        MemoryRegion::new_writable_gapped(
-            stack.as_slice_mut(),
+        MemoryRegion::new_gapped(
+            &raw mut *stack.as_slice_mut(),
             ebpf::MM_STACK_START,
             if sbpf_version.stack_frame_gaps() && config.enable_stack_frame_gaps {
                 config.stack_frame_size as u64
@@ -241,13 +243,13 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
                 0
             },
         ),
-        MemoryRegion::new_writable(heap.as_slice_mut(), ebpf::MM_HEAP_START),
+        MemoryRegion::new(&raw mut *heap.as_slice_mut(), ebpf::MM_HEAP_START),
     ]
     .into_iter()
     .chain(additional_regions.into_iter())
     .collect();
 
-    Ok(
+    Ok(unsafe {
         if let Some(access_violation_handler) = access_violation_handler {
             MemoryMapping::new_with_access_violation_handler(
                 regions,
@@ -257,8 +259,8 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
             )?
         } else {
             MemoryMapping::new(regions, config, sbpf_version)?
-        },
-    )
+        }
+    })
 }
 
 #[macro_export]
@@ -308,8 +310,8 @@ macro_rules! test_interpreter_and_jit {
         let original_budget = context_object.remaining;
         $executable.verify::<RequisiteVerifier>().unwrap();
         let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter) = {
-            let mut mem = $mem;
-            let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
+            let mut mem: [u8; _] = $mem;
+            let mem_region = MemoryRegion::new(&raw mut mem, ebpf::MM_INPUT_START);
             let mut call_frames = vec![
                 solana_sbpf::vm::CallFrame::default();
                 $executable.get_config().max_call_depth
@@ -341,8 +343,8 @@ macro_rules! test_interpreter_and_jit {
             context_object.remaining = original_budget;
             #[allow(unused_mut)]
             let compilation_result = $executable.jit_compile();
-            let mut mem = $mem;
-            let mem_region = MemoryRegion::new_writable(&mut mem, ebpf::MM_INPUT_START);
+            let mut mem: [u8; _] = $mem;
+            let mem_region = MemoryRegion::new(&raw mut mem, ebpf::MM_INPUT_START);
             create_vm!(
                 vm,
                 &$executable,

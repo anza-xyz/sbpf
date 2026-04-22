@@ -30,13 +30,12 @@ fn generate_memory_regions(
             Some(prng) => (*prng).gen::<u8>() as u64 + 4,
             None => 4,
         };
-        let content = vec![0; length as usize];
-        memory_regions.push(MemoryRegion::new_for_testing(
-            &content[..],
-            offset,
-            0,
-            writable,
-        ));
+        let mut content = vec![0; length as usize];
+        if writable {
+            memory_regions.push(MemoryRegion::new(&raw mut content[..], offset));
+        } else {
+            memory_regions.push(MemoryRegion::new(&raw const content[..], offset));
+        }
         offset += 0x100000000;
     }
     (memory_regions, offset)
@@ -67,14 +66,14 @@ macro_rules! bench_gapped_randomized_access_with_1024_entries {
             };
             bencher
                 .bench(|bencher| {
-                    let memory_regions = vec![MemoryRegion::new_for_testing(
-                        &content[..],
+                    let memory_regions = vec![MemoryRegion::new_gapped(
+                        &raw const content[..],
                         0x100000000,
                         frame_size,
-                        false,
                     )];
                     let memory_mapping =
-                        MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
+                        unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }
+                            .unwrap();
                     let mut prng = new_prng!();
                     bencher.iter(|| {
                         assert!(memory_mapping
@@ -110,13 +109,13 @@ macro_rules! bench_randomized_access_with_0001_entry {
         #[bench]
         fn $name(bencher: &mut Bencher) {
             let content = vec![0; 1024 * 2];
-            let memory_regions = vec![MemoryRegion::new_readonly(&content[..], 0x100000000)];
+            let memory_regions = vec![MemoryRegion::new(&raw const content[..], 0x100000000)];
             let config = Config {
                 aligned_memory_mapping: $aligned_memory_mapping,
                 ..Config::default()
             };
             let memory_mapping =
-                MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
+                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
             let mut prng = new_prng!();
             bencher.iter(|| {
                 let _ = memory_mapping.map(
@@ -153,7 +152,7 @@ macro_rules! bench_randomized_access_with_n_entries {
                 ..Config::default()
             };
             let memory_mapping =
-                MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
+                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
             bencher.iter(|| {
                 let _ = memory_mapping.map(
                     AccessType::Load,
@@ -203,7 +202,7 @@ macro_rules! bench_randomized_mapping_with_n_entries {
                 generate_memory_regions($n, false, Some(&mut prng));
             let config = Config::default();
             let memory_mapping =
-                MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
+                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
             bencher.iter(|| {
                 let _ = memory_mapping.map(AccessType::Load, 0x100000000, 1);
             });
@@ -255,7 +254,7 @@ macro_rules! bench_mapping_with_n_entries {
                 ..Config::default()
             };
             let memory_mapping =
-                MemoryMapping::new(memory_regions, &config, SBPFVersion::V3).unwrap();
+                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
             bencher.iter(|| {
                 let _ = memory_mapping.map(AccessType::Load, 0x100000000, 1);
             });
@@ -311,14 +310,16 @@ fn do_bench_mapping_operation(bencher: &mut Bencher, op: MemoryOperation) {
         aligned_memory_mapping: false,
         ..Config::default()
     };
-    let mut memory_mapping = MemoryMapping::new(
-        vec![
-            MemoryRegion::new_writable(&mut mem1, vm_addr),
-            MemoryRegion::new_writable(&mut mem2, vm_addr + 8),
-        ],
-        &config,
-        SBPFVersion::V3,
-    )
+    let mut memory_mapping = unsafe {
+        MemoryMapping::new(
+            vec![
+                MemoryRegion::new(&raw mut mem1[..], vm_addr),
+                MemoryRegion::new(&raw mut mem2[..], vm_addr + 8),
+            ],
+            &config,
+            SBPFVersion::V3,
+        )
+    }
     .unwrap();
 
     match op {

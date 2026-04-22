@@ -1275,5 +1275,5 @@ pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
     // If offset > 0, the region will start at ebpf::MM_REGION_SIZE * 1 + the offset of
     // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
     // will be unmappable, see MemoryRegion::vm_to_host.
-    MemoryRegion::new_readonly(ro_data, offset as u64)
+    MemoryRegion::new(&raw const *ro_data, offset as u64)
 }
