@@ -66,8 +66,11 @@ macro_rules! bench_gapped_randomized_access_with_1024_entries {
             };
             bencher
                 .bench(|bencher| {
-                    let memory_regions =
-                        vec![MemoryRegion::new(&raw const content[..], 0x100000000)];
+                    let memory_regions = vec![MemoryRegion::new_gapped(
+                        &raw const content[..],
+                        0x100000000,
+                        frame_size,
+                    )];
                     let memory_mapping =
                         unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }
                             .unwrap();
