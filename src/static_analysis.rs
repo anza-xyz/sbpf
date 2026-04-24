@@ -16,8 +16,17 @@ use std::ptr;
 
 /// Register state recorded after executing one instruction
 ///
-/// The last register is the program counter (aka pc).
-pub type RegisterTraceEntry = [u64; 12];
+/// `registers` holds r0..r10 followed by the program counter. `cus_remaining`
+/// is the instruction-meter budget remaining at the time the entry was
+/// captured, or 0 when the instruction meter is disabled.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RegisterTraceEntry {
+    /// Registers r0..r10 followed by the program counter in slot 11.
+    pub registers: [u64; 12],
+    /// Instruction-meter budget remaining when this entry was captured.
+    pub cus_remaining: u64,
+}
 
 /// Used for topological sort
 #[derive(PartialEq, Eq, Debug)]
@@ -522,15 +531,16 @@ impl<'a> Analysis<'a> {
             pc_to_insn_index[insn.ptr + 1] = index;
         }
         for (index, entry) in register_trace.iter().enumerate() {
-            let pc = entry[11] as usize;
+            let pc = entry.registers[11] as usize;
             let insn = &self.instructions[pc_to_insn_index[pc]];
             writeln!(
                 output,
-                "{:5?} {:016X?} {:5?}: {}",
+                "{:5?} {:016X?} {:5?}: {} (CUs left: {})",
                 index,
-                &entry[0..11],
+                &entry.registers[0..11],
                 pc,
                 self.disassemble_instruction(insn, pc),
+                entry.cus_remaining
             )?;
         }
         Ok(())

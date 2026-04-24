@@ -1408,22 +1408,37 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Routine for instruction tracing
         if self.config.enable_register_tracing {
             self.set_anchor(ANCHOR_TRACE);
-            // Save registers on stack
+            // Reserve slot for CUs remaining (entry[12]) at the highest address; push 0 so it
+            // reads as 0 when the instruction meter is disabled (we overwrite it below if not).
+            self.emit_ins(X86Instruction::push_immediate(OperandSize::S64, 0));
+            // Save registers on stack: entry[11] = pc (REGISTER_SCRATCH), entry[0..11] = REGISTER_MAP.
             self.emit_ins(X86Instruction::push(REGISTER_SCRATCH, None));
             for reg in REGISTER_MAP.iter().rev() {
                 self.emit_ins(X86Instruction::push(*reg, None));
             }
             self.emit_ins(X86Instruction::mov(OperandSize::S64, RSP, REGISTER_MAP[0]));
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, - 8 * 3, None)); // RSP -= 8 * 3;
+            if self.config.enable_instruction_meter {
+                // Compute CUs remaining = REGISTER_INSTRUCTION_METER - saved_pc - 1 and store to entry[12].
+                // REGISTER_INSTRUCTION_METER holds the live counter, and saved_pc lives at [REGISTER_MAP[0] + 8 * REGISTER_MAP.len()].
+                // The -1 matches the interpreter (due_insn_count is incremented before the trace is pushed).
+                self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_SCRATCH)); // REGISTER_SCRATCH = instruction_meter
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2B, REGISTER_SCRATCH, REGISTER_MAP[0],
+                    Some(X86IndirectAccess::Offset(8 * (REGISTER_MAP.len() as i32))))); // REGISTER_SCRATCH -= saved_pc
+                self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_SCRATCH, 1, None)); // REGISTER_SCRATCH -= 1
+                self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, REGISTER_MAP[0],
+                    X86IndirectAccess::Offset(8 * (REGISTER_MAP.len() as i32 + 1)))); // entry[12] = REGISTER_SCRATCH
+            }
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, - 8 * 2, None)); // RSP -= 8 * 2; (alignment)
             self.emit_rust_call(Value::Constant64(Vec::<crate::static_analysis::RegisterTraceEntry>::push as *const u8 as i64, false), &[
                 Argument { index: 1, value: Value::Register(REGISTER_MAP[0]) }, // registers
                 Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::RegisterTrace), false) },
             ], None);
             // Pop stack and return
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8 * 3, None)); // RSP += 8 * 3;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8 * 2, None)); // RSP += 8 * 2;
             self.emit_ins(X86Instruction::pop(REGISTER_MAP[0]));
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8 * (REGISTER_MAP.len() - 1) as i64, None)); // RSP += 8 * (REGISTER_MAP.len() - 1);
             self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH));
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // RSP += 8; (discard CUs slot)
             self.emit_ins(X86Instruction::return_near());
         }
 
