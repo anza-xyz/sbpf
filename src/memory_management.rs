@@ -6,7 +6,9 @@
 
 #![cfg_attr(target_os = "windows", allow(dead_code))]
 
-use crate::error::EbpfError;
+use std::sync::{LazyLock, Mutex};
+
+use crate::error::{EbpfError, JitAllocationError};
 
 #[cfg(not(target_os = "windows"))]
 extern crate libc;
@@ -24,6 +26,195 @@ use winapi::{
         winnt,
     },
 };
+
+/// A free list for managing memory allocations of a fixed size.
+struct FreeList {
+    /// Pool of free blocks awaiting reuse.
+    mem: Mutex<Vec<*mut u8>>,
+    /// The size of each memory block.
+    size: usize,
+}
+
+// Safety: FreeList only stores mmap allocation base addresses. The pointed-to
+// memory is not accessed through FreeList without holding the FreeList
+// mutex, and ownership of each allocation is transferred into/out of the pool.
+unsafe impl Sync for FreeList {}
+unsafe impl Send for FreeList {}
+
+impl FreeList {
+    /// Create a new free list with the specified size.
+    ///
+    /// This does not allocate any memory blocks; they are allocated lazily as needed.
+    fn new(size: usize) -> Self {
+        Self {
+            mem: Mutex::new(Vec::new()),
+            size,
+        }
+    }
+
+    /// Allocate a memory block of the configured size.
+    ///
+    /// If a free block is available, it is reused; otherwise, a new block is allocated.
+    ///
+    /// Returns a pointer to the allocated memory and the size of the allocation.
+    /// Returned memory has read-write permissions and may contain arbitrary
+    /// bytes left over from a previous owner; the caller should not assume
+    /// any particular contents.
+    fn alloc(&self) -> Result<(*mut u8, usize), EbpfError> {
+        let ptr = { self.mem.lock().unwrap_or_else(|e| e.into_inner()).pop() };
+        let ptr = match ptr {
+            Some(ptr) => {
+                unsafe { protect_pages(ptr, self.size, PagePermissions::ReadWrite) }?;
+                ptr
+            }
+            None => unsafe { allocate_pages(self.size) }?,
+        };
+
+        Ok((ptr, self.size))
+    }
+
+    /// Free the given allocation, returning it to the pool.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been returned by [`FreeList::alloc`] on this same
+    ///   instance and not already returned to the pool.
+    /// - `size` must equal the size configured at construction.
+    /// - The caller must not retain any reference into the block after calling
+    ///   `free`; subsequent `alloc` calls may hand the same memory to another
+    ///   owner.
+    unsafe fn free(&self, ptr: *mut u8, size: usize) -> Result<(), EbpfError> {
+        if size != self.size {
+            return Err(JitAllocationError::FreeSizeMismatch {
+                expected: self.size,
+                actual: size,
+            }
+            .into());
+        }
+        self.mem.lock().unwrap_or_else(|e| e.into_inner()).push(ptr);
+        Ok(())
+    }
+}
+
+impl Drop for FreeList {
+    fn drop(&mut self) {
+        for ptr in self
+            .mem
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            if let Err(e) = unsafe { free_pages(ptr, self.size) } {
+                log::error!("FreeList: unable to free {e}");
+            }
+        }
+    }
+}
+
+/// Minimum allocation size for a bucket.
+const BUCKET_MIN: usize = 1024 * 128; // 128 KiB
+/// Maximum allocation size for a bucket.
+const BUCKET_MAX: usize = 1024 * 1024 * 1024; // 1 GiB
+/// Number of buckets in the free list.
+const BUCKET_COUNT: usize =
+    (BUCKET_MAX.trailing_zeros() - BUCKET_MIN.trailing_zeros()) as usize + 1;
+
+const _: () = assert!(BUCKET_MIN.is_power_of_two());
+const _: () = assert!(BUCKET_MAX.is_power_of_two());
+const _: () = assert!(BUCKET_MIN <= BUCKET_MAX);
+const _: () = assert!(BUCKET_MAX == BUCKET_MIN * (1 << (BUCKET_COUNT - 1)));
+
+/// A free list that uses a bucketed strategy to manage memory
+/// allocations of varying sizes.
+///
+/// Buckets are organized by power-of-two size, with the smallest
+/// bucket being [`BUCKET_MIN`] and the largest being [`BUCKET_MAX`].
+///
+/// Allocations will be rounded up to the nearest power-of-two size
+/// and stored in the corresponding bucket.
+///
+/// Returned blocks remain cached in the process-global pool and are not
+/// released back to the OS during normal operation. This intentionally trades
+/// higher retained RSS after peak load for fewer mmap/munmap calls during JIT
+/// churn.
+///
+/// This is safe to use in a multi-threaded context -- locks are
+/// sharded per bucket.
+struct BucketedFreeList {
+    buckets: [FreeList; BUCKET_COUNT],
+}
+
+impl BucketedFreeList {
+    /// Construct an empty pool with one bucket per power-of-two size class.
+    #[expect(clippy::arithmetic_side_effects)]
+    fn new() -> Self {
+        Self {
+            buckets: core::array::from_fn(|i| FreeList::new(BUCKET_MIN * (1 << i))),
+        }
+    }
+
+    /// Round up the requested size to the nearest power-of-two
+    /// and determine the corresponding bucket index.
+    ///
+    /// Errors if the allocation would exceed the maximum bucket size, [`BUCKET_MAX`].
+    #[inline]
+    fn bucket_idx(&self, size: usize) -> Result<usize, EbpfError> {
+        let bucket_size = size
+            .max(BUCKET_MIN)
+            .checked_next_power_of_two()
+            .ok_or(JitAllocationError::SizeOverflow(size))?;
+        let idx = (bucket_size / BUCKET_MIN).trailing_zeros() as usize;
+        if idx < self.buckets.len() {
+            Ok(idx)
+        } else {
+            Err(JitAllocationError::InsufficientPoolSize {
+                requested: size,
+                max: BUCKET_MAX,
+            }
+            .into())
+        }
+    }
+
+    /// Allocate memory of at least the given size, returning a pointer to the allocation
+    /// and the actual size allocated.
+    fn alloc(&self, size: usize) -> Result<(*mut u8, usize), EbpfError> {
+        self.buckets[self.bucket_idx(size)?].alloc()
+    }
+
+    /// Free the given allocation, returning it to the pool.
+    ///
+    /// # Safety
+    ///
+    /// - `ptr` must have been returned by [`BucketedFreeList::alloc`] on this same
+    ///   instance and not already returned to the pool.
+    /// - The caller must not retain any reference into the block after calling
+    ///   `free`; subsequent `alloc` calls may hand the same memory to another
+    ///   owner.
+    unsafe fn free(&self, ptr: *mut u8, size: usize) -> Result<(), EbpfError> {
+        unsafe { self.buckets[self.bucket_idx(size)?].free(ptr, size) }
+    }
+}
+
+static ALLOCATOR: LazyLock<BucketedFreeList> = LazyLock::new(BucketedFreeList::new);
+
+/// Allocate memory of at least the given size, returning a pointer to the allocation
+/// and the actual size allocated.
+pub fn allocate_pages_pooled(size: usize) -> Result<(*mut u8, usize), EbpfError> {
+    ALLOCATOR.alloc(size)
+}
+
+/// Free the given allocation.
+///
+/// # Safety
+///
+/// - The pointer and size must identify a full allocation previously returned by
+///   [`allocate_pages_pooled`] and not already returned to the pool.
+/// - The caller must not retain any reference into the allocation after calling
+///   `free`; subsequent `alloc` calls may hand the same memory to another
+///   owner.
+pub unsafe fn free_pages_pooled(ptr: *mut u8, size: usize) -> Result<(), EbpfError> {
+    unsafe { ALLOCATOR.free(ptr, size) }
+}
 
 #[cfg(not(target_os = "windows"))]
 macro_rules! libc_error_guard {
@@ -129,37 +320,41 @@ pub unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) -> Result<(), EbpfE
     Ok(())
 }
 
+#[derive(Copy, Clone)]
+pub enum PagePermissions {
+    Read,
+    ReadWrite,
+    ReadExecute,
+}
+
 pub unsafe fn protect_pages(
     raw: *mut u8,
     size_in_bytes: usize,
-    executable_flag: bool,
+    permissions: PagePermissions,
 ) -> Result<(), EbpfError> {
     #[cfg(not(target_os = "windows"))]
     {
-        libc_error_guard!(
-            mprotect,
-            raw.cast::<c_void>(),
-            size_in_bytes,
-            if executable_flag {
-                libc::PROT_EXEC | libc::PROT_READ
-            } else {
-                libc::PROT_READ
-            },
-        );
+        let prot = match permissions {
+            PagePermissions::Read => libc::PROT_READ,
+            PagePermissions::ReadWrite => libc::PROT_READ | libc::PROT_WRITE,
+            PagePermissions::ReadExecute => libc::PROT_READ | libc::PROT_EXEC,
+        };
+        libc_error_guard!(mprotect, raw.cast::<c_void>(), size_in_bytes, prot);
     }
     #[cfg(target_os = "windows")]
     {
         let mut old: minwindef::DWORD = 0;
         let ptr_old: *mut minwindef::DWORD = &mut old;
+        let prot = match permissions {
+            PagePermissions::Read => winnt::PAGE_READONLY,
+            PagePermissions::ReadWrite => winnt::PAGE_READWRITE,
+            PagePermissions::ReadExecute => winnt::PAGE_EXECUTE_READ,
+        };
         winapi_error_guard!(
             VirtualProtect,
             raw.cast::<c_void>(),
             size_in_bytes,
-            if executable_flag {
-                winnt::PAGE_EXECUTE_READ
-            } else {
-                winnt::PAGE_READONLY
-            },
+            prot,
             ptr_old,
         );
     }
