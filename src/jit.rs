@@ -1408,7 +1408,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Routine for instruction tracing
         if self.config.enable_register_tracing {
             self.set_anchor(ANCHOR_TRACE);
-            // Reserve slot for CUs remaining (entry[12]) at the highest address; push 0 so it
+            // Reserve slot for icount_remaining (entry[12]) at the highest address; push 0 so it
             // reads as 0 when the instruction meter is disabled (we overwrite it below if not).
             self.emit_ins(X86Instruction::push_immediate(OperandSize::S64, 0));
             // Save registers on stack: entry[11] = pc (REGISTER_SCRATCH), entry[0..11] = REGISTER_MAP.
@@ -1418,7 +1418,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             }
             self.emit_ins(X86Instruction::mov(OperandSize::S64, RSP, REGISTER_MAP[0]));
             if self.config.enable_instruction_meter {
-                // Compute CUs remaining = REGISTER_INSTRUCTION_METER - saved_pc - 1 and store to entry[12].
+                // Compute icount_remaining = REGISTER_INSTRUCTION_METER - saved_pc - 1 and store to entry[12].
                 // REGISTER_INSTRUCTION_METER holds the live counter, and saved_pc lives at [REGISTER_MAP[0] + 8 * REGISTER_MAP.len()].
                 // The -1 matches the interpreter (due_insn_count is incremented before the trace is pushed).
                 self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_SCRATCH)); // REGISTER_SCRATCH = instruction_meter

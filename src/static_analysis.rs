@@ -16,7 +16,7 @@ use std::ptr;
 
 /// Register state recorded after executing one instruction
 ///
-/// `registers` holds r0..r10 followed by the program counter. `cus_remaining`
+/// `registers` holds r0..r10 followed by the program counter. `icount_remaining`
 /// is the instruction-meter budget remaining at the time the entry was
 /// captured, or 0 when the instruction meter is disabled.
 #[repr(C)]
@@ -25,7 +25,9 @@ pub struct RegisterTraceEntry {
     /// Registers r0..r10 followed by the program counter in slot 11.
     pub registers: [u64; 12],
     /// Instruction-meter budget remaining when this entry was captured.
-    pub cus_remaining: u64,
+    ///
+    /// Not a stable interface — may change as the metering logic evolves.
+    pub icount_remaining: u64,
 }
 
 /// Used for topological sort
@@ -535,12 +537,12 @@ impl<'a> Analysis<'a> {
             let insn = &self.instructions[pc_to_insn_index[pc]];
             writeln!(
                 output,
-                "{:5?} {:016X?} {:5?}: {} (CUs left: {})",
+                "{:5?} {:016X?} {:5?}: {} (icount_remaining: {})",
                 index,
                 &entry.registers[0..11],
                 pc,
                 self.disassemble_instruction(insn, pc),
-                entry.cus_remaining
+                entry.icount_remaining
             )?;
         }
         Ok(())

@@ -199,7 +199,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         let src = insn.src as usize;
 
         if config.enable_register_tracing {
-            let cus_remaining = if config.enable_instruction_meter {
+            let icount_remaining = if config.enable_instruction_meter {
                 self.vm
                     .previous_instruction_meter
                     .saturating_sub(self.vm.due_insn_count)
@@ -208,7 +208,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             };
             self.vm.register_trace.push(RegisterTraceEntry {
                 registers: self.reg,
-                cus_remaining,
+                icount_remaining,
             });
         }
 
