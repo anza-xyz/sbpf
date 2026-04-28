@@ -1438,7 +1438,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.emit_ins(X86Instruction::pop(REGISTER_MAP[0]));
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8 * (REGISTER_MAP.len() - 1) as i64, None)); // RSP += 8 * (REGISTER_MAP.len() - 1);
             self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH));
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // RSP += 8; (discard CUs slot)
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // RSP += 8; (discard icount_remaining slot)
             self.emit_ins(X86Instruction::return_near());
         }
 
