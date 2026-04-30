@@ -619,29 +619,35 @@ impl<C: ContextObject> Executable<C> {
                     symbol_table_section_header = Some(section_header);
                 }
             }
-            let symbol_names_section_header = symbol_names_section_header.unwrap();
-            let symbol_table: &[Elf64Sym] =
-                Elf64::slice_from_section_header(elf_bytes, symbol_table_section_header.unwrap())
-                    .unwrap();
-            for symbol in symbol_table {
-                if symbol.st_info & STT_FUNC == 0 {
-                    continue;
+            // A well-formed ELF usually has both as long as it's not stripped.
+            match (symbol_names_section_header, symbol_table_section_header) {
+                (Some(symbol_names_section_header), Some(symbol_table_section_header)) => {
+                    let symbol_table: &[Elf64Sym] =
+                        Elf64::slice_from_section_header(elf_bytes, symbol_table_section_header)
+                            .unwrap();
+                    for symbol in symbol_table {
+                        if symbol.st_info & STT_FUNC == 0 {
+                            continue;
+                        }
+                        let target_pc = symbol
+                            .st_value
+                            .saturating_sub(bytecode_header.p_vaddr)
+                            .checked_div(ebpf::INSN_SIZE as u64)
+                            .unwrap_or_default() as usize;
+                        let name = Elf64::get_string_in_section(
+                            elf_bytes,
+                            symbol_names_section_header,
+                            symbol.st_name as Elf64Word,
+                            u8::MAX as usize,
+                        )
+                        .unwrap();
+                        function_registry
+                            .register_function(target_pc as u32, name, target_pc)
+                            .unwrap();
+                    }
                 }
-                let target_pc = symbol
-                    .st_value
-                    .saturating_sub(bytecode_header.p_vaddr)
-                    .checked_div(ebpf::INSN_SIZE as u64)
-                    .unwrap_or_default() as usize;
-                let name = Elf64::get_string_in_section(
-                    elf_bytes,
-                    symbol_names_section_header,
-                    symbol.st_name as Elf64Word,
-                    u8::MAX as usize,
-                )
-                .unwrap();
-                function_registry
-                    .register_function(target_pc as u32, name, target_pc)
-                    .unwrap();
+                (None, None) => { /* missing both sections is okay */ }
+                _ => return Err(ElfParserError::InvalidSectionHeader),
             }
         }
 
