@@ -184,7 +184,7 @@ fn get_host_ptr<C: ContextObject>(
     // SBPFv3+ separates .text (PF_X, at MM_BYTECODE_START) from rodata
     // (PF_R, at MM_RODATA_START), and only rodata gets a MemoryRegion. Serve
     // text reads from the Executable directly so the debugger can disassemble
-    // code and read constants the linker placed inside the bytecode segment.
+    // code.
     if interpreter
         .executable
         .get_sbpf_version()
