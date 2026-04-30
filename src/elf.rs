@@ -345,6 +345,12 @@ impl<C: ContextObject> Executable<C> {
         self.text_section_range.start as u64
     }
 
+    /// Get the text section virtual address (matches what LLDB sees)
+    #[cfg(feature = "debugger")]
+    pub fn get_text_section_vaddr(&self) -> u64 {
+        self.text_section_vaddr
+    }
+
     /// Get the loader built-in program
     pub fn get_loader(&self) -> &Arc<BuiltinProgram<C>> {
         &self.loader
