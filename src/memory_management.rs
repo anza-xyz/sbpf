@@ -81,12 +81,24 @@ impl FreeList {
     ///   `free`; subsequent `alloc` calls may hand the same memory to another
     ///   owner.
     unsafe fn free(&self, ptr: *mut u8, size: usize) {
+        /// The threshold for discarding physical backing from returned memory.
+        ///
+        /// Allocations at or above 128 MiB are uncommon, so drop their
+        /// resident pages when they are returned to the pool.
+        const MADV_DONTNEED_THRESHOLD: usize = 1024 * 1024 * 128; // 128 MiB
+
         if size != self.size {
             panic!("free size mismatch: expected {}, got {}", self.size, size);
         }
 
         unsafe { protect_pages(ptr, self.size, PagePermissions::ReadWrite) }
             .expect("failed to protect pages");
+
+        if self.size >= MADV_DONTNEED_THRESHOLD {
+            if let Err(e) = unsafe { madvise(ptr, self.size, Advice::DontNeed) } {
+                log::error!("FreeList: unable to advise returned allocation: {e}");
+            }
+        }
 
         self.mem.lock().unwrap_or_else(|e| e.into_inner()).push(ptr);
     }
@@ -345,5 +357,37 @@ pub unsafe fn protect_pages(
             ptr_old,
         );
     }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+pub enum Advice {
+    DontNeed,
+}
+
+pub unsafe fn madvise(raw: *mut u8, size_in_bytes: usize, advice: Advice) -> Result<(), EbpfError> {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let advice = match advice {
+            Advice::DontNeed => libc::MADV_DONTNEED,
+        };
+        libc_error_guard!(madvise, raw.cast::<c_void>(), size_in_bytes, advice);
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let mut ptr = raw.cast::<c_void>();
+        let advice = match advice {
+            Advice::DontNeed => winnt::MEM_RESET,
+        };
+        winapi_error_guard!(
+            VirtualAlloc,
+            &mut ptr,
+            size_in_bytes,
+            advice,
+            winnt::PAGE_READWRITE,
+        );
+    }
+
     Ok(())
 }
