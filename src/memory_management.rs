@@ -63,10 +63,7 @@ impl FreeList {
     fn alloc(&self) -> Result<(*mut u8, usize), EbpfError> {
         let ptr = { self.mem.lock().unwrap_or_else(|e| e.into_inner()).pop() };
         let ptr = match ptr {
-            Some(ptr) => {
-                unsafe { protect_pages(ptr, self.size, PagePermissions::ReadWrite) }?;
-                ptr
-            }
+            Some(ptr) => ptr,
             None => unsafe { allocate_pages(self.size) }?,
         };
 
@@ -91,6 +88,9 @@ impl FreeList {
             }
             .into());
         }
+
+        unsafe { protect_pages(ptr, self.size, PagePermissions::ReadWrite) }?;
+
         self.mem.lock().unwrap_or_else(|e| e.into_inner()).push(ptr);
         Ok(())
     }
