@@ -72,35 +72,6 @@ pub enum EbpfError {
     /// Syscall error
     #[error("Syscall error: {0}")]
     SyscallError(Box<dyn Error>),
-    /// JIT allocation error
-    #[error(transparent)]
-    JitAllocationError(#[from] JitAllocationError),
-}
-
-/// Errors associated with JIT allocation
-#[derive(Debug, thiserror::Error)]
-pub enum JitAllocationError {
-    /// Requested allocation size would overflow `usize::MAX`
-    #[error("Requested size {0} would overflow usize::MAX")]
-    SizeOverflow(usize),
-    /// Requested memory exceeds maximum memory pool capacity
-    #[error(
-        "Requested memory exceeds maximum memory pool capacity. Requested: {requested}, Max: {max}"
-    )]
-    InsufficientPoolSize {
-        /// Requested allocation size
-        requested: usize,
-        /// Maximum pool size
-        max: usize,
-    },
-    /// Attempted to free an allocation that does not match the expected size
-    #[error("Free size mismatch. Expected: {expected}, Actual: {actual}")]
-    FreeSizeMismatch {
-        /// Expected allocation size
-        expected: usize,
-        /// Actual allocation size
-        actual: usize,
-    },
 }
 
 /// Same as `Result` but provides a stable memory layout

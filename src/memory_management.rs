@@ -8,7 +8,7 @@
 
 use std::sync::{LazyLock, Mutex};
 
-use crate::error::{EbpfError, JitAllocationError};
+use crate::error::EbpfError;
 
 #[cfg(not(target_os = "windows"))]
 extern crate libc;
@@ -60,14 +60,14 @@ impl FreeList {
     /// Returned memory has read-write permissions and may contain arbitrary
     /// bytes left over from a previous owner; the caller should not assume
     /// any particular contents.
-    fn alloc(&self) -> Result<(*mut u8, usize), EbpfError> {
+    fn alloc(&self) -> (*mut u8, usize) {
         let ptr = { self.mem.lock().unwrap_or_else(|e| e.into_inner()).pop() };
         let ptr = match ptr {
             Some(ptr) => ptr,
-            None => unsafe { allocate_pages(self.size) }?,
+            None => unsafe { allocate_pages(self.size) }.expect("allocation failed"),
         };
 
-        Ok((ptr, self.size))
+        (ptr, self.size)
     }
 
     /// Free the given allocation, returning it to the pool.
@@ -80,19 +80,15 @@ impl FreeList {
     /// - The caller must not retain any reference into the block after calling
     ///   `free`; subsequent `alloc` calls may hand the same memory to another
     ///   owner.
-    unsafe fn free(&self, ptr: *mut u8, size: usize) -> Result<(), EbpfError> {
+    unsafe fn free(&self, ptr: *mut u8, size: usize) {
         if size != self.size {
-            return Err(JitAllocationError::FreeSizeMismatch {
-                expected: self.size,
-                actual: size,
-            }
-            .into());
+            panic!("free size mismatch: expected {}, got {}", self.size, size);
         }
 
-        unsafe { protect_pages(ptr, self.size, PagePermissions::ReadWrite) }?;
+        unsafe { protect_pages(ptr, self.size, PagePermissions::ReadWrite) }
+            .expect("failed to protect pages");
 
         self.mem.lock().unwrap_or_else(|e| e.into_inner()).push(ptr);
-        Ok(())
     }
 }
 
@@ -158,27 +154,18 @@ impl BucketedFreeList {
     ///
     /// Errors if the allocation would exceed the maximum bucket size, [`BUCKET_MAX`].
     #[inline]
-    fn bucket_idx(&self, size: usize) -> Result<usize, EbpfError> {
+    fn bucket_idx(&self, size: usize) -> usize {
         let bucket_size = size
             .max(BUCKET_MIN)
             .checked_next_power_of_two()
-            .ok_or(JitAllocationError::SizeOverflow(size))?;
-        let idx = (bucket_size / BUCKET_MIN).trailing_zeros() as usize;
-        if idx < self.buckets.len() {
-            Ok(idx)
-        } else {
-            Err(JitAllocationError::InsufficientPoolSize {
-                requested: size,
-                max: BUCKET_MAX,
-            }
-            .into())
-        }
+            .expect("allocation would exceed usize::MAX");
+        (bucket_size / BUCKET_MIN).trailing_zeros() as usize
     }
 
     /// Allocate memory of at least the given size, returning a pointer to the allocation
     /// and the actual size allocated.
-    fn alloc(&self, size: usize) -> Result<(*mut u8, usize), EbpfError> {
-        self.buckets[self.bucket_idx(size)?].alloc()
+    fn alloc(&self, size: usize) -> (*mut u8, usize) {
+        self.buckets[self.bucket_idx(size)].alloc()
     }
 
     /// Free the given allocation, returning it to the pool.
@@ -190,8 +177,8 @@ impl BucketedFreeList {
     /// - The caller must not retain any reference into the block after calling
     ///   `free`; subsequent `alloc` calls may hand the same memory to another
     ///   owner.
-    unsafe fn free(&self, ptr: *mut u8, size: usize) -> Result<(), EbpfError> {
-        unsafe { self.buckets[self.bucket_idx(size)?].free(ptr, size) }
+    unsafe fn free(&self, ptr: *mut u8, size: usize) {
+        unsafe { self.buckets[self.bucket_idx(size)].free(ptr, size) }
     }
 }
 
@@ -199,7 +186,7 @@ static ALLOCATOR: LazyLock<BucketedFreeList> = LazyLock::new(BucketedFreeList::n
 
 /// Allocate memory of at least the given size, returning a pointer to the allocation
 /// and the actual size allocated.
-pub fn allocate_pages_pooled(size: usize) -> Result<(*mut u8, usize), EbpfError> {
+pub fn allocate_pages_pooled(size: usize) -> (*mut u8, usize) {
     ALLOCATOR.alloc(size)
 }
 
@@ -212,7 +199,7 @@ pub fn allocate_pages_pooled(size: usize) -> Result<(*mut u8, usize), EbpfError>
 /// - The caller must not retain any reference into the allocation after calling
 ///   `free`; subsequent `alloc` calls may hand the same memory to another
 ///   owner.
-pub unsafe fn free_pages_pooled(ptr: *mut u8, size: usize) -> Result<(), EbpfError> {
+pub unsafe fn free_pages_pooled(ptr: *mut u8, size: usize) {
     unsafe { ALLOCATOR.free(ptr, size) }
 }
 

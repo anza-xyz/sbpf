@@ -72,7 +72,7 @@ impl JitProgram {
         let pc_loc_table_size = round_to_page_size(pc * std::mem::size_of::<u32>(), page_size);
         let over_allocated_code_size = round_to_page_size(code_size, page_size);
         let (raw, allocation_size) =
-            allocate_pages_pooled(pc_loc_table_size + over_allocated_code_size)?;
+            allocate_pages_pooled(pc_loc_table_size + over_allocated_code_size);
 
         unsafe {
             // pc_section relies on zero-initialization to distinguish unfilled
@@ -196,7 +196,7 @@ impl JitProgram {
 impl Drop for JitProgram {
     fn drop(&mut self) {
         unsafe {
-            let _ = free_pages_pooled(
+            free_pages_pooled(
                 self.pc_section.as_mut_ptr().cast::<u8>(),
                 self.allocation_size,
             );
