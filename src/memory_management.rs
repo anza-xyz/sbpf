@@ -110,7 +110,7 @@ impl Drop for FreeList {
 /// Minimum allocation size for a bucket.
 const BUCKET_MIN: usize = 1024 * 128; // 128 KiB
 /// Maximum allocation size for a bucket.
-const BUCKET_MAX: usize = 1024 * 1024 * 1024; // 1 GiB
+const BUCKET_MAX: usize = 1024 * 1024 * 256; // 256 MiB
 /// Number of buckets in the free list.
 const BUCKET_COUNT: usize =
     (BUCKET_MAX.trailing_zeros() - BUCKET_MIN.trailing_zeros()) as usize + 1;
