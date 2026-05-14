@@ -75,15 +75,16 @@ impl JitProgram {
             allocate_pages_pooled(pc_loc_table_size + over_allocated_code_size);
 
         unsafe {
+            let pc_section = std::slice::from_raw_parts_mut(raw.cast::<u32>(), pc);
             // pc_section relies on zero-initialization to distinguish unfilled
             // forward-jump targets from filled backward-jump targets in
             // relative_to_target_pc. The pool may hand back recycled memory, so
             // zero just the pc_section bytes here.
-            std::ptr::write_bytes(raw, 0, pc * std::mem::size_of::<u32>());
+            pc_section.fill(0);
             Ok(Self {
                 page_size,
                 allocation_size,
-                pc_section: std::slice::from_raw_parts_mut(raw.cast::<u32>(), pc),
+                pc_section,
                 text_section: std::slice::from_raw_parts_mut(
                     raw.add(pc_loc_table_size),
                     over_allocated_code_size,
