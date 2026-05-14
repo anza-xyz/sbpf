@@ -101,13 +101,13 @@ impl JitProgram {
         let raw = self.pc_section.as_ptr() as *mut u8;
         let pc_loc_table_size =
             round_to_page_size(std::mem::size_of_val(self.pc_section), self.page_size);
-        let over_allocated_code_size = round_to_page_size(self.text_section.len(), self.page_size);
+        let code_size = round_to_page_size(text_section_usage, self.page_size);
         unsafe {
             // Fill with debugger traps
             std::ptr::write_bytes(
                 raw.add(pc_loc_table_size).add(text_section_usage),
                 0xcc,
-                over_allocated_code_size - text_section_usage,
+                code_size - text_section_usage,
             );
             self.machine_code_length = text_section_usage;
             protect_pages(
@@ -117,7 +117,7 @@ impl JitProgram {
             )?;
             protect_pages(
                 self.text_section.as_mut_ptr(),
-                over_allocated_code_size,
+                code_size,
                 PagePermissions::ReadExecute,
             )?;
         }
