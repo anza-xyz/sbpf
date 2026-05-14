@@ -60,10 +60,11 @@ pub struct JitProgram {
     allocation_size: usize,
     /// Byte offset in the text_section for each BPF instruction
     pc_section: &'static mut [u32],
-    /// The x86 machinecode
+    /// The x86 machinecode.
+    ///
+    /// Before sealing this is the full code capacity; after sealing
+    /// this is the emitted code.
     text_section: &'static mut [u8],
-    /// The length of emitted host machine code in bytes.
-    machine_code_length: usize,
 }
 
 impl JitProgram {
@@ -89,7 +90,6 @@ impl JitProgram {
                     raw.add(pc_loc_table_size),
                     over_allocated_code_size,
                 ),
-                machine_code_length: 0,
             })
         }
     }
@@ -109,7 +109,6 @@ impl JitProgram {
                 0xcc,
                 code_size - text_section_usage,
             );
-            self.machine_code_length = text_section_usage;
             protect_pages(
                 self.pc_section.as_mut_ptr().cast::<u8>(),
                 pc_loc_table_size,
@@ -120,6 +119,8 @@ impl JitProgram {
                 code_size,
                 PagePermissions::ReadExecute,
             )?;
+            self.text_section =
+                std::slice::from_raw_parts_mut(self.text_section.as_mut_ptr(), text_section_usage);
         }
         Ok(())
     }
@@ -185,7 +186,7 @@ impl JitProgram {
 
     /// The length of the host machinecode in bytes
     pub fn machine_code_length(&self) -> usize {
-        self.machine_code_length
+        self.text_section.len()
     }
 
     /// The total pooled allocation size retained by the compiled program.
