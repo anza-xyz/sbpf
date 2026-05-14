@@ -164,18 +164,16 @@ impl BucketedFreeList {
     /// Round up the requested size to the nearest power-of-two
     /// and determine the corresponding bucket index.
     #[inline]
-    fn bucket_idx(&self, size: usize) -> usize {
-        let bucket_size = size
-            .max(BUCKET_MIN)
-            .checked_next_power_of_two()
-            .expect("allocation would exceed usize::MAX");
-        (bucket_size / BUCKET_MIN).trailing_zeros() as usize
+    #[expect(clippy::arithmetic_side_effects)]
+    fn bucket_idx(size: usize) -> usize {
+        let bucket_bits = usize::BITS - (size.max(BUCKET_MIN) - 1).leading_zeros();
+        bucket_bits as usize - const { BUCKET_MIN.trailing_zeros() as usize }
     }
 
     /// Allocate memory of at least the given size, returning a pointer to the allocation
     /// and the actual size allocated.
     fn alloc(&self, size: usize) -> (*mut u8, usize) {
-        self.buckets[self.bucket_idx(size)].alloc()
+        self.buckets[Self::bucket_idx(size)].alloc()
     }
 
     /// Free the given allocation, returning it to the pool.
@@ -188,7 +186,7 @@ impl BucketedFreeList {
     ///   `free`; subsequent `alloc` calls may hand the same memory to another
     ///   owner.
     unsafe fn free(&self, ptr: *mut u8, size: usize) {
-        unsafe { self.buckets[self.bucket_idx(size)].free(ptr, size) }
+        unsafe { self.buckets[Self::bucket_idx(size)].free(ptr, size) }
     }
 }
 
