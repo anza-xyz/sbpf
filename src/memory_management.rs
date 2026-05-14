@@ -163,8 +163,6 @@ impl BucketedFreeList {
 
     /// Round up the requested size to the nearest power-of-two
     /// and determine the corresponding bucket index.
-    ///
-    /// Errors if the allocation would exceed the maximum bucket size, [`BUCKET_MAX`].
     #[inline]
     fn bucket_idx(&self, size: usize) -> usize {
         let bucket_size = size
