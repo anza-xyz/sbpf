@@ -36,6 +36,9 @@ winapi = { version = "0.3", features = ["memoryapi", "sysinfoapi", "winnt", "err
 [target.'cfg(not(windows))'.dependencies]
 libc = { version = "0.2", optional = true }
 
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.2.6", features = ["js"] }
+
 [features]
 default = ["jit"]
 jit = ["dep:libc", "dep:winapi", "dep:rand"]
