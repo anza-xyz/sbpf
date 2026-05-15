@@ -47,7 +47,12 @@ macro_rules! libc_error_guard {
                 let errno = *libc::__errno();
                 #[cfg(target_os = "linux")]
                 let errno = *libc::__errno_location();
-                return Err(EbpfError::LibcInvocationFailed(stringify!($function), args, errno));
+                panic!(
+                    "Libc calling {} {:?} returned error code {}",
+                    stringify!($function),
+                    args,
+                    errno
+                );
             }
         }
     }};
@@ -66,7 +71,12 @@ macro_rules! winapi_error_guard {
         if !winapi_error_guard!(succeeded?, $function, $($arg),*) {
             let args = vec![$(format!("{:?}", $arg)),*];
             let errno = GetLastError();
-            return Err(EbpfError::LibcInvocationFailed(stringify!($function), args, errno as i32));
+            panic!(
+                "Libc calling {} {:?} returned error code {}",
+                stringify!($function),
+                args,
+                errno as i32,
+            );
         }
     }};
 }
