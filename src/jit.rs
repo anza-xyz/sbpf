@@ -32,7 +32,7 @@ use crate::{
     memory_management::{
         allocate_pages, free_pages, get_system_page_size, protect_pages, round_to_page_size,
     },
-    memory_region::MemoryMapping,
+    memory_region::{AccessType, MemoryMapping},
     program::BuiltinFunction,
     vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm, RuntimeEnvironmentSlot},
     x86::{
@@ -356,6 +356,7 @@ pub struct JitCompiler<'a, C: ContextObject> {
     immediate_value_key: i64,
     diversification_rng: SmallRng,
     stopwatch_is_active: bool,
+    constant_values_in_registers: [Option<u64>; 16],
 }
 
 #[rustfmt::skip]
@@ -410,6 +411,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             immediate_value_key,
             diversification_rng,
             stopwatch_is_active: false,
+            constant_values_in_registers: [None; 16],
         })
     }
 
@@ -446,6 +448,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             let dst = REGISTER_MAP[insn.dst as usize];
             let src = REGISTER_MAP[insn.src as usize];
             let target_pc = (self.pc as isize + insn.off as isize + 1) as usize;
+            let mut dst_constant_value = None;
 
             match insn.opc {
                 ebpf::LD_DW_IMM if !self.executable.get_sbpf_version().disable_lddw() => {
@@ -458,6 +461,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     } else {
                         self.emit_ins(X86Instruction::load_immediate(dst, insn.imm));
                     }
+                    dst_constant_value = Some(insn.imm as u64);
                 },
 
                 // BPF_LDX class
@@ -596,6 +600,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     } else {
                         self.emit_ins(X86Instruction::load_immediate(dst, insn.imm as u32 as u64 as i64));
                     }
+                    dst_constant_value = Some(insn.imm as u32 as u64);
                 }
                 ebpf::MOV32_REG  => {
                     if self.executable.get_sbpf_version().explicit_sign_extension_of_results() {
@@ -716,6 +721,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     } else {
                         self.emit_ins(X86Instruction::load_immediate(dst, insn.imm));
                     }
+                    dst_constant_value = Some(insn.imm as u64);
                 }
                 ebpf::MOV64_REG  => self.emit_ins(X86Instruction::mov(OperandSize::S64, src, dst)),
                 ebpf::ARSH64_IMM => self.emit_shift(OperandSize::S64, 7, REGISTER_SCRATCH, dst, Some(insn.imm)),
@@ -864,6 +870,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             }
 
             self.pc += 1;
+            self.constant_values_in_registers[dst as usize] = dst_constant_value;
         }
 
         // Bumper in case there was no final exit
@@ -1176,6 +1183,25 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
+
+        if let Some(dst) = dst {
+            if let Value::RegisterPlusConstant64(src, constant, _user_provided) = vm_addr {
+                if let Some(src_value) = self.constant_values_in_registers[src as usize] {
+                    let vm_address = (src_value as i64).wrapping_add(constant) as u64;
+                    if let Some(host_addr) = self.executable.get_ro_region().vm_to_host(AccessType::Load, vm_address, len) {
+                        let data = match len {
+                            1 => unsafe { ptr::read_unaligned::<u8>(host_addr as *const u8) as u64 },
+                            2 => unsafe { ptr::read_unaligned::<u16>(host_addr as *const u16) as u64 },
+                            4 => unsafe { ptr::read_unaligned::<u32>(host_addr as *const u32) as u64 },
+                            8 => unsafe { ptr::read_unaligned::<u64>(host_addr as *const u64) },
+                            _ => unreachable!(),
+                        };
+                        self.emit_ins(X86Instruction::load_immediate(dst, data as i64));
+                        return;
+                    }
+                }
+            }
+        }
 
         let stack_slot_of_value_to_store = X86IndirectAccess::OffsetIndexShift(-96, RSP, 0);
         match value {
