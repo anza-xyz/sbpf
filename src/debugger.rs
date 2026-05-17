@@ -181,6 +181,22 @@ fn get_host_ptr<C: ContextObject>(
         vm_addr += ebpf::MM_BYTECODE_START;
     }
 
+    // SBPFv3+ separates .text (PF_X, at MM_BYTECODE_START) from rodata
+    // (PF_R, at MM_RODATA_START), and only rodata gets a MemoryRegion. Serve
+    // text reads from the Executable directly so the debugger can disassemble
+    // code.
+    if interpreter
+        .executable
+        .get_sbpf_version()
+        .enable_lower_rodata_vaddr()
+    {
+        let (text_vaddr, text_bytes) = interpreter.executable.get_text_bytes();
+        if vm_addr >= text_vaddr && vm_addr < text_vaddr.saturating_add(text_bytes.len() as u64) {
+            let offset = (vm_addr - text_vaddr) as usize;
+            return Ok(unsafe { text_bytes.as_ptr().add(offset) as *mut u8 });
+        }
+    }
+
     // SAFETY: The creator of EbpfVm must guarantee the pointer is valid.
     unsafe {
         match interpreter.vm.memory_mapping.as_ref().map(
