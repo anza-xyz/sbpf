@@ -30,7 +30,8 @@ use crate::{
     elf::Executable,
     error::{EbpfError, ProgramResult},
     memory_management::{
-        allocate_pages, free_pages, get_system_page_size, protect_pages, round_to_page_size,
+        allocate_pages_pooled, free_pages_pooled, get_system_page_size, protect_pages,
+        round_to_page_size, PagePermissions,
     },
     memory_region::MemoryMapping,
     program::BuiltinFunction,
@@ -55,9 +56,14 @@ pub const MAX_START_PADDING_LENGTH: usize = 256;
 pub struct JitProgram {
     /// OS page size in bytes and the alignment of the sections
     page_size: usize,
+    /// Full pooled allocation size backing the pc and text sections.
+    allocation_size: usize,
     /// Byte offset in the text_section for each BPF instruction
     pc_section: &'static mut [u32],
-    /// The x86 machinecode
+    /// The x86 machinecode.
+    ///
+    /// Before sealing this is the full code capacity; after sealing
+    /// this is the emitted code.
     text_section: &'static mut [u8],
 }
 
@@ -66,11 +72,20 @@ impl JitProgram {
         let page_size = get_system_page_size();
         let pc_loc_table_size = round_to_page_size(pc * std::mem::size_of::<u32>(), page_size);
         let over_allocated_code_size = round_to_page_size(code_size, page_size);
+        let (raw, allocation_size) =
+            allocate_pages_pooled(pc_loc_table_size + over_allocated_code_size);
+
         unsafe {
-            let raw = allocate_pages(pc_loc_table_size + over_allocated_code_size)?;
+            let pc_section = std::slice::from_raw_parts_mut(raw.cast::<u32>(), pc);
+            // pc_section relies on zero-initialization to distinguish unfilled
+            // forward-jump targets from filled backward-jump targets in
+            // relative_to_target_pc. The pool may hand back recycled memory, so
+            // zero just the pc_section bytes here.
+            pc_section.fill(0);
             Ok(Self {
                 page_size,
-                pc_section: std::slice::from_raw_parts_mut(raw.cast::<u32>(), pc),
+                allocation_size,
+                pc_section,
                 text_section: std::slice::from_raw_parts_mut(
                     raw.add(pc_loc_table_size),
                     over_allocated_code_size,
@@ -86,7 +101,6 @@ impl JitProgram {
         let raw = self.pc_section.as_ptr() as *mut u8;
         let pc_loc_table_size =
             round_to_page_size(std::mem::size_of_val(self.pc_section), self.page_size);
-        let over_allocated_code_size = round_to_page_size(self.text_section.len(), self.page_size);
         let code_size = round_to_page_size(text_section_usage, self.page_size);
         unsafe {
             // Fill with debugger traps
@@ -95,20 +109,18 @@ impl JitProgram {
                 0xcc,
                 code_size - text_section_usage,
             );
-            if over_allocated_code_size > code_size {
-                free_pages(
-                    raw.add(pc_loc_table_size).add(code_size),
-                    over_allocated_code_size - code_size,
-                )?;
-            }
-            self.text_section =
-                std::slice::from_raw_parts_mut(raw.add(pc_loc_table_size), text_section_usage);
             protect_pages(
                 self.pc_section.as_mut_ptr().cast::<u8>(),
                 pc_loc_table_size,
-                false,
+                PagePermissions::Read,
             )?;
-            protect_pages(self.text_section.as_mut_ptr(), code_size, true)?;
+            protect_pages(
+                self.text_section.as_mut_ptr(),
+                code_size,
+                PagePermissions::ReadExecute,
+            )?;
+            self.text_section =
+                std::slice::from_raw_parts_mut(self.text_section.as_mut_ptr(), text_section_usage);
         }
         Ok(())
     }
@@ -177,27 +189,19 @@ impl JitProgram {
         self.text_section.len()
     }
 
-    /// The total memory used in bytes rounded up to page boundaries
+    /// The total pooled allocation size retained by the compiled program.
     pub fn mem_size(&self) -> usize {
-        let pc_loc_table_size =
-            round_to_page_size(std::mem::size_of_val(self.pc_section), self.page_size);
-        let code_size = round_to_page_size(self.text_section.len(), self.page_size);
-        pc_loc_table_size + code_size
+        self.allocation_size
     }
 }
 
 impl Drop for JitProgram {
     fn drop(&mut self) {
-        let pc_loc_table_size =
-            round_to_page_size(std::mem::size_of_val(self.pc_section), self.page_size);
-        let code_size = round_to_page_size(self.text_section.len(), self.page_size);
-        if pc_loc_table_size + code_size > 0 {
-            unsafe {
-                let _ = free_pages(
-                    self.pc_section.as_ptr() as *mut u8,
-                    pc_loc_table_size + code_size,
-                );
-            }
+        unsafe {
+            free_pages_pooled(
+                self.pc_section.as_mut_ptr().cast::<u8>(),
+                self.allocation_size,
+            );
         }
     }
 }
