@@ -138,20 +138,29 @@ unsafe impl<T: VmExposableMut, const N: usize> HostMemoryObject for *mut [T; N] 
     }
 }
 
+/// Either mutable or immutable slice, returned by [`MemoryRegion::host_buffer`].
+#[derive(PartialEq, Eq, Copy, Clone)]
+pub enum HostBuffer {
+    /// The `MemoryRegion` is read-only.
+    Immutable(*const [u8]),
+    /// The `MemoryRegion` is writable.
+    Mutable(*mut [u8]),
+}
+
 /// Memory region for bounds checking and address translation
 #[derive(Default, Eq, PartialEq, Clone)]
 #[repr(C, align(32))]
 pub struct MemoryRegion {
     /// start host address
-    pub host_addr: u64,
+    host_addr: u64,
     /// start virtual address
-    pub vm_addr: u64,
+    vm_addr: u64,
     /// Length in bytes
-    pub len: u64,
+    len: u64,
     /// Size of regular gaps as bit shift (63 means this region is continuous)
-    pub vm_gap_shift: u8,
+    vm_gap_shift: u8,
     /// Is `AccessType::Store` allowed without triggering an access violation
-    pub writable: bool,
+    writable: bool,
     /// User defined payload for the [AccessViolationHandler]
     pub access_violation_handler_payload: Option<u16>,
 }
@@ -201,12 +210,66 @@ impl MemoryRegion {
         Self::new_internal(host_address, bytes, vm_addr, vm_gap_size, HO::WRITABLE)
     }
 
+    /// Redirect this memory region to a different location in host memory.
+    ///
+    /// Depending on whether `HO` is mutable, the writability of the region is adjusted as well.
+    pub fn redirect<HO: HostMemoryObject>(&mut self, host: HO) {
+        let bytes = host.byte_length();
+        self.host_addr = host.host_address() as u64;
+        self.len = bytes as u64;
+        self.writable = HO::WRITABLE;
+    }
+
+    /// Make this memory region read-only.
+    pub fn make_read_only(&mut self) {
+        self.writable = false;
+    }
+
     /// Returns the vm address space covered by this MemoryRegion
     pub fn vm_addr_range(&self) -> Range<u64> {
         if self.vm_gap_shift == 63 {
             self.vm_addr..self.vm_addr.saturating_add(self.len)
         } else {
             self.vm_addr..self.vm_addr.saturating_add(self.len.saturating_mul(2))
+        }
+    }
+
+    /// Return the raw slice to the host memory that this memory region points at.
+    ///
+    /// This can be used to construct a new memory region.
+    pub fn host_buffer(&self) -> HostBuffer {
+        let addr = self.host_addr as usize;
+        let len = self.len as usize;
+        if self.writable {
+            let ptr = std::ptr::with_exposed_provenance_mut(addr);
+            HostBuffer::Mutable(std::ptr::slice_from_raw_parts_mut(ptr, len))
+        } else {
+            let ptr = std::ptr::with_exposed_provenance(addr);
+            HostBuffer::Immutable(std::ptr::slice_from_raw_parts(ptr, len))
+        }
+    }
+
+    /// Return the length in bytes of this memory region.
+    #[allow(clippy::len_without_is_empty)]
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    /// Modify the length of this region.
+    ///
+    /// # Safety
+    ///
+    /// The host buffer must be at least `new_len` large.
+    pub unsafe fn set_len(&mut self, new_len: u64) {
+        self.len = new_len;
+    }
+
+    /// Return the `gap_size` with which the memory region has been constructed.
+    pub fn gap_size(&self) -> u64 {
+        if self.vm_gap_shift == 63 {
+            0
+        } else {
+            1 << self.vm_gap_shift
         }
     }
 
