@@ -225,6 +225,18 @@ impl MemoryRegion {
         self.writable = false;
     }
 
+    /// Make this memory region writable.
+    ///
+    /// If the host-side buffer is available to the caller, prefer the safe
+    /// [`redirect`](Self::redirect) method instead.
+    ///
+    /// # Safety
+    ///
+    /// This region *must* have been constructed with a mutable pointer.
+    pub unsafe fn make_writable(&mut self) {
+        self.writable = true;
+    }
+
     /// Returns the vm address space covered by this MemoryRegion
     pub fn vm_addr_range(&self) -> Range<u64> {
         if self.vm_gap_shift == 63 {
