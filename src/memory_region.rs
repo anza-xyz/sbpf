@@ -137,12 +137,51 @@ pub enum HostBuffer {
 }
 
 impl HostBuffer {
-    /// The length of the underlying host buffer.
+    /// The length of this host buffer.
     pub fn len(&self) -> usize {
         match self {
             HostBuffer::Immutable(p) => p.len(),
             HostBuffer::Mutable(p) => p.len(),
         }
+    }
+
+    /// `true` if this host buffer has a length of 0.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            HostBuffer::Immutable(p) => p.is_empty(),
+            HostBuffer::Mutable(p) => p.is_empty(),
+        }
+    }
+
+    /// `true` if this is a `HostBuffer::Mutable`.
+    pub fn is_mutable(&self) -> bool {
+        matches!(self, HostBuffer::Mutable(_))
+    }
+
+    /// Make this host buffer mutable.
+    ///
+    /// # Safety
+    ///
+    /// This host buffer *must* have been initially constructed with a mutable pointer.
+    pub unsafe fn mutable(self) -> Self {
+        match self {
+            HostBuffer::Immutable(p) => HostBuffer::Mutable(p.cast_mut()),
+            HostBuffer::Mutable(_) => self,
+        }
+    }
+
+    /// Make this host buffer immutable.
+    pub fn immutable(self) -> Self {
+        match self {
+            HostBuffer::Immutable(_) => self,
+            HostBuffer::Mutable(p) => Self::Immutable(p.cast_const()),
+        }
+    }
+}
+
+unsafe impl HostMemoryObject for HostBuffer {
+    fn host(self) -> HostBuffer {
+        self
     }
 }
 
@@ -178,6 +217,14 @@ impl MemoryRegion {
         }
     }
 
+    /// Creates a new, empty `MemoryRegion`.
+    ///
+    /// This does not require to provide any backing host memory.
+    pub fn new_empty(vm_addr: u64) -> Self {
+        const EMPTY: &[u8] = &[];
+        Self::new_internal((&raw const *EMPTY).host(), vm_addr, 0)
+    }
+
     /// Creates a new `MemoryRegion` backed by the provided host memory.
     ///
     /// The backing memory must remain allocated for the duration of the returned `MemoryRegion`.
@@ -199,29 +246,6 @@ impl MemoryRegion {
         self.host = host.host();
     }
 
-    /// Make this memory region read-only.
-    pub fn make_read_only(&mut self) {
-        self.host = HostBuffer::Immutable(match self.host {
-            HostBuffer::Immutable(p) => p,
-            HostBuffer::Mutable(p) => p,
-        });
-    }
-
-    /// Make this memory region writable.
-    ///
-    /// If the host-side buffer is available to the caller, prefer the safe
-    /// [`redirect`](Self::redirect) method instead.
-    ///
-    /// # Safety
-    ///
-    /// This region *must* have been constructed with a mutable pointer.
-    pub unsafe fn make_writable(&mut self) {
-        self.host = HostBuffer::Mutable(match self.host {
-            HostBuffer::Immutable(p) => p.cast_mut(),
-            HostBuffer::Mutable(p) => p,
-        });
-    }
-
     /// Returns the vm address space covered by this MemoryRegion
     pub fn vm_addr_range(&self) -> Range<u64> {
         let bytes = self.len() as u64;
@@ -239,26 +263,14 @@ impl MemoryRegion {
         self.host
     }
 
-    /// Return the length in bytes of this memory region.
-    #[allow(clippy::len_without_is_empty)]
+    /// Length of this memory region in bytes.
     pub fn len(&self) -> usize {
         self.host.len()
     }
 
-    /// Modify the length of this region.
-    ///
-    /// # Safety
-    ///
-    /// The host buffer must be at least `new_len` large.
-    pub unsafe fn set_len(&mut self, new_len: usize) {
-        self.host = match self.host {
-            HostBuffer::Immutable(p) => {
-                HostBuffer::Immutable(ptr::slice_from_raw_parts(p.cast(), new_len))
-            }
-            HostBuffer::Mutable(p) => {
-                HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(p.cast(), new_len))
-            }
-        }
+    /// Is the length of this memory region 0 bytes?
+    pub fn is_empty(&self) -> bool {
+        self.host.is_empty()
     }
 
     /// Return the `gap_size` with which the memory region has been constructed.
@@ -270,7 +282,7 @@ impl MemoryRegion {
         }
     }
 
-    /// Convert a virtual machine address into a host address
+    /// Convert a virtual machine address into a host address.
     pub fn vm_to_host(&self, access_type: AccessType, vm_addr: u64, len: u64) -> Option<u64> {
         let (host_addr, host_len) = match self.host {
             HostBuffer::Immutable(_) if access_type == AccessType::Store => return None,
