@@ -148,7 +148,6 @@ impl HostBuffer {
 
 /// Memory region for bounds checking and address translation
 #[derive(Eq, PartialEq, Clone)]
-#[repr(C, align(32))]
 pub struct MemoryRegion {
     host: HostBuffer,
     /// start virtual address
