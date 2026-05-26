@@ -216,14 +216,14 @@ pub struct DynamicAnalysis {
 
 impl DynamicAnalysis {
     /// Accumulates a trace
-    pub fn new(register_trace: &[[u64; 12]], analysis: &Analysis) -> Self {
+    pub fn new(register_trace: &[RegisterTraceEntry], analysis: &Analysis) -> Self {
         let mut result = Self {
             edge_counter_max: 0,
             edges: BTreeMap::new(),
         };
         let mut last_basic_block = usize::MAX;
         for traced_instruction in register_trace.iter() {
-            let pc = traced_instruction[11] as usize;
+            let pc = traced_instruction.registers[11] as usize;
             if analysis.cfg_nodes.contains_key(&pc) {
                 let counter = result
                     .edges
