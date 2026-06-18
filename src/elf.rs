@@ -43,6 +43,7 @@ use shuttle::sync::Arc;
 
 /// Error definitions
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[repr(C, u64)]
 pub enum ElfError {
     /// Failed to parse ELF file
     #[error("Failed to parse ELF file: {0}")]
