@@ -247,6 +247,44 @@ pub enum Section {
     Borrowed(usize, Range<usize>),
 }
 
+/// Builds an owned read-only section buffer from the supplied section data.
+///
+/// Section addresses are rebased relative to `lowest_addr`. Gaps and trailing
+/// bytes are zero-filled. Sections are applied in input order, so later
+/// sections overwrite earlier bytes when their ranges overlap.
+///
+/// All section ranges must fit within `buf_len`.
+fn build_owned_ro_section<'a>(
+    buf_len: usize,
+    lowest_addr: usize,
+    ro_slices: impl IntoIterator<Item = (usize, &'a [u8])>,
+) -> Vec<u8> {
+    // Avoid `vec![0; buf_len]` because it uses jemalloc `calloc`/zeroed allocation,
+    // which requires zeroed extents and can force fresh/purged pages.
+    //
+    // Use `Vec::with_capacity` and initialize the buffer incrementally,
+    // allowing jemalloc to reuse warm dirty extents.
+    let mut ro_section = Vec::<u8>::with_capacity(buf_len);
+
+    for (section_addr, section_data) in ro_slices {
+        let buf_offset_start = section_addr.saturating_sub(lowest_addr);
+        let buf_offset_end = buf_offset_start.saturating_add(section_data.len());
+        debug_assert!(buf_offset_end <= buf_len);
+
+        if ro_section.len() < buf_offset_start {
+            ro_section.resize(buf_offset_start, 0);
+        }
+
+        let overwrite_dst = &mut ro_section[buf_offset_start..];
+        let overwrite_bytes = section_data.len().min(overwrite_dst.len());
+        overwrite_dst[..overwrite_bytes].copy_from_slice(&section_data[..overwrite_bytes]);
+        ro_section.extend_from_slice(&section_data[overwrite_bytes..]);
+    }
+
+    ro_section.resize(buf_len, 0);
+    ro_section
+}
+
 /// Elf loader/relocator
 #[derive(Debug)]
 pub struct Executable<C: ContextObject> {
@@ -922,7 +960,11 @@ impl<C: ContextObject> Executable<C> {
             highest_addr = highest_addr.max(section_addr.saturating_add(section_data.len()));
             ro_fill_length = ro_fill_length.saturating_add(section_data.len());
 
-            ro_slices.push((section_addr, section_data));
+            // Empty sections still shape the mappable bounds above, but they
+            // contain no data to copy.
+            if !section_data.is_empty() {
+                ro_slices.push((section_addr, section_data));
+            }
         }
 
         if config.reject_broken_elfs && lowest_addr.saturating_add(ro_fill_length) > highest_addr {
@@ -971,14 +1013,7 @@ impl<C: ContextObject> Executable<C> {
                 return Err(ElfError::ValueOutOfBounds);
             }
 
-            #[expect(clippy::slow_vector_initialization)]
-            let mut ro_section = Vec::with_capacity(buf_len);
-            ro_section.resize(buf_len, 0);
-            for (section_addr, slice) in ro_slices.iter() {
-                let buf_offset_start = section_addr.saturating_sub(lowest_addr);
-                ro_section[buf_offset_start..buf_offset_start.saturating_add(slice.len())]
-                    .copy_from_slice(slice);
-            }
+            let ro_section = build_owned_ro_section(buf_len, lowest_addr, ro_slices);
 
             let addr_offset = if lowest_addr >= ebpf::MM_REGION_SIZE as usize {
                 lowest_addr
@@ -1305,4 +1340,84 @@ pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
     // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
     // will be unmappable, see MemoryRegion::vm_to_host.
     MemoryRegion::new(&raw const *ro_data, offset as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_owned_ro_section;
+
+    struct TestCase {
+        name: &'static str,
+        buf_len: usize,
+        lowest_addr: usize,
+        ro_slices: &'static [(usize, &'static [u8])],
+        expected: &'static [u8],
+    }
+
+    #[test]
+    fn test_build_owned_ro_section() {
+        let test_cases = [
+            TestCase {
+                name: "empty",
+                buf_len: 4,
+                lowest_addr: 0,
+                ro_slices: &[],
+                expected: &[0; 4],
+            },
+            TestCase {
+                name: "ordered contiguous",
+                buf_len: 6,
+                lowest_addr: 100,
+                ro_slices: &[(100, &[1, 2]), (102, &[3, 4]), (104, &[5, 6])],
+                expected: &[1, 2, 3, 4, 5, 6],
+            },
+            TestCase {
+                name: "ordered with gaps",
+                buf_len: 10,
+                lowest_addr: 0,
+                ro_slices: &[(2, &[1, 2]), (6, &[3, 4])],
+                expected: &[0, 0, 1, 2, 0, 0, 3, 4, 0, 0],
+            },
+            TestCase {
+                name: "contained overlap",
+                buf_len: 6,
+                lowest_addr: 0,
+                ro_slices: &[(0, &[1, 2, 3, 4, 5]), (1, &[9, 8])],
+                expected: &[1, 9, 8, 4, 5, 0],
+            },
+            TestCase {
+                name: "extending overlap",
+                buf_len: 6,
+                lowest_addr: 0,
+                ro_slices: &[(0, &[1, 2, 3]), (2, &[9, 8, 7])],
+                expected: &[1, 2, 9, 8, 7, 0],
+            },
+            TestCase {
+                name: "reversed disjoint",
+                buf_len: 6,
+                lowest_addr: 0,
+                ro_slices: &[(4, &[5, 6]), (2, &[3, 4]), (0, &[1, 2])],
+                expected: &[1, 2, 3, 4, 5, 6],
+            },
+            TestCase {
+                name: "overlaps preserve input order",
+                buf_len: 6,
+                lowest_addr: 0,
+                ro_slices: &[(2, &[3, 3, 3, 3]), (0, &[1, 1, 1, 1]), (3, &[9, 9, 9])],
+                expected: &[1, 1, 1, 9, 9, 9],
+            },
+        ];
+
+        for TestCase {
+            name,
+            buf_len,
+            lowest_addr,
+            ro_slices,
+            expected,
+        } in test_cases
+        {
+            let actual = build_owned_ro_section(buf_len, lowest_addr, ro_slices.iter().copied());
+            assert_eq!(actual.as_slice(), expected, "{name}",);
+        }
+    }
 }
