@@ -288,6 +288,15 @@ pub enum AccessType {
     Store,
 }
 
+impl std::fmt::Display for AccessType {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Load => "reading",
+            Self::Store => "writing",
+        })
+    }
+}
+
 /// Memory mapping based on eytzinger search.
 pub struct UnalignedMemoryMapping {
     /// Common parts
@@ -827,12 +836,16 @@ impl MemoryMapping {
                 stack_frame,
             ))
         } else {
+            let region = self.find_region(vm_addr);
             let region_name = match vm_addr & (!ebpf::MM_BYTECODE_START.saturating_sub(1)) {
+                _ if region.map(|(_, r)| r.vm_addr_range().contains(&vm_addr)) != Some(true) => {
+                    "unallocated"
+                }
                 ebpf::MM_BYTECODE_START => "program",
                 ebpf::MM_STACK_START => "stack",
                 ebpf::MM_HEAP_START => "heap",
                 ebpf::MM_INPUT_START => "input",
-                _ => "unknown",
+                _ => "allocated",
             };
             ProgramResult::Err(EbpfError::AccessViolation(
                 access_type,
@@ -1693,6 +1706,31 @@ mod test {
         };
 
         m.store(33u8, ebpf::MM_REGION_SIZE).unwrap();
+    }
+
+    #[test]
+    fn test_access_violation_region_identification() {
+        let config = Config::default();
+        let original = [11, 22];
+        let region = 0x10_0000_0000;
+        let mut m = unsafe {
+            MemoryMapping::new(
+                vec![MemoryRegion::new(&raw const original, region)],
+                &config,
+                SBPFVersion::V4,
+            )
+            .unwrap()
+        };
+        let store_err_inbound = m.store(33u8, region).unwrap_err();
+        assert_eq!(
+            store_err_inbound.to_string(),
+            "Access violation writing 1 bytes at address 0x1000000000 (in allocated region)"
+        );
+        let store_err_oob = m.load::<u64>(region + 3).unwrap_err();
+        assert_eq!(
+            store_err_oob.to_string(),
+            "Access violation reading 8 bytes at address 0x1000000003 (in unallocated region)"
+        );
     }
 
     #[test]

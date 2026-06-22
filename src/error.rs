@@ -49,7 +49,7 @@ pub enum EbpfError {
     #[error("Invalid memory region at index {0}")]
     InvalidMemoryRegion(usize),
     /// Access violation (general)
-    #[error("Access violation in {3} section at address {1:#x} of size {2:?}")]
+    #[error("Access violation {0} {2} bytes at address {1:#x} (in {3} region)")]
     AccessViolation(AccessType, u64, u64, &'static str),
     /// Access violation (stack specific)
     #[error("Access violation in stack frame {3} at address {1:#x} of size {2:?}")]

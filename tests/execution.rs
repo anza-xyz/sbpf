@@ -1095,7 +1095,7 @@ fn test_err_ldxdw_nomem() {
             AccessType::Load,
             0x400000006,
             8,
-            "input"
+            "unallocated"
         )),
     );
 }
@@ -1779,7 +1779,7 @@ fn test_dynamic_stack_frames_sbpfv1() {
             AccessType::Store,
             0x3F000 - 64,
             1,
-            "unknown"
+            "unallocated"
         )),
     );
 
@@ -1935,7 +1935,12 @@ fn test_err_mem_access_out_of_bound() {
         ..Config::default()
     };
     let loader = Arc::new(BuiltinProgram::new_loader(config));
-    for address in [0x2u64, 0x8002u64, 0x80000002u64, 0x8000000000000002u64] {
+    for (address, k) in [
+        (0x2u64, "allocated"),
+        (0x8002u64, "unallocated"),
+        (0x80000002u64, "unallocated"),
+        (0x8000000000000002u64, "unallocated"),
+    ] {
         LittleEndian::write_u32(&mut prog[12..], address as u32);
         LittleEndian::write_u32(&mut prog[20..], (address >> 32) as u32);
         #[allow(unused_mut)]
@@ -1950,12 +1955,7 @@ fn test_err_mem_access_out_of_bound() {
             executable,
             mem,
             TestContextObject::new(3),
-            ProgramResult::Err(EbpfError::AccessViolation(
-                AccessType::Store,
-                address,
-                1,
-                "unknown"
-            )),
+            ProgramResult::Err(EbpfError::AccessViolation(AccessType::Store, address, 1, k)),
         );
     }
 }
@@ -3286,7 +3286,7 @@ fn test_err_fixed_stack_out_of_bound() {
             AccessType::Store,
             0x1FFFFD000,
             1,
-            "program"
+            "unallocated"
         )),
     );
 }
