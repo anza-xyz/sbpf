@@ -42,8 +42,10 @@ use std::sync::Arc;
 use shuttle::sync::Arc;
 
 /// Error definitions
+// Note: `#[repr(u64)]` is used for `Self::discriminant`, but the actual
+// memory layout of this enum's variants is not depended on by the VM.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-#[repr(C, u64)]
+#[repr(u64)]
 pub enum ElfError {
     /// Failed to parse ELF file
     #[error("Failed to parse ELF file: {0}")]
@@ -114,6 +116,15 @@ pub enum ElfError {
     /// Invalid program header
     #[error("Invalid ELF program header")]
     InvalidProgramHeader,
+}
+
+impl ElfError {
+    /// Returns the enum discriminant as a `u64`.
+    ///
+    /// This is sound only because of the `#[repr(u64)]` attribute on the enum.
+    pub fn discriminant(&self) -> u64 {
+        unsafe { *std::ptr::addr_of!(*self).cast::<u64>() }
+    }
 }
 
 impl From<ElfParserError> for ElfError {

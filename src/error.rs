@@ -13,7 +13,10 @@ use {
 
 /// Error definitions
 #[derive(Debug, thiserror::Error)]
-#[repr(u64)] // discriminant size, used in emit_exception_kind in JIT
+// Note: `#[repr(u64)]` is used for `Self::discriminant` and
+// `emit_exception_kind` in JIT, but the actual memory layout of this enum's
+// variants is not depended on by the VM.
+#[repr(u64)]
 pub enum EbpfError {
     /// ELF error
     #[error("ELF error: {0}")]
@@ -72,6 +75,15 @@ pub enum EbpfError {
     /// Syscall error
     #[error("Syscall error: {0}")]
     SyscallError(Box<dyn Error>),
+}
+
+impl EbpfError {
+    /// Returns the enum discriminant as a `u64`.
+    ///
+    /// This is sound only because of the `#[repr(u64)]` attribute on the enum.
+    pub fn discriminant(&self) -> u64 {
+        unsafe { *std::ptr::addr_of!(*self).cast::<u64>() }
+    }
 }
 
 /// Same as `Result` but provides a stable memory layout
