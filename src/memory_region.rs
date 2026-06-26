@@ -242,7 +242,13 @@ impl MemoryRegion {
     /// Redirect this memory region to a different location in host memory.
     ///
     /// Depending on whether `HO` is mutable, the writability of the region is adjusted as well.
-    pub fn redirect<HO: HostMemoryObject>(&mut self, host: HO) {
+    ///
+    /// # Safety
+    ///
+    /// If this `MemoryRegion` is a part of a [`MemoryMapping`] then, after redirection, this region
+    /// must adhere to all the same contracts as the `MemoryRegion`s used for
+    /// [`MemoryMapping::replace_region`].
+    pub unsafe fn redirect<HO: HostMemoryObject>(&mut self, host: HO) {
         self.host = host.host();
     }
 
