@@ -252,6 +252,24 @@ impl MemoryRegion {
         self.host = host.host();
     }
 
+    /// Ensure that this memory region is immutable.
+    pub fn make_immutable(&mut self) {
+        unsafe {
+            // SAFETY:
+            // Contract from `MemoryRegion::redirect`: memory region must be live for
+            // the duration of the mapping.
+            //
+            // Evidence: Since we aren't changing where the host buffer is pointing at,
+            // the condition must already have been satisfied at the time this function was called
+            // and thus remains satisfied.
+            //
+            // Contract from `MemoryRegion::redirect`: For `MemoryRegions` marked writable...
+            //
+            // Evidence: Memory region is no longer writable.
+            self.redirect(self.host_buffer().immutable());
+        }
+    }
+
     /// Returns the vm address space covered by this MemoryRegion
     pub fn vm_addr_range(&self) -> Range<u64> {
         let bytes = self.len() as u64;
