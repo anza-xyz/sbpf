@@ -200,7 +200,7 @@ unsafe impl<const A: usize> HostMemoryObject for &AlignedMemory<A> {
 
 unsafe impl<const A: usize> HostMemoryObject for &mut AlignedMemory<A> {
     fn host(self) -> HostBuffer {
-        HostBuffer::Immutable(std::ptr::slice_from_raw_parts_mut(
+        HostBuffer::Mutable(std::ptr::slice_from_raw_parts_mut(
             self.mem.ptr.as_ptr(),
             self.len(),
         ))
