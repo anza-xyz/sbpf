@@ -289,10 +289,9 @@ impl<const ALIGN: usize> AlignedVec<ALIGN> {
     }
 
     fn empty() -> Self {
+        let layout = Layout::from_size_align(0, ALIGN).expect("invalid layout");
         Self {
-            // Create a dangling pointer
-            // FIXME: Use `Layout::dangling_ptr` once Rust 1.95.0 is released
-            ptr: NonNull::new(ALIGN as *mut u8).expect("alignment may not be zero"),
+            ptr: layout.dangling_ptr(),
             length: 0,
             capacity: 0,
         }

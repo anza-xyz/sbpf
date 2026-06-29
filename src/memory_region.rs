@@ -177,6 +177,44 @@ impl HostBuffer {
             HostBuffer::Mutable(p) => Self::Immutable(p.cast_const()),
         }
     }
+
+    /// Subslice this host buffer with the provided range.
+    pub fn get(self, range: std::ops::Range<usize>) -> Option<Self> {
+        if range.end > self.len() {
+            return None;
+        }
+        let new_len = range.len();
+        unsafe {
+            // SAFETY:
+            //
+            // Contract from `ptr::add`: If the computed offset is non-zero, then self
+            // must be derived from a pointer to some allocation, and the entire memory
+            // range between self and the result must be in bounds of that allocation.
+            // In particular, this range must not "wrap around" the edge of the address
+            // space.
+            //
+            // Evidence: We take care to ensure to only get here if the `begin_offset`
+            // (and a stronger condition: `begin_offset + len`) would be within `len()`
+            // of the base pointer.
+            //
+            // Contract from `ptr::add`: The offset in bytes, count * size_of::<T>(),
+            // computed on mathematical integers (without "wrapping around"), must fit
+            // in an isize.
+            //
+            // Evidence: Allocation size in Rust, including those of the region backing
+            // memory here specifically, may not exceed `isize::MAX` bytes.
+            Some(match self {
+                HostBuffer::Immutable(p) => HostBuffer::Immutable(std::ptr::slice_from_raw_parts(
+                    p.byte_add(range.start).cast(),
+                    new_len,
+                )),
+                HostBuffer::Mutable(p) => HostBuffer::Mutable(std::ptr::slice_from_raw_parts_mut(
+                    p.byte_add(range.start).cast(),
+                    new_len,
+                )),
+            })
+        }
+    }
 }
 
 unsafe impl HostMemoryObject for HostBuffer {
@@ -306,14 +344,11 @@ impl MemoryRegion {
         }
     }
 
-    /// Convert a virtual machine address into a host address.
-    pub fn vm_to_host(&self, access_type: AccessType, vm_addr: u64, len: u64) -> Option<u64> {
-        let (host_addr, host_len) = match self.host {
-            HostBuffer::Immutable(_) if access_type == AccessType::Store => return None,
-            HostBuffer::Immutable(p) => (p.addr() as u64, p.len() as u64),
-            HostBuffer::Mutable(p) => (p.addr() as u64, p.len() as u64),
-        };
-
+    /// Convert a virtual machine address into a host slice.
+    ///
+    /// The returned slice will have exactly `len` bytes. If the provided `vm_addr` does not
+    /// correlate to a valid subslice of this region, a `None` will be returned.
+    pub(crate) fn vm_to_host_buffer(&self, vm_addr: u64, len: u64) -> Option<HostBuffer> {
         // This can happen if a region starts at an offset from the base region
         // address, eg with rodata regions if config.optimize_rodata = true, see
         // Elf::get_ro_region.
@@ -325,9 +360,7 @@ impl MemoryRegion {
         if self.vm_gap_shift == 63 {
             // fast path for non-gapped regions
             if let Some(end_offset) = begin_offset.checked_add(len) {
-                if end_offset <= host_len {
-                    return Some(host_addr.saturating_add(begin_offset));
-                }
+                return self.host.get(begin_offset as usize..end_offset as usize);
             }
             return None;
         }
@@ -341,8 +374,8 @@ impl MemoryRegion {
         let gapped_offset =
             (begin_offset & gap_mask).checked_shr(1).unwrap_or(0) | (begin_offset & !gap_mask);
         if let Some(end_offset) = gapped_offset.checked_add(len) {
-            if end_offset <= host_len && !is_in_gap {
-                return Some(host_addr.saturating_add(gapped_offset));
+            if !is_in_gap {
+                return self.host.get(gapped_offset as usize..end_offset as usize);
             }
         }
         None
@@ -766,6 +799,18 @@ impl MemoryMapping {
         )
     }
 
+    fn host_buffer_to_address(
+        &self,
+        access_type: AccessType,
+        host_buffer: HostBuffer,
+    ) -> Option<u64> {
+        match host_buffer {
+            HostBuffer::Immutable(_) if access_type == AccessType::Store => None,
+            HostBuffer::Immutable(p) => Some(p.expose_provenance() as u64),
+            HostBuffer::Mutable(p) => Some(p.expose_provenance() as u64),
+        }
+    }
+
     /// Map virtual memory to host memory.
     pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
         debug_assert!(self.initialized);
@@ -774,8 +819,10 @@ impl MemoryMapping {
         }
 
         if let Some((_index, region)) = self.find_region(vm_addr) {
-            if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
-                return ProgramResult::Ok(host_addr);
+            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+                if let Some(addr) = self.host_buffer_to_address(access_type, host_buffer) {
+                    return ProgramResult::Ok(addr);
+                }
             }
         }
         self.generate_access_violation(access_type, vm_addr, len)
@@ -798,8 +845,10 @@ impl MemoryMapping {
         }
 
         if let Some((index, region)) = self.find_region(vm_addr) {
-            if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
-                return ProgramResult::Ok(host_addr);
+            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+                if let Some(addr) = self.host_buffer_to_address(access_type, host_buffer) {
+                    return ProgramResult::Ok(addr);
+                }
             }
             let mut region = (*region).clone();
             let max_len = self
@@ -808,11 +857,13 @@ impl MemoryMapping {
                 .map_or(u64::MAX, |next_region| next_region.vm_addr)
                 .saturating_sub(region.vm_addr);
             (self.access_violation_handler)(&mut region, max_len, access_type, vm_addr, len);
-            if let Some(host_addr) = region.vm_to_host(access_type, vm_addr, len) {
-                if let Err(err) = unsafe { self.replace_region(index, region) } {
-                    return ProgramResult::Err(err);
+            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+                if let Some(addr) = self.host_buffer_to_address(access_type, host_buffer) {
+                    if let Err(err) = unsafe { self.replace_region(index, region) } {
+                        return ProgramResult::Err(err);
+                    }
+                    return ProgramResult::Ok(addr);
                 }
-                return ProgramResult::Ok(host_addr);
             }
         }
         self.generate_access_violation(access_type, vm_addr, len)
@@ -825,7 +876,8 @@ impl MemoryMapping {
         debug_assert!(self.initialized);
         match self.map_with_access_violation_handler(AccessType::Load, vm_addr, len) {
             ProgramResult::Ok(host_addr) => {
-                ProgramResult::Ok(unsafe { ptr::read_unaligned::<T>(host_addr as *const T) }.into())
+                let ptr = ptr::with_exposed_provenance::<T>(host_addr as usize);
+                ProgramResult::Ok(unsafe { ptr::read_unaligned(ptr) }.into())
             }
             err => err,
         }
@@ -839,7 +891,8 @@ impl MemoryMapping {
         debug_assert!(self.initialized);
         match self.map_with_access_violation_handler(AccessType::Store, vm_addr, len) {
             ProgramResult::Ok(host_addr) => {
-                unsafe { ptr::write_unaligned(host_addr as *mut T, value) };
+                let ptr = ptr::with_exposed_provenance_mut::<T>(host_addr as usize);
+                unsafe { ptr::write_unaligned(ptr, value) };
                 ProgramResult::Ok(host_addr)
             }
             err => err,
