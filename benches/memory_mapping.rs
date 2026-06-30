@@ -16,6 +16,7 @@ use solana_sbpf::{
     program::SBPFVersion,
     vm::Config,
 };
+use std::hint;
 use test::Bencher;
 
 fn generate_memory_regions(
@@ -323,15 +324,31 @@ fn do_bench_mapping_operation(bencher: &mut Bencher, op: MemoryOperation) {
     .unwrap();
 
     match op {
-        MemoryOperation::Map => bencher.iter(|| {
-            let _ = memory_mapping.map(AccessType::Load, vm_addr, 8).unwrap();
-        }),
-        MemoryOperation::Load => bencher.iter(|| {
-            let _ = memory_mapping.load::<u64>(vm_addr).unwrap();
-        }),
-        MemoryOperation::Store(val) => bencher.iter(|| {
-            let _ = memory_mapping.store(val, vm_addr).unwrap();
-        }),
+        MemoryOperation::Map => {
+            let f: fn(_, _, _, _) -> _ = hint::black_box(MemoryMapping::map);
+            bencher.iter(|| {
+                f(
+                    &memory_mapping,
+                    AccessType::Load,
+                    hint::black_box(vm_addr),
+                    8,
+                )
+            })
+        }
+        MemoryOperation::Load => {
+            let f: for<'a> fn(&'a mut _, _) -> _ = hint::black_box(MemoryMapping::load::<u64>);
+            bencher.iter(move || f(&mut memory_mapping, hint::black_box(vm_addr)))
+        }
+        MemoryOperation::Store(val) => {
+            let f: for<'a> fn(&'a mut _, _, _) -> _ = hint::black_box(MemoryMapping::store);
+            bencher.iter(move || {
+                f(
+                    &mut memory_mapping,
+                    hint::black_box(val),
+                    hint::black_box(vm_addr),
+                )
+            })
+        }
     }
 }
 
