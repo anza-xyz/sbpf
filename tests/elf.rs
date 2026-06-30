@@ -381,8 +381,10 @@ fn test_owned_ro_region_no_initial_gap() {
                 ebpf::MM_REGION_SIZE,
                 s3.sh_addr + s3.sh_size
             )
-            .unwrap(),
-        owned_section.as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        owned_section.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -433,8 +435,10 @@ fn test_owned_ro_region_initial_gap_mappable() {
                 ebpf::MM_REGION_SIZE,
                 s3.sh_addr + s3.sh_size
             )
-            .unwrap(),
-        owned_section.as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        owned_section.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -491,8 +495,10 @@ fn test_owned_ro_region_initial_gap_map_error() {
                 ebpf::MM_REGION_SIZE + s1.sh_addr,
                 s3.sh_addr + s3.sh_size - s1.sh_addr
             )
-            .unwrap(),
-        owned_section.as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        owned_section.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -579,8 +585,10 @@ fn test_borrowed_ro_region_no_initial_gap() {
                 ebpf::MM_REGION_SIZE + s1.sh_offset,
                 s2.sh_offset + s2.sh_size
             )
-            .unwrap(),
-        elf_bytes.as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        elf_bytes.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -626,8 +634,10 @@ fn test_borrowed_ro_region_initial_gap() {
                 ebpf::MM_REGION_SIZE + s2.sh_offset,
                 s3.sh_offset + s3.sh_size - s2.sh_offset
             )
-            .unwrap(),
-        elf_bytes[s2.sh_offset as usize..].as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        elf_bytes[s2.sh_offset as usize..].as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable

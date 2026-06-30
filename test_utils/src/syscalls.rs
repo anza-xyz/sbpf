@@ -22,8 +22,8 @@
 //! respect this convention.
 
 use crate::TestContextObject;
-use solana_sbpf::{declare_builtin_function, error::EbpfError, memory_region::AccessType};
-use std::{slice::from_raw_parts, str::from_utf8};
+use solana_sbpf::{declare_builtin_function, memory_region::AccessType};
+use std::str::from_utf8;
 
 declare_builtin_function!(
     /// Prints its **last three** arguments to standard output. The **first two** arguments are
@@ -90,12 +90,9 @@ declare_builtin_function!(
         if len == 0 {
             return Ok(0);
         }
-        let host_addr: Result<u64, EbpfError> =
-            context_object.memory_mapping.map(AccessType::Store, vm_addr, len).into();
-        let host_addr = host_addr?;
-        for i in 0..len {
-            unsafe {
-                let p = (host_addr + i) as *mut u8;
+        let buf = Result::from(context_object.memory_mapping.map(AccessType::Store, vm_addr, len))?;
+        unsafe {
+            for p in buf.ptr_mut().as_mut_unchecked() {
                 *p ^= 0b101010;
             }
         }
@@ -118,20 +115,19 @@ declare_builtin_function!(
         if arg1 == 0 || arg2 == 0 {
             return Ok(u64::MAX);
         }
-        let a: Result<u64, EbpfError> =
-            context_object.memory_mapping.map(AccessType::Load, arg1, 1).into();
-        let mut a = a?;
-        let b: Result<u64, EbpfError> =
-            context_object.memory_mapping.map(AccessType::Load, arg2, 1).into();
-        let mut b = b?;
+        // Length of 1 here is circumventing soundness checks map does, but for a test its probably
+        // fine.
+        let mut a = Result::from(context_object.memory_mapping.map(AccessType::Load, arg1, 1))?
+            .ptr()
+            .cast::<u8>();
+        let mut b = Result::from(context_object.memory_mapping.map(AccessType::Load, arg2, 1))?
+            .ptr()
+            .cast::<u8>();
         unsafe {
-            let mut a_val = *(a as *const u8);
-            let mut b_val = *(b as *const u8);
+            let (mut a_val, mut b_val) = (*a, *b);
             while a_val == b_val && a_val != 0 && b_val != 0 {
-                a += 1;
-                b += 1;
-                a_val = *(a as *const u8);
-                b_val = *(b as *const u8);
+                (a, b) = (a.add(1), b.add(1));
+                (a_val, b_val) = (*a, *b);
             }
             if a_val >= b_val {
                 Ok((a_val - b_val) as u64)
@@ -156,11 +152,10 @@ declare_builtin_function!(
         if len == 0 {
             return Ok(0);
         }
-        let host_addr: Result<u64, EbpfError> =
-            context_object.memory_mapping.map(AccessType::Load, vm_addr, len).into();
-        let host_addr = host_addr?;
+        let host_buffer =
+            Result::from(context_object.memory_mapping.map(AccessType::Load, vm_addr, len))?;
         unsafe {
-            let c_buf = from_raw_parts(host_addr as *const u8, len as usize);
+            let c_buf = host_buffer.ptr().as_ref_unchecked();
             let len = c_buf.iter().position(|c| *c == 0).unwrap_or(len as usize);
             let message = from_utf8(&c_buf[0..len]).unwrap_or("Invalid UTF-8 String");
             println!("log: {message}");

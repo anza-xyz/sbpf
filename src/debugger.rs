@@ -171,7 +171,7 @@ impl<'a, 'b, 'c, C: ContextObject> Target for Interpreter<'a, 'b, 'c, C> {
 fn get_host_ptr<C: ContextObject>(
     interpreter: &mut Interpreter<C>,
     mut vm_addr: u64,
-) -> Result<*mut u8, EbpfError> {
+) -> Result<*const u8, EbpfError> {
     if !interpreter
         .executable
         .get_sbpf_version()
@@ -181,16 +181,14 @@ fn get_host_ptr<C: ContextObject>(
         vm_addr += ebpf::MM_BYTECODE_START;
     }
 
-    // SAFETY: The creator of EbpfVm must guarantee the pointer is valid.
     unsafe {
-        match interpreter.vm.memory_mapping.as_ref().map(
+        // SAFETY: The creator of EbpfVm must guarantee the `memory_mapping` pointer is valid.
+        let host_buffer = Result::from(interpreter.vm.memory_mapping.as_ref().map(
             AccessType::Load,
             vm_addr,
             std::mem::size_of::<u8>() as u64,
-        ) {
-            ProgramResult::Ok(host_addr) => Ok(host_addr as *mut u8),
-            ProgramResult::Err(err) => Err(err),
-        }
+        ))?;
+        Ok(host_buffer.ptr().cast())
     }
 }
 
