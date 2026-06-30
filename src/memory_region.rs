@@ -3,7 +3,7 @@
 use crate::{
     aligned_memory::Pod,
     ebpf,
-    error::{EbpfError, ProgramResult},
+    error::{EbpfError, ProgramResult, StableResult},
     program::SBPFVersion,
     vm::Config,
 };
@@ -179,6 +179,7 @@ impl HostBuffer {
     }
 
     /// Subslice this host buffer with the provided range.
+    #[inline]
     pub fn get(self, range: std::ops::Range<usize>) -> Option<Self> {
         if range.end > self.len() {
             return None;
@@ -204,15 +205,36 @@ impl HostBuffer {
             // Evidence: Allocation size in Rust, including those of the region backing
             // memory here specifically, may not exceed `isize::MAX` bytes.
             Some(match self {
-                HostBuffer::Immutable(p) => HostBuffer::Immutable(std::ptr::slice_from_raw_parts(
+                HostBuffer::Immutable(p) => HostBuffer::Immutable(ptr::slice_from_raw_parts(
                     p.byte_add(range.start).cast(),
                     new_len,
                 )),
-                HostBuffer::Mutable(p) => HostBuffer::Mutable(std::ptr::slice_from_raw_parts_mut(
+                HostBuffer::Mutable(p) => HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(
                     p.byte_add(range.start).cast(),
                     new_len,
                 )),
             })
+        }
+    }
+
+    /// Pointer to a slice of the host memory.
+    #[inline(always)]
+    pub fn ptr(self) -> *const [u8] {
+        match self {
+            HostBuffer::Immutable(p) => p,
+            HostBuffer::Mutable(p) => p,
+        }
+    }
+
+    /// Mutble pointer to a slice of the host memory.
+    #[inline(always)]
+    pub fn ptr_mut(self) -> *mut [u8] {
+        match self {
+            HostBuffer::Immutable(p) => {
+                debug_assert!(false, "ptr_mut, but buffer is immutable");
+                p.cast_mut()
+            }
+            HostBuffer::Mutable(p) => p,
         }
     }
 }
@@ -348,6 +370,7 @@ impl MemoryRegion {
     ///
     /// The returned slice will have exactly `len` bytes. If the provided `vm_addr` does not
     /// correlate to a valid subslice of this region, a `None` will be returned.
+    #[inline]
     pub(crate) fn vm_to_host_buffer(&self, vm_addr: u64, len: u64) -> Option<HostBuffer> {
         // This can happen if a region starts at an offset from the base region
         // address, eg with rodata regions if config.optimize_rodata = true, see
@@ -799,33 +822,32 @@ impl MemoryMapping {
         )
     }
 
-    fn host_buffer_to_address(
+    /// Map virtual memory to host memory.
+    pub fn map(
         &self,
         access_type: AccessType,
-        host_buffer: HostBuffer,
-    ) -> Option<u64> {
-        match host_buffer {
-            HostBuffer::Immutable(_) if access_type == AccessType::Store => None,
-            HostBuffer::Immutable(p) => Some(p.expose_provenance() as u64),
-            HostBuffer::Mutable(p) => Some(p.expose_provenance() as u64),
-        }
-    }
-
-    /// Map virtual memory to host memory.
-    pub fn map(&self, access_type: AccessType, vm_addr: u64, len: u64) -> ProgramResult {
+        vm_addr: u64,
+        len: u64,
+    ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
         if self.disable_address_translation {
-            return ProgramResult::Ok(vm_addr);
+            // NOTE TRICKY: this pointer most likely did *not* get its provenance exposed in the
+            // Rust-land! This option in general is extremely unsafe and have us constructing
+            // pointers to no man's land. We acknowledge this and don't consider it to be a bug,
+            // given that the option isn't meant to be used for any serious applications of this
+            // crate.
+            let ptr = ptr::with_exposed_provenance_mut(vm_addr as usize);
+            let buffer = HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(ptr, len as usize));
+            return StableResult::Ok(buffer);
         }
-
         if let Some((_index, region)) = self.find_region(vm_addr) {
-            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                if let Some(addr) = self.host_buffer_to_address(access_type, host_buffer) {
-                    return ProgramResult::Ok(addr);
+            if region.host_buffer().is_mutable() || access_type != AccessType::Store {
+                if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+                    return StableResult::Ok(host_buffer);
                 }
             }
         }
-        self.generate_access_violation(access_type, vm_addr, len)
+        StableResult::Err(self.generate_access_violation(access_type, vm_addr, len))
     }
 
     /// Map virtual memory to host memory and potentially call the [AccessViolationHandler].
@@ -838,16 +860,23 @@ impl MemoryMapping {
         access_type: AccessType,
         vm_addr: u64,
         len: u64,
-    ) -> ProgramResult {
+    ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
         if self.disable_address_translation {
-            return ProgramResult::Ok(vm_addr);
+            // NOTE TRICKY: this pointer most likely did *not* get its provenance exposed in the
+            // Rust-land! This option in general is extremely unsafe and have us constructing
+            // pointers to no man's land. We acknowledge this and don't consider it to be a bug,
+            // given that the option isn't meant to be used for any serious applications of this
+            // crate.
+            let ptr = ptr::with_exposed_provenance_mut(vm_addr as usize);
+            let buffer = HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(ptr, len as usize));
+            return StableResult::Ok(buffer);
         }
 
         if let Some((index, region)) = self.find_region(vm_addr) {
-            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                if let Some(addr) = self.host_buffer_to_address(access_type, host_buffer) {
-                    return ProgramResult::Ok(addr);
+            if region.host_buffer().is_mutable() || access_type != AccessType::Store {
+                if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+                    return StableResult::Ok(host_buffer);
                 }
             }
             let mut region = (*region).clone();
@@ -857,46 +886,61 @@ impl MemoryMapping {
                 .map_or(u64::MAX, |next_region| next_region.vm_addr)
                 .saturating_sub(region.vm_addr);
             (self.access_violation_handler)(&mut region, max_len, access_type, vm_addr, len);
-            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                if let Some(addr) = self.host_buffer_to_address(access_type, host_buffer) {
+            if region.host_buffer().is_mutable() || access_type != AccessType::Store {
+                if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
                     if let Err(err) = unsafe { self.replace_region(index, region) } {
-                        return ProgramResult::Err(err);
+                        return StableResult::Err(err);
                     }
-                    return ProgramResult::Ok(addr);
+                    return StableResult::Ok(host_buffer);
                 }
             }
         }
-        self.generate_access_violation(access_type, vm_addr, len)
+        StableResult::Err(self.generate_access_violation(access_type, vm_addr, len))
     }
 
-    /// Loads `size_of::<T>()` bytes from the given address.
+    /// Loads `size_of::<T>()` bytes at the given guest address.
     pub fn load<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> ProgramResult {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         debug_assert!(self.initialized);
-        match self.map_with_access_violation_handler(AccessType::Load, vm_addr, len) {
-            ProgramResult::Ok(host_addr) => {
-                let ptr = ptr::with_exposed_provenance::<T>(host_addr as usize);
-                ProgramResult::Ok(unsafe { ptr::read_unaligned(ptr) }.into())
-            }
-            err => err,
-        }
+        let ptr = match self.map_with_access_violation_handler(AccessType::Load, vm_addr, len) {
+            StableResult::Err(e) => return ProgramResult::Err(e),
+            StableResult::Ok(buf) => buf.ptr(),
+        };
+        ProgramResult::Ok(unsafe {
+            // SAFETY:
+            //
+            // Contract from `ptr::read_unaligned`: `src` must be valid for reads.
+            // Evidence: So long as `disable_address_translation` is not `true`, `map_*` only
+            // returns valid, allocated subslices of memory.
+            // Contract from `ptr::read_unaligned`: `src` must point to a properly initialized value
+            // of type T.
+            // Evidence: `T: Pod`.
+            ptr::read_unaligned::<T>(ptr.cast()).into()
+        })
     }
 
-    /// Store `value` at the given address.
-    #[inline]
+    /// Store `value` at the given guest address.
     pub fn store<T: Pod>(&mut self, value: T, vm_addr: u64) -> ProgramResult {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         debug_assert!(self.initialized);
-        match self.map_with_access_violation_handler(AccessType::Store, vm_addr, len) {
-            ProgramResult::Ok(host_addr) => {
-                let ptr = ptr::with_exposed_provenance_mut::<T>(host_addr as usize);
-                unsafe { ptr::write_unaligned(ptr, value) };
-                ProgramResult::Ok(host_addr)
-            }
-            err => err,
-        }
+        let ptr = match self.map_with_access_violation_handler(AccessType::Store, vm_addr, len) {
+            StableResult::Err(e) => return ProgramResult::Err(e),
+            StableResult::Ok(buf) => buf.ptr_mut(),
+        };
+        StableResult::Ok(unsafe {
+            // SAFETY:
+            //
+            // Contract from `ptr::read_unaligned`: `src` must be valid for reads.
+            // Evidence: So long as `disable_address_translation` is not `true`, `map_*` only
+            // returns valid, allocated subslices of memory.
+            // Contract from `ptr::read_unaligned`: `src` must point to a properly initialized value
+            // of type T.
+            // Evidence: `T: Pod`.
+            ptr::write_unaligned::<T>(ptr.cast(), value);
+            0
+        })
     }
 
     /// Returns the `MemoryRegion` which may contain the given address.
@@ -977,7 +1021,7 @@ impl MemoryMapping {
         access_type: AccessType,
         vm_addr: u64,
         len: u64,
-    ) -> ProgramResult {
+    ) -> EbpfError {
         let stack_frame = (vm_addr as i64)
             .saturating_sub(ebpf::MM_STACK_START as i64)
             .checked_div(self.stack_frame_size)
@@ -985,12 +1029,7 @@ impl MemoryMapping {
         if !self.sbpf_version.manual_stack_frame_bump()
             && (-1..self.max_call_depth.saturating_add(1)).contains(&stack_frame)
         {
-            ProgramResult::Err(EbpfError::StackAccessViolation(
-                access_type,
-                vm_addr,
-                len,
-                stack_frame,
-            ))
+            EbpfError::StackAccessViolation(access_type, vm_addr, len, stack_frame)
         } else {
             let region = self.find_region(vm_addr);
             let region_name = match vm_addr & (!ebpf::MM_BYTECODE_START.saturating_sub(1)) {
@@ -1003,12 +1042,7 @@ impl MemoryMapping {
                 ebpf::MM_INPUT_START => "input",
                 _ => "allocated",
             };
-            ProgramResult::Err(EbpfError::AccessViolation(
-                access_type,
-                vm_addr,
-                len,
-                region_name,
-            ))
+            EbpfError::AccessViolation(access_type, vm_addr, len, region_name)
         }
     }
 }
@@ -1247,13 +1281,19 @@ mod test {
         };
 
         assert_eq!(
-            m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 1).unwrap(),
-            mem1.as_ptr() as u64
+            m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
+                .unwrap()
+                .ptr()
+                .addr(),
+            mem1.as_ptr().addr()
         );
 
         assert_eq!(
-            m.map(AccessType::Store, ebpf::MM_REGION_SIZE, 1).unwrap(),
-            mem1.as_ptr() as u64
+            m.map(AccessType::Store, ebpf::MM_REGION_SIZE, 1)
+                .unwrap()
+                .ptr()
+                .addr(),
+            mem1.as_ptr().addr()
         );
 
         assert_error!(
@@ -1267,8 +1307,10 @@ mod test {
                 ebpf::MM_REGION_SIZE + mem1.len() as u64,
                 1,
             )
-            .unwrap(),
-            mem2.as_ptr() as u64
+            .unwrap()
+            .ptr()
+            .addr(),
+            mem2.as_ptr().addr()
         );
 
         assert_eq!(
@@ -1277,8 +1319,10 @@ mod test {
                 ebpf::MM_REGION_SIZE + (mem1.len() + mem2.len()) as u64,
                 1,
             )
-            .unwrap(),
-            mem3.as_ptr() as u64
+            .unwrap()
+            .ptr()
+            .addr(),
+            mem3.as_ptr().addr()
         );
 
         assert_eq!(
@@ -1287,8 +1331,10 @@ mod test {
                 ebpf::MM_REGION_SIZE + (mem1.len() + mem2.len() + mem3.len()) as u64,
                 1,
             )
-            .unwrap(),
-            mem4.as_ptr() as u64
+            .unwrap()
+            .ptr()
+            .addr(),
+            mem4.as_ptr().addr()
         );
 
         assert_error!(
@@ -1560,8 +1606,11 @@ mod test {
         };
 
         assert_eq!(
-            m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 1).unwrap(),
-            mem1.as_ptr() as u64
+            m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
+                .unwrap()
+                .ptr()
+                .addr(),
+            mem1.as_ptr().addr()
         );
 
         assert_eq!(
@@ -1570,8 +1619,10 @@ mod test {
                 ebpf::MM_REGION_SIZE + mem1.len() as u64,
                 1,
             )
-            .unwrap(),
-            mem2.as_ptr() as u64
+            .unwrap()
+            .ptr()
+            .addr(),
+            mem2.as_ptr().addr()
         );
 
         assert_error!(
@@ -1619,8 +1670,10 @@ mod test {
                 ebpf::MM_REGION_SIZE + mem1.len() as u64,
                 1,
             )
-            .unwrap(),
-            mem3.as_ptr() as u64
+            .unwrap()
+            .ptr()
+            .addr(),
+            mem3.as_ptr().addr()
         );
     }
 
@@ -1647,8 +1700,10 @@ mod test {
 
         assert_eq!(
             m.map(AccessType::Load, ebpf::MM_REGION_SIZE * 2, 1)
-                .unwrap(),
-            mem2.as_ptr() as u64
+                .unwrap()
+                .ptr()
+                .addr(),
+            mem2.as_ptr().addr()
         );
 
         // index > regions.len()
@@ -1694,8 +1749,10 @@ mod test {
 
         assert_eq!(
             m.map(AccessType::Load, ebpf::MM_REGION_SIZE * 2, 1)
-                .unwrap(),
-            mem3.as_ptr() as u64
+                .unwrap()
+                .ptr()
+                .addr(),
+            mem3.as_ptr().addr()
         );
     }
 
@@ -1728,13 +1785,17 @@ mod test {
 
             assert_eq!(
                 m.map_with_access_violation_handler(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
-                    .unwrap(),
-                original.as_ptr() as u64
+                    .unwrap()
+                    .ptr()
+                    .addr(),
+                original.as_ptr().addr()
             );
             assert_eq!(
                 m.map_with_access_violation_handler(AccessType::Store, ebpf::MM_REGION_SIZE, 1)
-                    .unwrap(),
-                copied.borrow().as_ptr() as u64
+                    .unwrap()
+                    .ptr()
+                    .addr(),
+                copied.borrow().as_ptr().addr()
             );
         }
     }
@@ -1767,8 +1828,11 @@ mod test {
             };
 
             assert_eq!(
-                m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 1).unwrap(),
-                original.as_ptr() as u64
+                m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
+                    .unwrap()
+                    .ptr()
+                    .addr(),
+                original.as_ptr().addr()
             );
 
             assert_eq!(m.load::<u8>(ebpf::MM_REGION_SIZE).unwrap(), 11);
