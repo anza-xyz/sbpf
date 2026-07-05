@@ -72,7 +72,7 @@ macro_rules! winapi_error_guard {
             let args = vec![$(format!("{:?}", $arg)),*];
             let errno = GetLastError();
             panic!(
-                "Libc calling {} {:?} returned error code {}",
+                "WinAPI calling {} {:?} returned error code {}",
                 stringify!($function),
                 args,
                 errno as i32,
