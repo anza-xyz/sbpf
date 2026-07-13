@@ -3992,3 +3992,23 @@ fn test_stack_gaps() {
         ProgramResult::Ok(77),
     );
 }
+
+#[test]
+fn test_direct_stores() {
+    let config = Config {
+        enable_address_translation: false,
+        ..Config::default()
+    };
+    let mut input = [0; 16];
+    test_interpreter_and_jit_asm!(
+        "
+        stdw [r1], 0x11223344
+        ldxdw r0, [r1]
+        exit
+        ",
+        config,
+        &raw mut input,
+        TestContextObject::new(3),
+        ProgramResult::Ok(0x11223344),
+    );
+}
