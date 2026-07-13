@@ -150,7 +150,7 @@ pub const TCP_SACK_ASM: &str = "
     mov r0, 0x1
     exit";
 
-pub const TCP_SACK_BIN: [u8; 360] = [
+pub static TCP_SACK_BIN: [u8; 360] = [
     0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
     0x71, 0x12, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, //
     0x71, 0x13, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, //
@@ -198,7 +198,7 @@ pub const TCP_SACK_BIN: [u8; 360] = [
     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
 ];
 
-pub const TCP_SACK_MATCH: [u8; 78] = [
+pub static TCP_SACK_MATCH: [u8; 78] = [
     0x00, 0x26, 0x62, 0x2f, 0x47, 0x87, 0x00, 0x1d, //
     0x60, 0xb3, 0x01, 0x84, 0x08, 0x00, 0x45, 0x00, //
     0x00, 0x40, 0xa8, 0xde, 0x40, 0x00, 0x40, 0x06, //
@@ -211,7 +211,7 @@ pub const TCP_SACK_MATCH: [u8; 78] = [
     0xca, 0x28, 0xa3, 0xc4, 0xcf, 0xd0, //
 ];
 
-pub const TCP_SACK_NOMATCH: [u8; 66] = [
+pub static TCP_SACK_NOMATCH: [u8; 66] = [
     0x00, 0x26, 0x62, 0x2f, 0x47, 0x87, 0x00, 0x1d, //
     0x60, 0xb3, 0x01, 0x84, 0x08, 0x00, 0x45, 0x00, //
     0x00, 0x40, 0xa8, 0xde, 0x40, 0x00, 0x40, 0x06, //
@@ -299,7 +299,7 @@ macro_rules! assert_error {
 
 #[macro_export]
 macro_rules! test_interpreter_and_jit {
-    (override_budget => $override_budget:expr, $executable:expr, $mem:tt, $context_object:expr $(,)?) => {{
+    (override_budget => $override_budget:expr, $executable:expr, $mem:expr, $context_object:expr $(,)?) => {{
         let expected_instruction_count = $context_object.get_remaining();
         #[allow(unused_mut)]
         let mut context_object = $context_object;
@@ -309,9 +309,10 @@ macro_rules! test_interpreter_and_jit {
         }
         let original_budget = context_object.remaining;
         $executable.verify::<RequisiteVerifier>().unwrap();
+        let host_buffer = solana_sbpf::memory_region::HostMemoryObject::host($mem);
+        let mut jit_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
         let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter) = {
-            let mut mem: [u8; _] = $mem;
-            let mem_region = MemoryRegion::new(&raw mut mem, ebpf::MM_INPUT_START);
+            let mem_region = MemoryRegion::new($mem, ebpf::MM_INPUT_START);
             let mut call_frames = vec![
                 solana_sbpf::vm::CallFrame::default();
                 $executable.get_config().max_call_depth
@@ -343,8 +344,12 @@ macro_rules! test_interpreter_and_jit {
             context_object.remaining = original_budget;
             #[allow(unused_mut)]
             let compilation_result = $executable.jit_compile();
-            let mut mem: [u8; _] = $mem;
-            let mem_region = MemoryRegion::new(&raw mut mem, ebpf::MM_INPUT_START);
+            use solana_sbpf::memory_region::HostBuffer;
+            let mem = match host_buffer {
+                HostBuffer::Immutable(_) => HostBuffer::Immutable(&raw const jit_input_mem[..]),
+                HostBuffer::Mutable(_) => HostBuffer::Mutable(&raw mut jit_input_mem[..]),
+            };
+            let mem_region = MemoryRegion::new(mem, ebpf::MM_INPUT_START);
             create_vm!(
                 vm,
                 &$executable,
@@ -386,6 +391,16 @@ macro_rules! test_interpreter_and_jit {
                         );
                         diverged = true;
                     }
+                    unsafe {
+                        let input_after_interp = host_buffer.ptr().as_ref().unwrap();
+                        if input_after_interp != jit_input_mem {
+                            println!(
+                                "input memory buffer is different: interp({:?}), jit({:?})",
+                                input_after_interp, jit_input_mem,
+                            );
+                            diverged = true;
+                        }
+                    }
                     if !compare_register_trace(&_trace_interpreter, trace_jit) {
                         let analysis = Analysis::from_executable(&$executable).unwrap();
                         let stdout = std::io::stdout();
@@ -412,7 +427,7 @@ macro_rules! test_interpreter_and_jit {
         }
         result_interpreter
     }};
-    ($executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
+    ($executable:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
         let expected_result = $expected_result;
         let result = test_interpreter_and_jit!(
             override_budget => false,

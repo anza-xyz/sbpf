@@ -452,7 +452,7 @@ fn test_ins(is_v2_only: bool, ins: String, prng: &mut SmallRng, cu: Option<u64>)
     test_interpreter_and_jit!(
         override_budget => true,
         executable,
-        input,
+        &raw mut input,
         TestContextObject::new(cu),
     );
 }
