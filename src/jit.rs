@@ -1547,15 +1547,19 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Routine for prologue of emit_internal_call()
         self.set_anchor(ANCHOR_INTERNAL_FUNCTION_CALL_PROLOGUE);
         self.emit_validate_instruction_count(None);
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 8 * (SCRATCH_REGS + 1) as i64, None)); // alloca
-        self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, RSP, X86IndirectAccess::OffsetIndexShift(0, RSP, 0))); // Save original REGISTER_SCRATCH
-        self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, REGISTER_SCRATCH, X86IndirectAccess::OffsetIndexShift(8 * (SCRATCH_REGS + 1) as i32, RSP, 0))); // Load return address
-        for (i, reg) in REGISTER_MAP.iter().skip(FIRST_SCRATCH_REG).take(SCRATCH_REGS).enumerate() {
-            self.emit_ins(X86Instruction::store(OperandSize::S64, *reg, RSP, X86IndirectAccess::OffsetIndexShift(8 * (SCRATCH_REGS - i + 1) as i32, RSP, 0))); // Push SCRATCH_REG
-        }
+        let reserved_space = 8 * SCRATCH_REGS as i32;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, reserved_space as i64, None)); // alloca
+        // We want to save all scratch registers into our caller's stack, which currently contains
+        // the `%rip` to which we got to return to later. We have to shift the %rip to be the last
+        // slot after our alloca for clobbers so we can return to the caller correctly.
+        // This instuction is conceptually the same as `mov {reserved_space}(%rsp), -8(%rsp); sub $8, %rsp`
+        self.emit_ins(X86Instruction::push(RSP, Some(X86IndirectAccess::OffsetIndexShift(reserved_space, RSP, 0))));
         // Push the caller's frame pointer. The code to restore it is emitted at the end of emit_internal_call().
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[FRAME_PTR_REG], RSP, X86IndirectAccess::OffsetIndexShift(8, RSP, 0)));
-        self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_SCRATCH, RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Push return address and restore original REGISTER_SCRATCH
+        // Push the scratch registers.
+        for (reg, i) in REGISTER_MAP.iter().skip(FIRST_SCRATCH_REG).take(SCRATCH_REGS).rev().zip(2..) {
+            self.emit_ins(X86Instruction::store(OperandSize::S64, *reg, RSP, X86IndirectAccess::OffsetIndexShift(8 * i, RSP, 0))); // Push SCRATCH_REG
+        }
         // Increase env.call_depth
         let call_depth_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::CallDepth));
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_PTR_TO_VM, 1, Some(call_depth_access))); // env.call_depth += 1;
