@@ -79,6 +79,9 @@ pub fn compare_register_trace(
     interpreter == jit
 }
 
+/// Convenience value to pass to the `test_interpreter_and_jit*` macros to indicate no input.
+pub const NO_INPUT: *const [u8] = std::ptr::slice_from_raw_parts(std::ptr::dangling(), 0);
+
 // Assembly code and data for tcp_sack testcases.
 
 pub const PROG_TCP_PORT_80: &str = "

@@ -32,10 +32,8 @@ use std::{fs::File, io::Read, sync::Arc};
 use test_utils::{
     assert_error, compare_register_trace, create_vm, syscalls, test_interpreter_and_jit,
     test_interpreter_and_jit_asm, test_interpreter_and_jit_elf, test_syscall_asm,
-    TestContextObject, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
+    TestContextObject, NO_INPUT, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
 };
-
-static NO_INPUT_MEM: [u8; 0] = [];
 
 // BPF_ALU32_LOAD : Arithmetic and Logic
 
@@ -46,7 +44,7 @@ fn test_mov32_imm() {
         add64 r10, 0
         mov32 r0, 1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Ok(1),
     );
@@ -55,7 +53,7 @@ fn test_mov32_imm() {
         add64 r10, 0
         mov32 r0, -1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Ok(0xffffffff),
     );
@@ -69,7 +67,7 @@ fn test_mov32_reg() {
         mov32 r1, 1
         mov32 r0, r1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1),
     );
@@ -79,7 +77,7 @@ fn test_mov32_reg() {
         mov32 r1, -1
         mov32 r0, r1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0xffffffff),
     );
@@ -92,7 +90,7 @@ fn test_mov64_imm() {
         add64 r10, 0
         mov64 r0, 1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Ok(1),
     );
@@ -101,7 +99,7 @@ fn test_mov64_imm() {
         add64 r10, 0
         mov64 r0, -1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Ok(0xffffffffffffffff),
     );
@@ -115,7 +113,7 @@ fn test_mov64_reg() {
         mov64 r1, 1
         mov64 r0, r1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1),
     );
@@ -125,7 +123,7 @@ fn test_mov64_reg() {
         mov64 r1, -1
         mov64 r0, r1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0xffffffffffffffff),
     );
@@ -143,7 +141,7 @@ fn test_bounce() {
         mov r9, r8
         mov r0, r9
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(8),
         ProgramResult::Ok(0x1),
     );
@@ -161,7 +159,7 @@ fn test_add32_sub32() {
         mov32 r1, 3
         sub32 r0, r1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(8),
         ProgramResult::Ok(5),
     );
@@ -179,7 +177,7 @@ fn test_add64_sub64() {
         mov32 r1, 3
         sub64 r0, r1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(8),
         ProgramResult::Ok(5),
     );
@@ -265,7 +263,7 @@ fn test_alu32_logic() {
         xor32 r0, 0x03
         xor32 r0, r2
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(22),
         ProgramResult::Ok(0x11),
     );
@@ -299,7 +297,7 @@ fn test_alu64_logic() {
         xor r0, 0x03
         xor r0, r2
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(24),
         ProgramResult::Ok(0x11),
     );
@@ -314,7 +312,7 @@ fn test_arsh32_high_shift() {
         lddw r1, 0x100000001
         arsh32 r0, r1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0x4),
     );
@@ -329,7 +327,7 @@ fn test_arsh32_imm() {
         lsh32 r0, 28
         arsh32 r0, 16
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0xffff8000),
     );
@@ -345,7 +343,7 @@ fn test_arsh32_reg() {
         lsh32 r0, 28
         arsh32 r0, r1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Ok(0xffff8000),
     );
@@ -362,7 +360,7 @@ fn test_arsh64() {
         mov32 r1, 5
         arsh r0, r1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(7),
         ProgramResult::Ok(0xfffffffffffffff8),
     );
@@ -377,7 +375,7 @@ fn test_lsh64_reg() {
         mov r7, 4
         lsh r0, r7
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0x10),
     );
@@ -392,7 +390,7 @@ fn test_rhs32_imm() {
         add r0, -1
         rsh32 r0, 8
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0x00ffffff),
     );
@@ -407,7 +405,7 @@ fn test_rsh64_reg() {
         mov r7, 4
         rsh r0, r7
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0x1),
     );
@@ -560,7 +558,7 @@ fn test_pqr_v0() {
         .unwrap();
         test_interpreter_and_jit!(
             executable,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(4),
             ProgramResult::Ok(expected_result),
         );
@@ -575,7 +573,7 @@ fn test_pqr_v0() {
         .unwrap();
         test_interpreter_and_jit!(
             executable,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(4),
             ProgramResult::Ok(expected_result),
         );
@@ -736,7 +734,7 @@ fn test_pqr_v2() {
         .unwrap();
         test_interpreter_and_jit!(
             executable,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(7),
             ProgramResult::Ok(expected_result),
         );
@@ -751,7 +749,7 @@ fn test_pqr_v2() {
         .unwrap();
         test_interpreter_and_jit!(
             executable,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(7),
             ProgramResult::Ok(expected_result),
         );
@@ -791,7 +789,7 @@ fn test_err_pqr_divide_by_zero() {
         .unwrap();
         test_interpreter_and_jit!(
             executable,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(3),
             ProgramResult::Err(EbpfError::DivideByZero),
         );
@@ -835,7 +833,7 @@ fn test_err_pqr_divide_overflow() {
         .unwrap();
         test_interpreter_and_jit!(
             executable,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(5),
             ProgramResult::Err(EbpfError::DivideOverflow),
         );
@@ -1083,7 +1081,7 @@ fn test_hor64() {
         hor64 r0, 0x01020304
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1122334400000000),
     );
@@ -1134,7 +1132,7 @@ fn test_err_ldxdw_nomem() {
         add64 r10, 0
         ldxdw r0, [r1+6]
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(2),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Load,
@@ -1448,7 +1446,7 @@ fn test_exit_capped() {
             add64 r10, 0
             exit",
             config,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(1),
             ProgramResult::Err(EbpfError::ExceededMaxInstructions),
         );
@@ -1468,7 +1466,7 @@ fn test_exit_without_value() {
             add64 r10, 0
             exit",
             config,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(2),
             ProgramResult::Ok(0x0),
         );
@@ -1489,7 +1487,7 @@ fn test_exit() {
             mov r0, 0
             exit",
             config,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(3),
             ProgramResult::Ok(0x0),
         );
@@ -1512,7 +1510,7 @@ fn test_early_exit() {
             mov r0, 4
             exit",
             config,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(3),
             ProgramResult::Ok(0x3),
         );
@@ -1529,7 +1527,7 @@ fn test_exit_to_nothing_is_capped() {
             call -2
         "##,
         Config::default(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExecutionOverrun),
     );
@@ -1544,7 +1542,7 @@ fn test_ja() {
         ja +1
         mov r0, 2
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1),
     );
@@ -1624,7 +1622,7 @@ fn test_conditional_jumps() {
             .unwrap();
             test_interpreter_and_jit!(
                 executable,
-                &raw const NO_INPUT_MEM,
+                NO_INPUT,
                 TestContextObject::new(6),
                 ProgramResult::Ok(expected_result as u64),
             );
@@ -1648,7 +1646,7 @@ fn test_stack1() {
         add r2, r1
         ldxdw r0, [r2-16]
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(10),
         ProgramResult::Ok(0xcd),
     );
@@ -1675,7 +1673,7 @@ fn test_stack2() {
         syscall bpf_gather_bytes
         xor r0, 0x2a2a2a2a
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (
             "bpf_mem_frob" => syscalls::SyscallMemFrob,
             "bpf_gather_bytes" => syscalls::SyscallGatherBytes,
@@ -1718,7 +1716,7 @@ fn test_string_stack() {
         jeq r1, r6, +1
         mov r0, 0x0
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (
             "bpf_str_cmp" => syscalls::SyscallStrCmp,
         ),
@@ -1744,7 +1742,7 @@ fn test_err_stack_out_of_bound() {
         stb [r10-0x1001], 0
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(1),
         ProgramResult::Err(EbpfError::StackAccessViolation(
             AccessType::Store,
@@ -1764,7 +1762,7 @@ fn test_err_stack_out_of_bound() {
         stb [r0], 0
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Err(EbpfError::StackAccessViolation(
             AccessType::Store,
@@ -1792,7 +1790,7 @@ fn test_dynamic_stack_frames_sbpfv1() {
         mov r0, r10
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
     );
@@ -1825,7 +1823,7 @@ fn test_dynamic_stack_frames_sbpfv1() {
         stb [r10], 0
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(12),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Store,
@@ -1847,7 +1845,7 @@ fn test_dynamic_stack_frames_sbpfv1() {
         add r10, 0
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(7),
         ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
     );
@@ -1863,7 +1861,7 @@ fn test_dynamic_stack_frames_sbpfv1() {
         mov r0, r10
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
     );
@@ -1880,7 +1878,7 @@ fn test_dynamic_stack_frames_sbpfv1() {
         exit
         ",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
     );
@@ -1914,7 +1912,7 @@ fn test_entrypoint_exit() {
             mov r0, 12
             exit",
             config,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(7),
             ProgramResult::Ok(42),
         );
@@ -1945,7 +1943,7 @@ fn test_stack_call_depth_tracking() {
             exit
             ",
             config.clone(),
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(8),
             ProgramResult::Ok(0),
         );
@@ -1966,7 +1964,7 @@ fn test_stack_call_depth_tracking() {
             exit
             ",
             config,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(4),
             ProgramResult::Err(EbpfError::CallDepthExceeded),
         );
@@ -2070,7 +2068,7 @@ fn test_bpf_to_bpf_scratch_registers() {
         mov64 r8, 0x00
         mov64 r9, 0x00
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(17),
         ProgramResult::Ok(0xFF),
     );
@@ -2087,7 +2085,7 @@ fn test_syscall_parameter_on_stack() {
         syscall bpf_syscall_string
         mov64 r0, 0x0
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (
             "bpf_syscall_string" => syscalls::SyscallString,
         ),
@@ -2111,7 +2109,7 @@ fn test_callx() {
         add64 r10, 0
         mov64 r0, 0x2A
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(10),
         ProgramResult::Ok(42),
     );
@@ -2130,7 +2128,7 @@ fn test_err_callx_oob_low() {
         callx r0
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::CallOutsideTextSegment),
     );
@@ -2144,7 +2142,7 @@ fn test_err_callx_oob_high() {
         lddw r0, 0x200000000
         callx r0
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::CallOutsideTextSegment),
     );
@@ -2158,7 +2156,7 @@ fn test_err_callx_oob_max() {
         lddw r0, 0xFFFFFFFFFFFFFFF8
         callx r0
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::CallOutsideTextSegment),
     );
@@ -2168,7 +2166,7 @@ fn test_err_callx_oob_max() {
 fn test_callx_unaligned_text_section() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/callx_unaligned.so",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(129),
         ProgramResult::Err(EbpfError::CallDepthExceeded),
@@ -2239,7 +2237,7 @@ fn test_err_reg_stack_depth() {
             callx r0
             exit",
             config,
-            &raw const NO_INPUT_MEM,
+            NO_INPUT,
             TestContextObject::new(4 * max_call_depth as u64),
             ProgramResult::Err(EbpfError::CallDepthExceeded),
         );
@@ -2265,7 +2263,7 @@ fn test_call_save() {
         or64 r0, r8
         or64 r0, r9
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (
             0 => syscalls::trash_registers,
         ),
@@ -2324,7 +2322,7 @@ fn test_syscall() {
         syscall bpf_syscall_u64
         mov64 r0, 0x0
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (
             "bpf_syscall_u64" => syscalls::SyscallU64,
         ),
@@ -2345,7 +2343,7 @@ fn test_call_gather_bytes() {
         mov r5, 5
         syscall bpf_gather_bytes
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (
             "bpf_gather_bytes" => syscalls::SyscallGatherBytes,
         ),
@@ -2456,7 +2454,7 @@ fn test_tight_infinite_loop_conditional() {
         add64 r10, 0
         jsge r0, r0, -1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2469,7 +2467,7 @@ fn test_tight_infinite_loop_unconditional() {
         add64 r10, 0
         ja -1
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2484,7 +2482,7 @@ fn test_tight_infinite_recursion() {
         mov64 r3, 0x41414141
         call entrypoint
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2504,7 +2502,7 @@ fn test_tight_infinite_recursion_callx() {
         add64 r10, 0
         callx r8
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(9),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2562,7 +2560,7 @@ fn test_err_non_terminate_capped() {
         add64 r6, 0x1
         ja -0x8
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(8),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2578,7 +2576,7 @@ fn test_err_non_terminate_capped() {
         add64 r6, 0x1
         ja -0x8
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(1001),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2594,7 +2592,7 @@ fn test_err_capped_before_exception() {
         div64 r1, r2
         mov64 r0, 0x0
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2607,7 +2605,7 @@ fn test_err_capped_before_exception() {
         callx r2
         mov64 r0, 0x0
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2627,7 +2625,7 @@ fn test_err_exit_capped() {
         add64 r10, 0
         exit
         ",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(7),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2644,7 +2642,7 @@ fn test_err_exit_capped() {
         mov r0, r0
         exit
         ",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(8),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2658,7 +2656,7 @@ fn test_err_exit_capped() {
         mov r0, r0
         exit
         ",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -2684,7 +2682,7 @@ fn test_far_jumps() {
         or64 r8, 0x18
         callx r8
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(11),
         ProgramResult::Ok(0),
     );
@@ -2710,7 +2708,7 @@ fn test_err_call_unresolved() {
         mov64 r0, 0x0
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(7),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
@@ -2725,7 +2723,7 @@ fn test_syscall_static() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/syscall_static.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (
             "log" => syscalls::SyscallString,
         ),
@@ -2743,7 +2741,7 @@ fn test_syscall_reloc_64_32() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/syscall_reloc_64_32_sbpfv0.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (
             "log" => syscalls::SyscallString,
         ),
@@ -2759,7 +2757,7 @@ fn test_reloc_64_64_sbpfv0() {
     //   [ 1] .text             PROGBITS        0000000000000120 000120 000018 00  AX  0   0  8
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_64_sbpfv0.so",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(2),
         ProgramResult::Ok(ebpf::MM_BYTECODE_START + 0x120),
@@ -2772,7 +2770,7 @@ fn test_reloc_64_64() {
     // address of the entrypoint.
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_64.so",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(2),
         ProgramResult::Ok(ebpf::MM_BYTECODE_START),
@@ -2792,7 +2790,7 @@ fn test_reloc_64_relative_sbpfv0() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_relative_sbpfv0.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(2),
         ProgramResult::Ok(ebpf::MM_BYTECODE_START + 0x138),
@@ -2810,7 +2808,7 @@ fn test_reloc_64_relative() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_relative.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(2),
         ProgramResult::Ok(ebpf::MM_RODATA_START),
@@ -2831,7 +2829,7 @@ fn test_reloc_64_relative_data() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_relative_data.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(3),
         ProgramResult::Ok(ebpf::MM_RODATA_START),
@@ -2858,7 +2856,7 @@ fn test_reloc_64_relative_data_sbpfv0() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/reloc_64_relative_data_sbpfv0.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(3),
         ProgramResult::Ok(ebpf::MM_BYTECODE_START + 0x140),
@@ -2875,7 +2873,7 @@ fn test_load_elf_rodata_sbpfv0() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/rodata_section_sbpfv0.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(3),
         ProgramResult::Ok(42),
@@ -2892,7 +2890,7 @@ fn test_load_elf_rodata() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/rodata_section.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(3),
         ProgramResult::Ok(42),
@@ -2911,7 +2909,7 @@ fn test_struct_func_pointer_sbpfv0() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/struct_func_pointer_sbpfv0.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(2),
         ProgramResult::Ok(0x102030405060708),
@@ -2922,7 +2920,7 @@ fn test_struct_func_pointer_sbpfv0() {
 fn test_strict_header() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/strict_header.so",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(5),
         ProgramResult::Ok(42),
@@ -2941,7 +2939,7 @@ fn test_struct_func_pointer() {
     test_interpreter_and_jit_elf!(
         "tests/elfs/struct_func_pointer.so",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (),
         TestContextObject::new(2),
         ProgramResult::Ok(0x102030405060708),
@@ -2965,7 +2963,7 @@ fn test_lmul_loop() {
         add r1, -1
         jne r1, 0x0, -3
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(38),
         ProgramResult::Ok(0x75db9c97),
     );
@@ -2992,7 +2990,7 @@ fn test_prime() {
         mov r0, 0x0
         jne r4, 0x0, -10
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(656),
         ProgramResult::Ok(0x1),
     );
@@ -3284,7 +3282,7 @@ fn test_call_imm_does_not_dispatch_syscalls() {
         add64 r10, 0
         mov r0, 42
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         (
             "bpf_syscall_string" => syscalls::SyscallString,
         ),
@@ -3303,7 +3301,7 @@ fn test_callx_unsupported_instruction_and_exceeded_max_instructions() {
         add64 r7, 0
         callx r5
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Err(EbpfError::CallOutsideTextSegment),
     );
@@ -3324,7 +3322,7 @@ fn test_capped_after_callx() {
         add64 r10, 0
         mov64 r0, 0x2A
         exit",
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -3345,7 +3343,7 @@ fn test_err_fixed_stack_out_of_bound() {
         stb [r10-0x4000], 0
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(2),
         ProgramResult::Err(EbpfError::AccessViolation(
             AccessType::Store,
@@ -3367,7 +3365,7 @@ fn test_execution_overrun() {
         add64 r10, 0
         add r1, 0",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExecutionOverrun),
     );
@@ -3376,7 +3374,7 @@ fn test_execution_overrun() {
         add64 r10, 0
         add r1, 0",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(2),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -3385,7 +3383,7 @@ fn test_execution_overrun() {
         add64 r10, 0
         add r1, 0",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(1),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -3404,7 +3402,7 @@ fn test_mov32_reg_truncating() {
         mov32 r0, r1
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0xffffffff),
     );
@@ -3421,7 +3419,7 @@ fn test_lddw() {
         add64 r10, 0
         lddw r0, 0x1122334455667788",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExecutionOverrun),
     );
@@ -3431,7 +3429,7 @@ fn test_lddw() {
         lddw r0, 0x1122334455667788
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Ok(0x1122334455667788),
     );
@@ -3441,7 +3439,7 @@ fn test_lddw() {
         lddw r0, 0x0000000080000000
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Ok(0x80000000),
     );
@@ -3460,7 +3458,7 @@ fn test_lddw() {
         exit
         ",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(10),
         ProgramResult::Ok(0x2),
     );
@@ -3474,7 +3472,7 @@ fn test_lddw() {
         lddw r0, 0x1122334455667788
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -3488,7 +3486,7 @@ fn test_lddw() {
         lddw r0, 0x1122334455667788
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
@@ -3505,7 +3503,7 @@ fn test_lddw() {
         exit
         ",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
@@ -3521,7 +3519,7 @@ fn test_lddw() {
         exit
         ",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::UnsupportedInstruction),
     );
@@ -3534,7 +3532,7 @@ fn test_lddw() {
         exit
         ",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
     );
@@ -3621,7 +3619,7 @@ fn test_neg() {
         neg32 r0
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0xfffffffe),
     );
@@ -3632,7 +3630,7 @@ fn test_neg() {
         neg r0
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0xfffffffffffffffe),
     );
@@ -3643,7 +3641,7 @@ fn test_neg() {
         sub32 r0, 1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(2),
     );
@@ -3654,7 +3652,7 @@ fn test_neg() {
         sub r0, 1
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(2),
     );
@@ -3679,7 +3677,7 @@ fn test_callx_imm() {
         mov64 r0, 0x2A
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(9),
         ProgramResult::Ok(42),
     );
@@ -3698,7 +3696,7 @@ fn test_mul() {
         mul32 r0, 4
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0xc),
     );
@@ -3710,7 +3708,7 @@ fn test_mul() {
         mul32 r0, r1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0xc),
     );
@@ -3722,7 +3720,7 @@ fn test_mul() {
         mul32 r0, r1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0x4),
     );
@@ -3733,7 +3731,7 @@ fn test_mul() {
         mul r0, 4
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x100000004),
     );
@@ -3745,7 +3743,7 @@ fn test_mul() {
         mul r0, r1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0x100000004),
     );
@@ -3756,7 +3754,7 @@ fn test_mul() {
         mul32 r0, 4
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0xFFFFFFFFFFFFFFFC),
     );
@@ -3776,7 +3774,7 @@ fn test_div() {
         div32 r0, r1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0x3),
     );
@@ -3787,7 +3785,7 @@ fn test_div() {
         div32 r0, 4
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x3),
     );
@@ -3799,7 +3797,7 @@ fn test_div() {
         div32 r0, r1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0x3),
     );
@@ -3811,7 +3809,7 @@ fn test_div() {
         div r0, 4
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(0x300000000),
     );
@@ -3824,7 +3822,7 @@ fn test_div() {
         div r0, r1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Ok(0x300000000),
     );
@@ -3836,7 +3834,7 @@ fn test_div() {
         div r0, r1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::DivideByZero),
     );
@@ -3848,7 +3846,7 @@ fn test_div() {
         div32 r0, r1
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::DivideByZero),
     );
@@ -3869,7 +3867,7 @@ fn test_mod() {
         mod32 r0, r1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(6),
         ProgramResult::Ok(0x5),
     );
@@ -3880,7 +3878,7 @@ fn test_mod() {
         mod32 r0, 3
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x0),
     );
@@ -3897,7 +3895,7 @@ fn test_mod() {
         mod r0, 0x658f1778
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(10),
         ProgramResult::Ok(0x30ba5a04),
     );
@@ -3909,7 +3907,7 @@ fn test_mod() {
         mod r0, r1
         exit",
         config.clone(),
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::DivideByZero),
     );
@@ -3921,7 +3919,7 @@ fn test_mod() {
         mod32 r0, r1
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::DivideByZero),
     );
@@ -3965,7 +3963,7 @@ fn test_stack_gaps() {
         ldxdw r0, [r10 - 4088]
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(1),
         ProgramResult::Err(EbpfError::StackAccessViolation(
             AccessType::Store,
@@ -3989,7 +3987,7 @@ fn test_stack_gaps() {
         ldxdw r0, [r10 - 4088]
         exit",
         config,
-        &raw const NO_INPUT_MEM,
+        NO_INPUT,
         TestContextObject::new(5),
         ProgramResult::Ok(77),
     );
