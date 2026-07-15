@@ -110,6 +110,7 @@ fn jmp_reg_str(name: &str, insn: &ebpf::Insn, cfg_nodes: &BTreeMap<usize, CfgNod
 
 /// Disassemble an eBPF instruction
 #[rustfmt::skip]
+#[allow(clippy::needless_late_init)] // FIXME: convert to expect on rustc >= 1.98.0
 pub fn disassemble_instruction<C: ContextObject>(
     insn: &ebpf::Insn,
     pc: usize,
@@ -260,7 +261,7 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::JSLT32_REG  if sbpf_version.enable_jmp32() => { name = "jslt32"; desc = jmp_reg_str(name, insn, cfg_nodes); },
         ebpf::JSLE32_IMM  if sbpf_version.enable_jmp32() => { name = "jsle32"; desc = jmp_imm_str(name, insn, cfg_nodes); },
         ebpf::JSLE32_REG  if sbpf_version.enable_jmp32() => { name = "jsle32"; desc = jmp_reg_str(name, insn, cfg_nodes); },
-        
+
         // BPF_JMP64 class
         ebpf::JA         => {
             name = "ja";
