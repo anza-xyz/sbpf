@@ -314,8 +314,15 @@ macro_rules! test_interpreter_and_jit {
         $executable.verify::<RequisiteVerifier>().unwrap();
         let host_buffer = solana_sbpf::memory_region::HostMemoryObject::host($mem);
         let mut jit_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
+        let address_translation = $executable.get_config().enable_address_translation;
+        let (interp_input_start, jit_input_start) = if !address_translation {
+            (host_buffer.ptr().addr() as u64, jit_input_mem.as_ptr().addr() as u64)
+        } else {
+            (ebpf::MM_INPUT_START, ebpf::MM_INPUT_START)
+        };
+
         let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter) = {
-            let mem_region = MemoryRegion::new($mem, ebpf::MM_INPUT_START);
+            let mem_region = MemoryRegion::new(host_buffer, ebpf::MM_INPUT_START);
             let mut call_frames = vec![
                 solana_sbpf::vm::CallFrame::default();
                 $executable.get_config().max_call_depth
@@ -329,7 +336,7 @@ macro_rules! test_interpreter_and_jit {
                 vec![mem_region],
                 None
             );
-            vm.registers[1] = ebpf::MM_INPUT_START;
+            vm.registers[1] = interp_input_start;
             let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
                 &$executable,
                 &mut $crate::solana_sbpf::vm::ExecutionMode::Interpreted,
@@ -365,12 +372,13 @@ macro_rules! test_interpreter_and_jit {
             match compilation_result {
                 Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
-                    vm.registers[1] = ebpf::MM_INPUT_START;
+                    vm.registers[1] = jit_input_start;
                     let (instruction_count_jit, result_jit) = vm.execute_program(
                         &$executable,
                         &mut $crate::solana_sbpf::vm::ExecutionMode::Jit,
                         &mut []
                     );
+
                     let trace_jit = &vm.register_trace;
                     let mut diverged = false;
                     if format!("{:?}", result_interpreter) != format!("{:?}", result_jit) {
@@ -398,13 +406,13 @@ macro_rules! test_interpreter_and_jit {
                         let input_after_interp = host_buffer.ptr().as_ref().unwrap();
                         if input_after_interp != jit_input_mem {
                             println!(
-                                "input memory buffer is different: interp({:?}), jit({:?})",
+                                "input memory buffer is different: interp({:x?}), jit({:x?})",
                                 input_after_interp, jit_input_mem,
                             );
                             diverged = true;
                         }
                     }
-                    if !compare_register_trace(&_trace_interpreter, trace_jit) {
+                    if address_translation && !compare_register_trace(&_trace_interpreter, trace_jit) {
                         let analysis = Analysis::from_executable(&$executable).unwrap();
                         let stdout = std::io::stdout();
                         analysis

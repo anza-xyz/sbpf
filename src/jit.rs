@@ -23,7 +23,7 @@ use rand::{
     rngs::SmallRng,
     SeedableRng,
 };
-use std::{fmt::Debug, mem, ptr};
+use std::{convert::TryFrom, fmt::Debug, mem, ptr};
 
 use crate::{
     ebpf::{self, FIRST_SCRATCH_REG, FRAME_PTR_REG, INSN_SIZE, SCRATCH_REGS},
@@ -1180,20 +1180,22 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
+        let value_stack_slot = X86IndirectAccess::OffsetIndexShift(-96, RSP, 0);
 
-        let stack_slot_of_value_to_store = X86IndirectAccess::OffsetIndexShift(-96, RSP, 0);
-        match value {
-            Some(Value::Register(reg)) => {
-                self.emit_ins(X86Instruction::store(OperandSize::S64, reg, RSP, stack_slot_of_value_to_store));
+        if self.config.enable_address_translation {
+            match value {
+                Some(Value::Register(reg)) => {
+                    self.emit_ins(X86Instruction::store(OperandSize::S64, reg, RSP, value_stack_slot));
+                }
+                Some(Value::Constant64(constant, user_provided)) => {
+                    debug_assert!(user_provided);
+                    // First half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
+                    let lower_key = self.immediate_value_key as i32 as i64;
+                    self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, constant.wrapping_sub(lower_key)));
+                    self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, RSP, value_stack_slot));
+                }
+                _ => {}
             }
-            Some(Value::Constant64(constant, user_provided)) => {
-                debug_assert!(user_provided);
-                // First half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
-                let lower_key = self.immediate_value_key as i32 as i64;
-                self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, constant.wrapping_sub(lower_key)));
-                self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, RSP, stack_slot_of_value_to_store));
-            }
-            _ => {}
         }
 
         match vm_addr {
@@ -1233,15 +1235,31 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 _ => unreachable!(),
             }
         } else {
-            self.emit_ins(X86Instruction::xchg(OperandSize::S64, RSP, REGISTER_MAP[0], Some(stack_slot_of_value_to_store))); // Save REGISTER_MAP[0] and retrieve value to store
-            match len {
-                1 => self.emit_ins(X86Instruction::store(OperandSize::S8, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                2 => self.emit_ins(X86Instruction::store(OperandSize::S16, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                4 => self.emit_ins(X86Instruction::store(OperandSize::S32, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                8 => self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[0], REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
+            // address in r11, value either in register or a constant...
+            match value {
+                Some(Value::Register(reg)) => {
+                    match len {
+                        1 => self.emit_ins(X86Instruction::store(OperandSize::S8, reg, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
+                        2 => self.emit_ins(X86Instruction::store(OperandSize::S16, reg, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
+                        4 => self.emit_ins(X86Instruction::store(OperandSize::S32, reg, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
+                        8 => self.emit_ins(X86Instruction::store(OperandSize::S64, reg, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
+                        _ => unreachable!(),
+                    }
+                }
+                Some(Value::Constant64(val, _)) => {
+                    match len {
+                        1 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S8,  REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
+                        2 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S16, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
+                        4 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S32, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
+                        8 => {
+                            assert!(i32::try_from(val).is_ok(), "current implementation of untranslated store does not expect to deal with imm64!");
+                            self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val))
+                        },
+                        _ => unreachable!(),
+                    }
+                }
                 _ => unreachable!(),
             }
-            self.emit_ins(X86Instruction::xchg(OperandSize::S64, RSP, REGISTER_MAP[0], Some(stack_slot_of_value_to_store))); // Restore REGISTER_MAP[0]
         }
     }
 

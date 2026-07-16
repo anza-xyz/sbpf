@@ -3992,3 +3992,35 @@ fn test_stack_gaps() {
         ProgramResult::Ok(77),
     );
 }
+
+#[test]
+fn test_direct_stores() {
+    for enable_address_translation in [false, true] {
+        let config = Config {
+            enable_address_translation,
+            ..Config::default()
+        };
+        let mut input = [0; 16];
+        println!("address translation enabled: {enable_address_translation}");
+        test_interpreter_and_jit_asm!(
+            "
+            stb [r1], 0x11
+            sth [r1 + 1], 0x3322
+            stw [r1 + 3], 0x77665544
+            stdw [r1 + 7], -1146447480
+            ldxdw r0, [r1]
+            ldxw r5, [r1+8]
+            ldxh r6, [r1+12]
+            ldxb r7, [r1+14]
+            add64 r0, r5
+            add64 r0, r6
+            add64 r0, r7
+            exit
+            ",
+            config,
+            &raw mut input,
+            TestContextObject::new(12),
+            ProgramResult::Ok(0x8877665643efcda8),
+        );
+    }
+}
