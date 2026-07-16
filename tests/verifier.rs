@@ -439,7 +439,9 @@ fn test_verifier_err_all_shift_overflows() {
         let result = executable.verify::<RequisiteVerifier>();
         match expected {
             Ok(()) => assert!(result.is_ok()),
-            Err(overflow_msg) => assert_error!(result, "VerifierError({overflow_msg})"),
+            Err(overflow_msg) => {
+                assert_error!(result, "VerifierError({overflow_msg})");
+            }
         }
     }
 }
