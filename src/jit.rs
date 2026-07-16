@@ -1583,6 +1583,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Routine for emit_internal_call(Value::Register())
         // Inputs: Guest current pc in X86IndirectAccess::OffsetIndexShift(-16, RSP, 0), Guest target address in REGISTER_SCRATCH
         // Outputs: Guest current pc in X86IndirectAccess::OffsetIndexShift(-16, RSP, 0), Guest target pc in REGISTER_SCRATCH, Host target address in RIP
+        // Clobbers: X86IndirectAccess::OffsetIndexShift(-8, RSP, 0) and X86IndirectAccess::OffsetIndexShift(-24, RSP, 0)
         self.set_anchor(ANCHOR_INTERNAL_FUNCTION_CALL_REG);
         self.emit_ins(X86Instruction::push(REGISTER_MAP[0], None));
         // Calculate offset relative to program_vm_addr
@@ -1612,13 +1613,12 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter -= 1;
         self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += guest_target_pc;
         // Offset host_target_address by self.result.text_section
-        self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, REGISTER_SCRATCH, MM0));
-        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.result.text_section.as_ptr() as i64)); // REGISTER_SCRATCH = self.result.text_section;
-        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_MAP[0], None)); // host_target_address += self.result.text_section;
-        self.emit_ins(X86Instruction::mov_mmx(OperandSize::S64, MM0, REGISTER_SCRATCH));
+        self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[0], RSP, X86IndirectAccess::OffsetIndexShift(-16, RSP, 0)));
+        self.emit_ins(X86Instruction::load_immediate(REGISTER_MAP[0], self.result.text_section.as_ptr() as i64)); // RAX = self.result.text_section;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_MAP[0], RSP, Some(X86IndirectAccess::OffsetIndexShift(-16, RSP, 0)))); // host_target_address += self.result.text_section;
         // Restore the clobbered REGISTER_MAP[0]
-        self.emit_ins(X86Instruction::xchg(OperandSize::S64, REGISTER_MAP[0], RSP, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0)))); // Swap REGISTER_MAP[0] and host_target_address
-        self.emit_ins(X86Instruction::return_near()); // Tail call to host_target_address
+        self.emit_ins(X86Instruction::pop(REGISTER_MAP[0]));
+        self.emit_ins(X86Instruction::jump_reg(RSP, Some(X86IndirectAccess::OffsetIndexShift(-24, RSP, 0)))); // Tail call to host_target_address
 
         // Translates a vm memory address to a host memory address
         let lower_key = self.immediate_value_key as i32 as i64;
