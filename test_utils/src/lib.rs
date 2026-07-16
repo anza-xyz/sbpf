@@ -406,7 +406,7 @@ macro_rules! test_interpreter_and_jit {
                         let input_after_interp = host_buffer.ptr().as_ref().unwrap();
                         if input_after_interp != jit_input_mem {
                             println!(
-                                "input memory buffer is different: interp({:?}), jit({:?})",
+                                "input memory buffer is different: interp({:x?}), jit({:x?})",
                                 input_after_interp, jit_input_mem,
                             );
                             diverged = true;

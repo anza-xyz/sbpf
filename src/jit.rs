@@ -23,7 +23,7 @@ use rand::{
     rngs::SmallRng,
     SeedableRng,
 };
-use std::{fmt::Debug, mem, ptr};
+use std::{convert::TryFrom, fmt::Debug, mem, ptr};
 
 use crate::{
     ebpf::{self, FIRST_SCRATCH_REG, FRAME_PTR_REG, INSN_SIZE, SCRATCH_REGS},
@@ -1235,6 +1235,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 _ => unreachable!(),
             }
         } else {
+            // address in r11, value either in register or a constant...
             match value {
                 Some(Value::Register(reg)) => {
                     match len {
@@ -1250,11 +1251,14 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                         1 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S8,  REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
                         2 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S16, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
                         4 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S32, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
-                        8 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
+                        8 => {
+                            assert!(i32::try_from(val).is_ok(), "current implementation of untranslated store does not expect to deal with imm64!");
+                            self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val))
+                        },
                         _ => unreachable!(),
                     }
                 }
-                _ => {},
+                _ => unreachable!(),
             }
         }
     }
