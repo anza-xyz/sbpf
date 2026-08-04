@@ -971,7 +971,9 @@ impl<C: ContextObject> Executable<C> {
                 return Err(ElfError::ValueOutOfBounds);
             }
 
-            let mut ro_section = vec![0; buf_len];
+            #[expect(clippy::slow_vector_initialization)]
+            let mut ro_section = Vec::with_capacity(buf_len);
+            ro_section.resize(buf_len, 0);
             for (section_addr, slice) in ro_slices.iter() {
                 let buf_offset_start = section_addr.saturating_sub(lowest_addr);
                 ro_section[buf_offset_start..buf_offset_start.saturating_add(slice.len())]
