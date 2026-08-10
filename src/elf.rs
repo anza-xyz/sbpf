@@ -702,7 +702,7 @@ impl<C: ContextObject> Executable<C> {
         let text_section = get_section(&elf, b".text")?;
         let text_section_vaddr = text_section.sh_addr.saturating_add(ebpf::MM_REGION_SIZE);
         if (config.reject_broken_elfs && text_section.sh_addr != text_section.sh_offset)
-            || text_section_vaddr > ebpf::MM_STACK_START
+            || text_section_vaddr >= ebpf::MM_STACK_START
         {
             return Err(ElfError::ValueOutOfBounds);
         }
