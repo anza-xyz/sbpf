@@ -18,6 +18,9 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
         rust: [stable, beta, nightly]
+    env:
+      # Trumps rust-toolchain.toml
+      RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
     steps:
     - uses: actions/checkout@v1
     - name: Setup Rust (rustup)
@@ -69,6 +72,8 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     steps:
     - uses: actions/checkout@v1
     - name: Setup Rust (rustup)
