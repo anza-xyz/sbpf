@@ -45,14 +45,22 @@ pub enum VerifierTestError {
 
 struct TautologyVerifier {}
 impl Verifier for TautologyVerifier {
-    fn verify(_prog: &[u8], _sbpf_version: SBPFVersion) -> std::result::Result<(), VerifierError> {
+    fn verify<T>(
+        _prog: &[u8],
+        _sbpf_version: SBPFVersion,
+        _syscall_registry: &FunctionRegistry<T>,
+    ) -> std::result::Result<(), VerifierError> {
         Ok(())
     }
 }
 
 struct ContradictionVerifier {}
 impl Verifier for ContradictionVerifier {
-    fn verify(_prog: &[u8], _sbpf_version: SBPFVersion) -> std::result::Result<(), VerifierError> {
+    fn verify<T>(
+        _prog: &[u8],
+        _sbpf_version: SBPFVersion,
+        _syscall_registry: &FunctionRegistry<T>,
+    ) -> std::result::Result<(), VerifierError> {
         Err(VerifierError::NoProgram)
     }
 }
