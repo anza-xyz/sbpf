@@ -452,15 +452,14 @@ impl Verifier for LocalVerifier {
                     insn_ptr += 1;
                 }
 
-                ebpf::CALL_IMM if insn.src == 0 => {
-                    if syscall_registry.lookup_by_key(insn.imm as u32).is_none() {
-                        return Err(VerifierError::InvalidSyscall(insn.imm as u32));
-                    }
+                ebpf::CALL_IMM
+                    if insn.src == 0
+                        && syscall_registry.lookup_by_key(insn.imm as u32).is_none() =>
+                {
+                    return Err(VerifierError::InvalidSyscall(insn.imm as u32));
                 }
-                ebpf::CALL_IMM if insn.src == 1 => {
-                    if insn.imm == -1 {
-                        return Err(VerifierError::InvalidFunction(insn_ptr));
-                    }
+                ebpf::CALL_IMM if insn.src == 1 && insn.imm == -1 => {
+                    return Err(VerifierError::InvalidFunction(insn_ptr));
                 }
 
                 _ => (),
