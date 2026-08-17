@@ -29,10 +29,11 @@ use solana_sbpf::{
     ebpf,
     elf::Executable,
     program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    verifier::{RequisiteVerifier, Verifier, VerifierError},
+    verifier::{LocalVerifier, RequisiteVerifier, Verifier, VerifierError},
     vm::Config,
 };
 use std::sync::Arc;
+use test_utils::syscalls::SyscallU64;
 use test_utils::{assert_error, create_vm, syscalls, TestContextObject};
 use thiserror::Error;
 
@@ -489,5 +490,75 @@ fn exit() {
     )
     .unwrap();
     let result = executable.verify::<RequisiteVerifier>();
+    assert!(result.is_ok());
+}
+
+#[test]
+fn local_verifier_call_negative() {
+    let prog = &[
+        0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
+        0x18, 0x07, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, // lddw r7, 0x8000
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // --
+        0x85, 0x10, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, // call -1
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+    ];
+
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        prog,
+        Arc::new(BuiltinProgram::new_loader(Config::default())),
+        SBPFVersion::V3,
+        FunctionRegistry::default(),
+    )
+    .unwrap();
+
+    let result = executable.verify::<LocalVerifier>();
+    assert_error!(result, "VerifierError(InvalidFunction(3))");
+}
+
+#[test]
+fn local_verifier_invalid_syscall() {
+    let prog = &[
+        0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
+        0x18, 0x07, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, // lddw r7, 0x8000
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // --
+        0x85, 0x00, 0x00, 0x00, 0x93, 0xd1, 0x1b, 0x00, // call 0x1bd193
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+    ];
+
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        prog,
+        Arc::new(BuiltinProgram::new_loader(Config::default())),
+        SBPFVersion::V3,
+        FunctionRegistry::default(),
+    )
+    .unwrap();
+
+    let result = executable.verify::<LocalVerifier>();
+    std::println!("result: {:?}", result);
+    assert_error!(result, "VerifierError(InvalidSyscall(1823123))");
+}
+
+#[test]
+fn local_verifier_valid_program() {
+    let prog = &[
+        0x07, 0x0a, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r10, 0
+        0x18, 0x07, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, // lddw r7, 0x8000
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // --
+        0x85, 0x00, 0x00, 0x00, 0xfe, 0xc3, 0xf5, 0x6b, // call 0x1bd193
+        0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // exit
+    ];
+
+    let mut loader = BuiltinProgram::new_loader(Config::default());
+    SyscallU64::register(&mut loader, "log").unwrap();
+
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        prog,
+        Arc::new(loader),
+        SBPFVersion::V3,
+        FunctionRegistry::default(),
+    )
+    .unwrap();
+
+    let result = executable.verify::<LocalVerifier>();
     assert!(result.is_ok());
 }
