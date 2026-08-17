@@ -7,7 +7,7 @@ use solana_sbpf::{
     elf_parser::{
         consts::{ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFOSABI_NONE, EM_BPF, ET_REL},
         types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr},
-        Elf64, ElfParserError, SECTION_NAME_LENGTH_MAXIMUM,
+        Elf64, ElfParserError, DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM, SECTION_NAME_LENGTH_MAXIMUM,
     },
     memory_region::{AccessType, MemoryMapping},
     program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
@@ -715,5 +715,70 @@ fn test_long_section_name() {
             .get(0..SECTION_NAME_LENGTH_MAXIMUM)
             .unwrap(),
         SECTION_NAME_LENGTH_MAXIMUM
+    );
+}
+
+fn loader_with_labels() -> Arc<BuiltinProgram<TestContextObject>> {
+    let mut loader = BuiltinProgram::new_loader(Config {
+        enable_symbol_and_section_labels: true,
+        ..Config::default()
+    });
+    syscalls::SyscallString::register(&mut loader, "log").unwrap();
+    syscalls::SyscallU64::register(&mut loader, "log_64").unwrap();
+    Arc::new(loader)
+}
+
+/// Asserts that the label over `SYMBOL_NAME_LENGTH_MAXIMUM` is kept and the one
+/// over `DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM` is skipped.
+fn assert_label_lengths(executable: &ElfExecutable) {
+    let lengths: Vec<usize> = executable
+        .get_function_registry()
+        .iter()
+        .map(|(_key, (name, _pc))| name.len())
+        .collect();
+    assert!(lengths.iter().any(|length| *length > 64));
+    assert!(lengths
+        .iter()
+        .all(|length| *length <= DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM));
+}
+
+#[test]
+fn test_long_symbol_name_lenient() {
+    let elf_bytes = std::fs::read("tests/elfs/long_symbol_name_sbpfv0.so").unwrap();
+    let executable = ElfExecutable::load(&elf_bytes, loader_with_labels()).unwrap();
+    assert!(executable
+        .get_function_registry()
+        .lookup_by_name(b"entrypoint")
+        .is_some());
+    assert_label_lengths(&executable);
+}
+
+#[test]
+fn test_long_symbol_name_strict() {
+    let elf_bytes = std::fs::read("tests/elfs/long_symbol_name.so").unwrap();
+    let executable = ElfExecutable::load(&elf_bytes, loader_with_labels()).unwrap();
+    assert!(executable
+        .get_function_registry()
+        .lookup_by_name(b"entrypoint")
+        .is_some());
+    assert_label_lengths(&executable);
+}
+
+#[test]
+fn test_stripped_elf_labels() {
+    // elfs.sh strips this one, which leaves an empty .strtab without a .symtab.
+    let elf_bytes = std::fs::read("tests/elfs/relative_call.so").unwrap();
+    ElfExecutable::load(&elf_bytes, loader_with_labels()).unwrap();
+}
+
+#[test]
+fn test_long_dynamic_symbol_name() {
+    // Relocation resolves symbols by name, so its limit is consensus relevant
+    // and stays where it is.
+    let elf_bytes = std::fs::read("tests/elfs/long_dynamic_symbol_name_sbpfv0.so").unwrap();
+    assert_error!(ElfExecutable::load(&elf_bytes, loader()), "UnknownSymbol");
+    assert_error!(
+        ElfExecutable::load(&elf_bytes, loader_with_labels()),
+        "UnknownSymbol"
     );
 }

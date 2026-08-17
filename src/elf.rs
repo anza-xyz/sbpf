@@ -489,10 +489,7 @@ impl<C: ContextObject> Executable<C> {
         bytes: &[u8],
         loader: Arc<BuiltinProgram<C>>,
     ) -> Result<Self, ElfParserError> {
-        use crate::elf_parser::{
-            consts::{ELFMAG, EV_CURRENT, PF_R, PF_X, PT_LOAD, SHN_UNDEF, STT_FUNC},
-            types::Elf64Sym,
-        };
+        use crate::elf_parser::consts::{ELFMAG, EV_CURRENT, PF_R, PF_X, PT_LOAD};
 
         let aligned_memory = AlignedMemory::<{ HOST_ALIGN }>::from_slice(bytes);
         let elf_bytes = aligned_memory.as_slice();
@@ -595,73 +592,22 @@ impl<C: ContextObject> Executable<C> {
             .checked_div(ebpf::INSN_SIZE as u64)
             .unwrap_or_default() as usize;
 
-        let mut function_registry = FunctionRegistry::<usize>::default();
         let config = loader.get_config();
-        if config.enable_symbol_and_section_labels {
-            let (_section_header_table_range, section_header_table) =
-                Elf64::parse_section_header_table(
-                    elf_bytes,
-                    file_header_range.clone(),
-                    file_header,
-                    program_header_table_range.clone(),
-                )
-                .unwrap();
-            let section_names_section_header = (file_header.e_shstrndx != SHN_UNDEF)
-                .then(|| {
-                    section_header_table
-                        .get(file_header.e_shstrndx as usize)
-                        .ok_or(ElfParserError::OutOfBounds)
-                })
-                .transpose()?
-                .unwrap();
-            let mut symbol_names_section_header = None;
-            let mut symbol_table_section_header = None;
-            for section_header in section_header_table.iter() {
-                let section_name = Elf64::get_string_in_section(
-                    elf_bytes,
-                    section_names_section_header,
-                    section_header.sh_name,
-                    64,
-                )
-                .unwrap();
-                if section_name == b".strtab" {
-                    symbol_names_section_header = Some(section_header);
-                }
-                if section_name == b".symtab" {
-                    symbol_table_section_header = Some(section_header);
-                }
-            }
-            // A well-formed ELF usually has both as long as it's not stripped.
-            match (symbol_names_section_header, symbol_table_section_header) {
-                (Some(symbol_names_section_header), Some(symbol_table_section_header)) => {
-                    let symbol_table: &[Elf64Sym] =
-                        Elf64::slice_from_section_header(elf_bytes, symbol_table_section_header)
-                            .unwrap();
-                    for symbol in symbol_table {
-                        if symbol.st_info & STT_FUNC == 0 {
-                            continue;
-                        }
-                        let target_pc = symbol
-                            .st_value
-                            .saturating_sub(bytecode_header.p_vaddr)
-                            .checked_div(ebpf::INSN_SIZE as u64)
-                            .unwrap_or_default() as usize;
-                        let name = Elf64::get_string_in_section(
-                            elf_bytes,
-                            symbol_names_section_header,
-                            symbol.st_name as Elf64Word,
-                            u8::MAX as usize,
-                        )
-                        .unwrap();
-                        function_registry
-                            .register_function(target_pc as u32, name, target_pc)
-                            .unwrap();
-                    }
-                }
-                (None, None) => { /* missing both sections is okay */ }
-                _ => return Err(ElfParserError::InvalidSectionHeader),
-            }
-        }
+        // Labels are debug information, so anything that goes wrong while
+        // collecting them leaves the executable without labels instead of
+        // failing the load.
+        let function_registry = if config.enable_symbol_and_section_labels {
+            Self::parse_debug_labels(
+                elf_bytes,
+                file_header,
+                file_header_range,
+                program_header_table_range,
+                bytecode_header,
+            )
+            .unwrap_or_default()
+        } else {
+            FunctionRegistry::<usize>::default()
+        };
 
         Ok(Self {
             elf_bytes: aligned_memory,
@@ -675,6 +621,87 @@ impl<C: ContextObject> Executable<C> {
             #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
+    }
+
+    /// Collects the function labels of a strictly parsed ELF from its static
+    /// symbol table
+    ///
+    /// Callers treat a failure here as "this ELF carries no labels".
+    fn parse_debug_labels(
+        elf_bytes: &[u8],
+        file_header: &Elf64Ehdr,
+        file_header_range: std::ops::Range<usize>,
+        program_header_table_range: std::ops::Range<usize>,
+        bytecode_header: &Elf64Phdr,
+    ) -> Result<FunctionRegistry<usize>, ElfParserError> {
+        use crate::elf_parser::{
+            consts::{SHN_UNDEF, STT_FUNC},
+            types::Elf64Sym,
+            DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM,
+        };
+
+        let mut function_registry = FunctionRegistry::<usize>::default();
+        let (_section_header_table_range, section_header_table) =
+            Elf64::parse_section_header_table(
+                elf_bytes,
+                file_header_range,
+                file_header,
+                program_header_table_range,
+            )?;
+        if file_header.e_shstrndx == SHN_UNDEF {
+            return Ok(function_registry);
+        }
+        let section_names_section_header = section_header_table
+            .get(file_header.e_shstrndx as usize)
+            .ok_or(ElfParserError::OutOfBounds)?;
+        let mut symbol_names_section_header = None;
+        let mut symbol_table_section_header = None;
+        for section_header in section_header_table.iter() {
+            let Ok(section_name) = Elf64::get_string_in_section(
+                elf_bytes,
+                section_names_section_header,
+                section_header.sh_name,
+                64,
+            ) else {
+                continue;
+            };
+            if section_name == b".strtab" {
+                symbol_names_section_header = Some(section_header);
+            }
+            if section_name == b".symtab" {
+                symbol_table_section_header = Some(section_header);
+            }
+        }
+        // Stripping removes the symbol table, and can leave an empty string
+        // table behind, so anything but a complete pair means no labels.
+        let (Some(symbol_names_section_header), Some(symbol_table_section_header)) =
+            (symbol_names_section_header, symbol_table_section_header)
+        else {
+            return Ok(function_registry);
+        };
+        let symbol_table: &[Elf64Sym] =
+            Elf64::slice_from_section_header(elf_bytes, symbol_table_section_header)?;
+        for symbol in symbol_table {
+            if symbol.st_info & STT_FUNC == 0 {
+                continue;
+            }
+            let target_pc = symbol
+                .st_value
+                .saturating_sub(bytecode_header.p_vaddr)
+                .checked_div(ebpf::INSN_SIZE as u64)
+                .unwrap_or_default() as usize;
+            let Ok(name) = Elf64::get_string_in_section(
+                elf_bytes,
+                symbol_names_section_header,
+                symbol.st_name as Elf64Word,
+                DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM,
+            ) else {
+                // A name we cannot read only costs this one label.
+                continue;
+            };
+            let _ = function_registry.register_function(target_pc as u32, name, target_pc);
+        }
+        Ok(function_registry)
     }
 
     /// Loads an ELF with relocation
@@ -1250,9 +1277,11 @@ impl<C: ContextObject> Executable<C> {
                 let target_pc = (symbol.st_value.saturating_sub(text_section.sh_addr) as usize)
                     .checked_div(ebpf::INSN_SIZE)
                     .unwrap_or_default();
-                let name = elf
-                    .symbol_name(symbol.st_name as Elf64Word)
-                    .map_err(|_| ElfError::UnknownSymbol(symbol.st_name as usize))?;
+                let Ok(name) = elf.symbol_name(symbol.st_name as Elf64Word) else {
+                    // Labels are debug information: a name we cannot read only
+                    // costs this one label.
+                    continue;
+                };
                 function_registry.register_function_hashed_legacy(loader, true, name, target_pc)?;
             }
         }
