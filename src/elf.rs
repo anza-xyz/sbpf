@@ -637,7 +637,7 @@ impl<C: ContextObject> Executable<C> {
         use crate::elf_parser::{
             consts::{SHN_UNDEF, STT_FUNC},
             types::Elf64Sym,
-            DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM,
+            DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM, SECTION_NAME_LENGTH_MAXIMUM,
         };
 
         let mut function_registry = FunctionRegistry::<usize>::default();
@@ -661,7 +661,7 @@ impl<C: ContextObject> Executable<C> {
                 elf_bytes,
                 section_names_section_header,
                 section_header.sh_name,
-                64,
+                SECTION_NAME_LENGTH_MAXIMUM,
             ) else {
                 continue;
             };
