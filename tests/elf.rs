@@ -259,6 +259,45 @@ fn test_entrypoint() {
     assert_eq!(4, executable.get_entrypoint_instruction_offset());
 }
 
+#[test]
+fn test_text_section_at_region_boundary() {
+    let mut elf_bytes =
+        std::fs::read("tests/elfs/relative_call_sbpfv0.so").expect("failed to read elf file");
+
+    let (shdr_offset, mut shdr, e_entry) = {
+        let elf = Elf64::parse(&elf_bytes).unwrap();
+        let header = elf.file_header();
+        let (index, section) = elf
+            .section_header_table()
+            .iter()
+            .enumerate()
+            .find(|(_, section)| elf.section_name(section.sh_name).ok() == Some(&b".text"[..]))
+            .unwrap();
+        (
+            header.e_shoff as usize + index * header.e_shentsize as usize,
+            section.clone(),
+            header.e_entry,
+        )
+    };
+
+    let new_e_entry = ebpf::MM_REGION_SIZE + (e_entry - shdr.sh_addr);
+    shdr.sh_addr = ebpf::MM_REGION_SIZE;
+    unsafe {
+        std::ptr::write_unaligned(
+            elf_bytes.as_mut_ptr().add(shdr_offset).cast::<Elf64Shdr>(),
+            shdr,
+        );
+        let mut header = Elf64::parse(&elf_bytes).unwrap().file_header().clone();
+        header.e_entry = new_e_entry;
+        std::ptr::write(elf_bytes.as_mut_ptr().cast::<Elf64Ehdr>(), header);
+    }
+
+    assert!(matches!(
+        ElfExecutable::load(&elf_bytes, loader()),
+        Err(ElfError::ValueOutOfBounds)
+    ));
+}
+
 fn new_section(sh_addr: u64, sh_size: u64) -> Elf64Shdr {
     Elf64Shdr {
         sh_addr,
