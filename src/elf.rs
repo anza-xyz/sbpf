@@ -417,8 +417,8 @@ impl<C: ContextObject> Executable<C> {
     pub fn verify<V: Verifier>(&self) -> Result<(), EbpfError> {
         <V as Verifier>::verify(
             self.get_text_bytes().1,
-            self.get_config(),
             self.get_sbpf_version(),
+            self.get_loader().get_function_registry(),
         )?;
         Ok(())
     }

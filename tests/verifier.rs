@@ -29,10 +29,11 @@ use solana_sbpf::{
     ebpf,
     elf::Executable,
     program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
-    verifier::{RequisiteVerifier, Verifier, VerifierError},
+    verifier::{LocalVerifier, RequisiteVerifier, Verifier, VerifierError},
     vm::Config,
 };
 use std::sync::Arc;
+use test_utils::syscalls::SyscallU64;
 use test_utils::{assert_error, create_vm, syscalls, TestContextObject};
 use thiserror::Error;
 
@@ -45,10 +46,10 @@ pub enum VerifierTestError {
 
 struct TautologyVerifier {}
 impl Verifier for TautologyVerifier {
-    fn verify(
+    fn verify<T>(
         _prog: &[u8],
-        _config: &Config,
         _sbpf_version: SBPFVersion,
+        _syscall_registry: &FunctionRegistry<T>,
     ) -> std::result::Result<(), VerifierError> {
         Ok(())
     }
@@ -56,10 +57,10 @@ impl Verifier for TautologyVerifier {
 
 struct ContradictionVerifier {}
 impl Verifier for ContradictionVerifier {
-    fn verify(
+    fn verify<T>(
         _prog: &[u8],
-        _config: &Config,
         _sbpf_version: SBPFVersion,
+        _syscall_registry: &FunctionRegistry<T>,
     ) -> std::result::Result<(), VerifierError> {
         Err(VerifierError::NoProgram)
     }
@@ -489,5 +490,53 @@ fn exit() {
     )
     .unwrap();
     let result = executable.verify::<RequisiteVerifier>();
+    assert!(result.is_ok());
+}
+
+#[test]
+fn local_verifier_call_negative() {
+    let executable = assemble::<TestContextObject>(
+        "add64 r10, 0
+        lddw r7, 0x8000
+        call -1
+        exit",
+        Arc::new(BuiltinProgram::new_loader(Config::default())),
+    )
+    .unwrap();
+
+    let result = executable.verify::<LocalVerifier>();
+    assert_error!(result, "VerifierError(InvalidFunction(3))");
+}
+
+#[test]
+fn local_verifier_invalid_syscall() {
+    let executable = assemble::<TestContextObject>(
+        "add64 r10, 0
+        lddw r7, 0x8000
+        syscall 0x1bd193
+        exit",
+        Arc::new(BuiltinProgram::new_loader(Config::default())),
+    )
+    .unwrap();
+
+    let result = executable.verify::<LocalVerifier>();
+    assert_error!(result, "VerifierError(InvalidSyscall(1823123))");
+}
+
+#[test]
+fn local_verifier_valid_program() {
+    let mut loader = BuiltinProgram::new_loader(Config::default());
+    SyscallU64::register(&mut loader, "log").unwrap();
+
+    let executable = assemble::<TestContextObject>(
+        "add64 r10, 0
+        lddw r7, 0x8000
+        syscall 0x6bf5c3fe
+        exit",
+        Arc::new(loader),
+    )
+    .unwrap();
+
+    let result = executable.verify::<LocalVerifier>();
     assert!(result.is_ok());
 }

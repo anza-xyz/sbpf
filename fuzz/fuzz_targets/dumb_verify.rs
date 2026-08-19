@@ -31,7 +31,7 @@ fuzz_target!(|data: DumbFuzzData| {
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
 
-    if RequisiteVerifier::verify(&prog, &config, sbpf_version).is_err() {
+    if RequisiteVerifier::verify(&prog, sbpf_version, &function_registry).is_err() {
         // verify please
         return;
     }
