@@ -31,7 +31,7 @@ jobs:
           cp ./tests/elfs/*.so /tmp/elf-parser-corpus/
 
       - name: Upload elf-parser corpus to FuzzCorp
-        uses: asymmetric-research/fuzz-upload-action@0e367cafdc501772fd0fd7dc13bfa68d49222256 # v2.0.0
+        uses: asymmetric-research/fuzz-upload-action@d81375ddc1887ddf574713845dcfada9d3968edc # v2.1.0
         with:
           upload_type: corpus
           upload_path: /tmp/elf-parser-corpus
@@ -42,7 +42,7 @@ jobs:
           FUZZ_API_KEY: ${{ secrets.FUZZ_API_KEY }}
 
       - name: Upload bundle to FuzzCorp
-        uses: asymmetric-research/fuzz-upload-action@0e367cafdc501772fd0fd7dc13bfa68d49222256 # v2.0.0
+        uses: asymmetric-research/fuzz-upload-action@d81375ddc1887ddf574713845dcfada9d3968edc # v2.1.0
         with:
           upload_type: bundle
           upload_path: ./fuzz/target/bundle
