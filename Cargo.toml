@@ -21,7 +21,7 @@ include = [
 [dependencies]
 arbitrary = { version = "1.0", optional = true, features = ["derive"] }
 byteorder = "1.2"
-combine = "3.8.1"
+combine = "4"
 gdbstub = { version = "0.6.2", optional = true }
 hash32 = "0.3.1"
 log = "0.4.2"
