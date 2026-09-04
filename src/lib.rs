@@ -14,6 +14,7 @@
 #![allow(clippy::literal_string_with_formatting_args)]
 #![deny(clippy::arithmetic_side_effects)]
 #![deny(clippy::ptr_as_ptr)]
+#![cfg_attr(test, feature(test))]
 
 extern crate byteorder;
 extern crate combine;
@@ -33,6 +34,7 @@ pub mod ebpf;
 pub mod elf;
 pub mod elf_parser;
 pub mod error;
+pub mod gadgets;
 pub mod insn_builder;
 pub mod interpreter;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]

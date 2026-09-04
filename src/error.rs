@@ -81,7 +81,7 @@ impl EbpfError {
     /// Returns the enum discriminant as a `u64`.
     ///
     /// This is sound only because of the `#[repr(u64)]` attribute on the enum.
-    pub fn discriminant(&self) -> u64 {
+    pub const fn discriminant(&self) -> u64 {
         unsafe { *std::ptr::addr_of!(*self).cast::<u64>() }
     }
 }
@@ -153,7 +153,7 @@ impl<T: std::fmt::Debug, E: std::fmt::Debug> StableResult<T, E> {
         ),
         allow(dead_code)
     )]
-    pub(crate) fn discriminant(&self) -> u64 {
+    pub(crate) const fn discriminant(&self) -> u64 {
         unsafe { *std::ptr::addr_of!(*self).cast::<u64>() }
     }
 }
