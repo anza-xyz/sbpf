@@ -267,10 +267,14 @@ pub enum RuntimeEnvironmentSlot {
     StopwatchDenominator = offset_of!(EbpfVm<DummyContextObject>, stopwatch_denominator) as isize,
     /// [EbpfVm::registers]
     Registers = offset_of!(EbpfVm<DummyContextObject>, registers) as isize,
+    /// [EbpfVm::program_slice]
+    ProgramSlice = offset_of!(EbpfVm<DummyContextObject>, program_slice) as isize,
     /// [EbpfVm::program_result]
     ProgramResult = offset_of!(EbpfVm<DummyContextObject>, program_result) as isize,
     /// [EbpfVm::memory_mapping]
     MemoryMapping = offset_of!(EbpfVm<DummyContextObject>, memory_mapping) as isize,
+    /// [EbpfVm::loader]
+    Loader = offset_of!(EbpfVm<DummyContextObject>, loader) as isize,
     /// [EbpfVm::register_trace]
     RegisterTrace = offset_of!(EbpfVm<DummyContextObject>, register_trace) as isize,
 }
@@ -353,6 +357,8 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub stopwatch_denominator: u64,
     /// Registers inlined
     pub registers: [u64; 12],
+    /// executable.get_text_bytes().1 inlined
+    pub program_slice: (*const u8, u64),
     /// ProgramResult inlined
     pub program_result: ProgramResult,
     /// MemoryMapping inlined
@@ -397,6 +403,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             stopwatch_numerator: 0,
             stopwatch_denominator: 0,
             registers,
+            program_slice: (std::ptr::null(), 0),
             program_result: ProgramResult::Ok(0),
             memory_mapping,
             loader,
@@ -427,11 +434,13 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         call_frames: &mut [CallFrame],
     ) -> (u64, ProgramResult) {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
+        let program = executable.get_text_bytes().1;
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
         let initial_insn_count = self.context().get_remaining();
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
+        self.program_slice = (program.as_ptr(), program.len() as u64);
         self.program_result = ProgramResult::Ok(0);
 
         'execute: {
@@ -469,6 +478,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             }
 
             *mode = ExecutionMode::Interpreted;
+
             let interpreter = Interpreter::new(self, executable, self.registers, call_frames);
             break 'execute run_interpreter(interpreter);
         }
@@ -577,8 +587,14 @@ fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
         return crate::debugger::execute(&mut interpreter, debug_port);
     }
 
-    while interpreter.step() {}
-    interpreter.vm.registers[11] = interpreter.reg[11];
+    if matches!(interpreter.executable.get_sbpf_version(), SBPFVersion::V3 | SBPFVersion::V4) {
+        interpreter.vm.call_depth = interpreter.vm.registers[10] + (interpreter.vm.loader.get_config().max_call_depth - 1) as u64 * 0x1000;
+        let interpreter_entrypoint: unsafe extern "Rust" fn(*mut EbpfVm<C>) = unsafe { std::mem::transmute(crate::token_threading::INTERPRETER) };
+        unsafe { interpreter_entrypoint(interpreter.vm); }
+    } else {
+        while interpreter.step() {}
+        interpreter.vm.registers[11] = interpreter.reg[11];
+    }
 }
 
 #[cfg(test)]
@@ -636,8 +652,10 @@ mod tests {
         check_slot!(env, stopwatch_numerator, StopwatchNumerator);
         check_slot!(env, stopwatch_denominator, StopwatchDenominator);
         check_slot!(env, registers, Registers);
+        check_slot!(env, program_slice, ProgramSlice);
         check_slot!(env, program_result, ProgramResult);
         check_slot!(env, memory_mapping, MemoryMapping);
+        check_slot!(env, loader, Loader);
         check_slot!(env, register_trace, RegisterTrace);
     }
 }
