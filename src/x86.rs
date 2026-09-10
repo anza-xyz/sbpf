@@ -638,6 +638,7 @@ impl X86Instruction {
     }
 
     /// Push source onto the stack
+    #[allow(dead_code)]
     pub const fn push_immediate(size: OperandSize, immediate: i32) -> Self {
         exclude_operand_sizes!(size, OperandSize::S0 | OperandSize::S16);
         Self {
