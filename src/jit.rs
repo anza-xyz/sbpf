@@ -1104,6 +1104,14 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             Value::Register(reg) => {
                 self.emit_ins(X86Instruction::call_reg(reg, None));
             },
+            Value::RegisterIndirect(reg, offset, user_provided) => {
+                debug_assert!(!user_provided);
+                if reg == RSP {
+                    self.emit_ins(X86Instruction::call_reg(RSP, Some(X86IndirectAccess::OffsetIndexShift(offset, RSP, 0))));
+                } else {
+                    self.emit_ins(X86Instruction::call_reg(reg, Some(X86IndirectAccess::Offset(offset))));
+                }
+            },
             Value::Constant64(value, user_provided) => {
                 debug_assert!(!user_provided);
                 self.emit_ins(X86Instruction::load_immediate(RAX, value));
