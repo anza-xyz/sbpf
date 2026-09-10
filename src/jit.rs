@@ -1180,12 +1180,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     /// Emits a syscall handler invocation
     pub fn emit_external_call(&mut self, function: BuiltinFunction<C>) {
-        self.emit_validate_and_profile_instruction_count(0);
         self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, function as usize as i64));
         self.emit_ins(X86Instruction::push(REGISTER_SCRATCH, None));
+        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64)); // Save pc
         self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL, 5)));
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // RSP += 8;
-        self.emit_undo_profile_instruction_count(0);
     }
 
     fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
@@ -1545,6 +1544,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         // Routine for external functions
         self.set_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL);
         if self.config.enable_instruction_meter {
+            self.emit_validate_instruction_count(None);
+            // self.emit_profile_instruction_count(0);
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, REGISTER_SCRATCH, None)); // instruction_meter -= self.pc;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter -= 1;
             self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DueInsnCount)))); // *DueInsnCount = REGISTER_INSTRUCTION_METER;
         }
         self.emit_rust_call(Value::RegisterIndirect(RSP, 0x50, false), &[
@@ -1558,12 +1561,19 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         if self.config.enable_instruction_meter {
             self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_INSTRUCTION_METER, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter)))); // REGISTER_INSTRUCTION_METER = *PreviousInstructionMeter;
         }
+        self.emit_ins(X86Instruction::push(REGISTER_SCRATCH, None));
         // Test if result indicates that an error occured
         self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, -1)); // Used as PC value in error case, acts as stack padding otherwise
         self.emit_result_is_err();
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_EPILOGUE, 6)));
         // Store Ok value in result register
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_MAP[0], X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
+        self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH));
+        if self.config.enable_instruction_meter {
+            // self.emit_undo_profile_instruction_count(0);
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += self.pc;
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter += 1;
+        }
         self.emit_ins(X86Instruction::return_near());
 
         // Routine for prologue of emit_internal_call()
