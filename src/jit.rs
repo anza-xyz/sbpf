@@ -1182,7 +1182,9 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     pub fn emit_external_call(&mut self, function: BuiltinFunction<C>) {
         self.emit_validate_and_profile_instruction_count(0);
         self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, function as usize as i64));
+        self.emit_ins(X86Instruction::push(REGISTER_SCRATCH, None));
         self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL, 5)));
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // RSP += 8;
         self.emit_undo_profile_instruction_count(0);
     }
 
@@ -1542,11 +1544,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
         // Routine for external functions
         self.set_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL);
-        self.emit_ins(X86Instruction::push_immediate(OperandSize::S64, -1)); // Used as PC value in error case, acts as stack padding otherwise
         if self.config.enable_instruction_meter {
             self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DueInsnCount)))); // *DueInsnCount = REGISTER_INSTRUCTION_METER;
         }
-        self.emit_rust_call(Value::Register(REGISTER_SCRATCH), &[
+        self.emit_rust_call(Value::RegisterIndirect(RSP, 0x50, false), &[
             Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
             Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
             Argument { index: 3, value: Value::Register(ARGUMENT_REGISTERS[3]) },
@@ -1558,8 +1559,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_INSTRUCTION_METER, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter)))); // REGISTER_INSTRUCTION_METER = *PreviousInstructionMeter;
         }
         // Test if result indicates that an error occured
+        self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, -1)); // Used as PC value in error case, acts as stack padding otherwise
         self.emit_result_is_err();
-        self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH));
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_EPILOGUE, 6)));
         // Store Ok value in result register
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_MAP[0], X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
