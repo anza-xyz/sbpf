@@ -578,6 +578,7 @@ fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
     }
 
     while interpreter.step() {}
+    interpreter.vm.registers[11] = interpreter.reg[11];
 }
 
 #[cfg(test)]
