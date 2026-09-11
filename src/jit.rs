@@ -851,6 +851,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::EXIT      => {
                     self.emit_validate_and_profile_instruction_count(0);
 
+                    self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
+
                     let call_depth_access = X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::CallDepth));
                     // If env.call_depth == 0, we've reached the exit instruction of the entry point
                     self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S32, REGISTER_PTR_TO_VM, 0, Some(call_depth_access)));
@@ -1496,6 +1498,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         if self.config.enable_instruction_meter {
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER += 1;
         }
+        self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::Registers) + 11 * std::mem::size_of::<u64>() as i32))); // registers[11] = pc;
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[0], REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32))); // result.return_value = R0;
         self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x31, REGISTER_SCRATCH, REGISTER_SCRATCH, None)); // REGISTER_SCRATCH ^= REGISTER_SCRATCH; // REGISTER_SCRATCH = 0;
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_EPILOGUE, 5)));
@@ -1566,7 +1569,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
         // Test if result indicates that an error occured
         self.emit_result_is_err();
-        self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_EPILOGUE, 6)));
+        self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION_UNCHECKED, 6)));
         // Store Ok value in result register
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_MAP[0], X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
         self.emit_ins(X86Instruction::return_near());
