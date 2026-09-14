@@ -248,9 +248,13 @@ unsafe impl HostMemoryObject for HostBuffer {
 /// Memory region for bounds checking and address translation
 #[derive(Eq, PartialEq, Clone)]
 pub struct MemoryRegion {
-    host: HostBuffer,
+    pub(crate) host_addr: *mut u8,
+    pub(crate) len: usize,
+    pub(crate) is_writable: bool,
     /// start virtual address
-    vm_addr: u64,
+    pub(crate) vm_addr: u64,
+    pub(crate) gap_mask: u64,
+    pub(crate) gap_bit: u64,
     /// Size of regular gaps as bit shift (63 means this region is continuous)
     vm_gap_shift: u8,
     /// User defined payload for the [AccessViolationHandler]
@@ -270,8 +274,20 @@ impl MemoryRegion {
             debug_assert_eq!(Some(vm_gap_size), 1_u64.checked_shl(vm_gap_shift as u32));
         };
         MemoryRegion {
-            host,
+            host_addr: host.ptr().cast_mut().cast(),
+            len: host.len(),
+            is_writable: host.is_mutable(),
             vm_addr,
+            gap_mask: if vm_gap_shift == 63 {
+                0
+            } else {
+                u64::MAX << vm_gap_shift
+            },
+            gap_bit: if vm_gap_shift == 63 {
+                0
+            } else {
+                1 << vm_gap_shift
+            },
             vm_gap_shift,
             access_violation_handler_payload: None,
         }
@@ -309,7 +325,10 @@ impl MemoryRegion {
     /// must adhere to all the same contracts as the `MemoryRegion`s used for
     /// [`MemoryMapping::replace_region`].
     pub unsafe fn redirect<HO: HostMemoryObject>(&mut self, host: HO) {
-        self.host = host.host();
+        let host = host.host();
+        self.host_addr = host.ptr().cast_mut().cast();
+        self.len = host.len();
+        self.is_writable = host.is_mutable();
     }
 
     /// Ensure that this memory region is immutable.
@@ -344,17 +363,24 @@ impl MemoryRegion {
     ///
     /// This can be used to construct a new memory region.
     pub fn host_buffer(&self) -> HostBuffer {
-        self.host
+        if self.is_writable {
+            HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(self.host_addr, self.len))
+        } else {
+            HostBuffer::Immutable(ptr::slice_from_raw_parts(
+                self.host_addr.cast_const(),
+                self.len,
+            ))
+        }
     }
 
     /// Length of this memory region in bytes.
     pub fn len(&self) -> usize {
-        self.host.len()
+        self.len
     }
 
     /// Is the length of this memory region 0 bytes?
     pub fn is_empty(&self) -> bool {
-        self.host.is_empty()
+        self.len == 0
     }
 
     /// Return the `gap_size` with which the memory region has been constructed.
@@ -383,7 +409,9 @@ impl MemoryRegion {
         if self.vm_gap_shift == 63 {
             // fast path for non-gapped regions
             if let Some(end_offset) = begin_offset.checked_add(len) {
-                return self.host.get(begin_offset as usize..end_offset as usize);
+                return self
+                    .host_buffer()
+                    .get(begin_offset as usize..end_offset as usize);
             }
             return None;
         }
@@ -398,7 +426,9 @@ impl MemoryRegion {
             (begin_offset & gap_mask).checked_shr(1).unwrap_or(0) | (begin_offset & !gap_mask);
         if let Some(end_offset) = gapped_offset.checked_add(len) {
             if !is_in_gap {
-                return self.host.get(gapped_offset as usize..end_offset as usize);
+                return self
+                    .host_buffer()
+                    .get(gapped_offset as usize..end_offset as usize);
             }
         }
         None
@@ -408,7 +438,7 @@ impl MemoryRegion {
 impl fmt::Debug for MemoryRegion {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let vm_addr = self.vm_addr_range();
-        let (host_addr, len, writable) = match self.host {
+        let (host_addr, len, writable) = match self.host_buffer() {
             HostBuffer::Immutable(p) => (p.addr() as u64, p.len() as u64, false),
             HostBuffer::Mutable(p) => (p.addr() as u64, p.len() as u64, true),
         };
@@ -689,6 +719,10 @@ impl AlignedMemoryMapping {
 
 /// Common parts of [UnalignedMemoryMapping] and [AlignedMemoryMapping]
 pub struct MemoryMapping {
+    // A view into the initialized aligned table, refreshed after any possible reallocation.
+    // JIT code reloads it at each access; no region pointer survives a helper or syscall.
+    pub(crate) jit_regions: *const MemoryRegion,
+    pub(crate) jit_regions_len: usize,
     /// Access violation handler
     access_violation_handler: AccessViolationHandler,
     max_call_depth: i64,
@@ -772,6 +806,8 @@ impl MemoryMapping {
         };
 
         Self {
+            jit_regions: ptr::null(),
+            jit_regions_len: 0,
             access_violation_handler: Box::new(access_violation_handler),
             max_call_depth: config.max_call_depth as i64,
             stack_frame_size: config.stack_frame_size as i64,
@@ -949,6 +985,7 @@ impl MemoryMapping {
     /// again with [`Self::initialize`] before further use.
     pub fn get_regions_mut(&mut self) -> &mut [MemoryRegion] {
         self.initialized = false;
+        self.jit_regions_len = 0;
 
         let regions = match &mut self.ty {
             MemoryMappingType::Aligned(inner) => inner.regions.as_mut_slice(),
@@ -988,11 +1025,18 @@ impl MemoryMapping {
 
     /// Initialize the MemoryMapping
     pub fn initialize(&mut self) -> Result<(), EbpfError> {
+        self.jit_regions_len = 0;
         let result = match &mut self.ty {
             MemoryMappingType::Aligned(inner) => inner.initialize(),
             MemoryMappingType::Unaligned(inner) => inner.initialize(),
         };
         self.initialized = result.is_ok();
+        if self.initialized && !self.disable_address_translation {
+            if let MemoryMappingType::Aligned(inner) = &self.ty {
+                self.jit_regions = inner.regions.as_ptr();
+                self.jit_regions_len = inner.regions.len();
+            }
+        }
         result
     }
 
@@ -1350,19 +1394,28 @@ mod test {
         assert!(m.find_region(ebpf::MM_REGION_SIZE - 1).is_none());
         assert_eq!(
             HostBuffer::Mutable(&raw mut mem1[..]),
-            m.find_region(ebpf::MM_REGION_SIZE).unwrap().1.host,
+            m.find_region(ebpf::MM_REGION_SIZE).unwrap().1.host_buffer(),
         );
         assert_eq!(
             HostBuffer::Mutable(&raw mut mem1[..]),
-            m.find_region(ebpf::MM_REGION_SIZE + 3).unwrap().1.host,
+            m.find_region(ebpf::MM_REGION_SIZE + 3)
+                .unwrap()
+                .1
+                .host_buffer(),
         );
         assert_eq!(
             HostBuffer::Immutable(&raw const mem2[..]),
-            m.find_region(ebpf::MM_REGION_SIZE + 4).unwrap().1.host,
+            m.find_region(ebpf::MM_REGION_SIZE + 4)
+                .unwrap()
+                .1
+                .host_buffer(),
         );
         assert_eq!(
             HostBuffer::Immutable(&raw const mem2[..]),
-            m.find_region(ebpf::MM_REGION_SIZE + 7).unwrap().1.host,
+            m.find_region(ebpf::MM_REGION_SIZE + 7)
+                .unwrap()
+                .1
+                .host_buffer(),
         );
         assert!(m.find_region(ebpf::MM_REGION_SIZE + 8).is_some());
     }
@@ -1390,20 +1443,29 @@ mod test {
         assert_eq!(m.find_region(ebpf::MM_REGION_SIZE - 1).unwrap().1.len(), 0);
         assert_eq!(
             HostBuffer::Mutable(&raw mut mem1[..]),
-            m.find_region(ebpf::MM_REGION_SIZE).unwrap().1.host,
+            m.find_region(ebpf::MM_REGION_SIZE).unwrap().1.host_buffer(),
         );
         assert_eq!(
             HostBuffer::Mutable(&raw mut mem1[..]),
-            m.find_region(ebpf::MM_REGION_SIZE + 3).unwrap().1.host,
+            m.find_region(ebpf::MM_REGION_SIZE + 3)
+                .unwrap()
+                .1
+                .host_buffer(),
         );
         assert!(m.find_region(ebpf::MM_REGION_SIZE + 4).is_some());
         assert_eq!(
             HostBuffer::Immutable(&raw const mem2[..]),
-            m.find_region(ebpf::MM_REGION_SIZE * 2).unwrap().1.host,
+            m.find_region(ebpf::MM_REGION_SIZE * 2)
+                .unwrap()
+                .1
+                .host_buffer(),
         );
         assert_eq!(
             HostBuffer::Immutable(&raw const mem2[..]),
-            m.find_region(ebpf::MM_REGION_SIZE * 2 + 3).unwrap().1.host,
+            m.find_region(ebpf::MM_REGION_SIZE * 2 + 3)
+                .unwrap()
+                .1
+                .host_buffer(),
         );
         assert!(m.find_region(ebpf::MM_REGION_SIZE * 3 + 4).is_none());
     }
