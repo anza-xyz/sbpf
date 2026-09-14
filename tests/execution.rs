@@ -26,7 +26,7 @@ use solana_sbpf::{
     program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
     verifier::RequisiteVerifier,
-    vm::{Config, ContextObject},
+    vm::{CallFrame, Config, ContextObject, ExecutionMode},
 };
 use std::{fs::File, io::Read, sync::Arc};
 use test_utils::{
@@ -3945,6 +3945,133 @@ fn test_symbol_relocation() {
         TestContextObject::new(7),
         ProgramResult::Ok(0),
     );
+}
+
+#[test]
+fn test_readonly_translation_fallback_preserves_address_and_store_value() {
+    let config = Config {
+        aligned_memory_mapping: true,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        noop_instruction_rate: 1,
+        ..Config::default()
+    };
+    let executable = assemble::<TestContextObject>(
+        "stdw [r1+8], -1985229329\nldxdw r0, [r1+8]\nexit",
+        Arc::new(BuiltinProgram::new_loader(config)),
+    )
+    .unwrap();
+    executable.verify::<RequisiteVerifier>().unwrap();
+    executable.jit_compile().unwrap();
+    let input = [0x5au8; 32];
+    let mut replacement = [0u8; 32];
+    let replacement_ptr = &raw mut replacement[..];
+    let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+    let callback_calls = calls.clone();
+    let handler = Box::new(move |region: &mut MemoryRegion, _, access, address, len| {
+        assert_eq!(
+            (access, address, len),
+            (AccessType::Store, ebpf::MM_INPUT_START + 8, 8)
+        );
+        callback_calls.set(callback_calls.get() + 1);
+        // The replacement remains live through execution and satisfies the
+        // original region's size and virtual-address constraints.
+        unsafe { region.redirect(replacement_ptr) };
+    });
+    let mut context = TestContextObject::new(3);
+    create_vm!(
+        vm,
+        &executable,
+        &mut context,
+        stack,
+        heap,
+        vec![MemoryRegion::new(
+            &raw const input[..],
+            ebpf::MM_INPUT_START
+        )],
+        Some(handler)
+    );
+    let (count, result) = vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut []);
+    assert_eq!(count, 3);
+    assert_eq!(vm.context().remaining, 0);
+    assert_eq!(result.unwrap(), -1985229329i64 as u64);
+    assert_eq!(calls.get(), 1);
+    assert_eq!(input, [0x5a; 32]);
+    assert_eq!(&replacement[8..16], &(-1985229329i64).to_le_bytes());
+    assert_eq!(&replacement[..8], &[0; 8]);
+    assert_eq!(&replacement[16..], &[0; 16]);
+}
+
+#[test]
+fn test_gapped_translation_preserves_registers() {
+    let config = Config {
+        aligned_memory_mapping: true,
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        max_call_depth: 1,
+        stack_frame_size: 4096,
+        noop_instruction_rate: 1,
+        ..Config::default()
+    };
+    for width in ["b", "h", "w", "dw"] {
+        let mut assembly = format!("st{width} [r1], -1985229329\nldx{width} r0, [r1]\n");
+        for register in 0..10 {
+            assembly += &format!("stxdw [r10-{}], r{register}\n", 8 * (register + 1));
+        }
+        assembly += "exit";
+        let executable = assemble::<TestContextObject>(
+            &assembly,
+            Arc::new(BuiltinProgram::new_loader(config.clone())),
+        )
+        .unwrap();
+        executable.verify::<RequisiteVerifier>().unwrap();
+        executable.jit_compile().unwrap();
+        for gap in [0u64, 1, 2, 4, 8, 64, 4096] {
+            let len = 2 * gap.max(64) as usize;
+            for offset in [
+                0,
+                gap.saturating_sub(1),
+                gap,
+                2 * gap,
+                3 * gap,
+                len as u64 - 1,
+            ] {
+                let run = |mut mode| {
+                    // Include canary bytes outside the mapped extent in the comparison.
+                    let mut input: Vec<_> = (0..len + 8).map(|i| (i % 251) as u8).collect();
+                    let region =
+                        MemoryRegion::new_gapped(&raw mut input[..len], ebpf::MM_INPUT_START, gap);
+                    let mut context = TestContextObject::new(1000);
+                    create_vm!(
+                        vm,
+                        &executable,
+                        &mut context,
+                        stack,
+                        heap,
+                        vec![region],
+                        None
+                    );
+                    vm.registers[1] = ebpf::MM_INPUT_START + offset;
+                    for register in 2..10 {
+                        vm.registers[register] = 0x123456789abcdef0 + register as u64;
+                    }
+                    let mut frames = vec![CallFrame::default(); config.max_call_depth];
+                    let (count, result) = vm.execute_program(&executable, &mut mode, &mut frames);
+                    (
+                        count,
+                        format!("{result:?}"),
+                        vm.context().remaining,
+                        vm.registers[11],
+                        input,
+                        stack.as_slice().to_vec(),
+                    )
+                };
+                assert_eq!(
+                    run(ExecutionMode::Interpreted),
+                    run(ExecutionMode::Jit),
+                    "{width} gap={gap} offset={offset}"
+                );
+            }
+        }
+    }
 }
 
 #[test]
