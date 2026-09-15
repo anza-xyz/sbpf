@@ -1139,7 +1139,7 @@ std::arch::global_asm!(concat!(
     register_trace_entry_push = sym Vec::<RegisterTraceEntry>::push,
     instruction_templates = sym instruction_templates,
     interpreter_entrypoint = sym interpreter_entrypoint,
-    syscall_resolver = sym syscall_resolver,
+    syscall_resolver = sym syscall_resolver::<DummyContextObject>,
     encrypted_host_address = sym EbpfVm::<DummyContextObject>::encrypted_host_address,
 
     vm_slot_host_stack_pointer = const RuntimeEnvironmentSlot::HostStackPointer as usize,
@@ -1203,13 +1203,13 @@ fn get_instruction_template_metas() -> &'static [u8] {
     })
 }
 
-fn syscall_resolver(loader: &Arc<BuiltinProgram<DummyContextObject>>, key: u32) -> ProgramResult {
+fn syscall_resolver<C: ContextObject>(loader: &Arc<BuiltinProgram<C>>, key: u32) -> ProgramResult {
     loader.get_function_registry().lookup_by_key(key).map(|(_, (callback, _))| callback as usize as u64).ok_or(EbpfError::UnsupportedInstruction).into()
 }
 
 /// Turns SBPF bytecode into an IP/PC mapping and x86-64 machinecode
 pub fn compile<C: ContextObject>(executable: &Executable<C>) -> Result<(Vec::<u32>, Vec::<u8>), EbpfError> {
-    let loader: &Arc<BuiltinProgram<DummyContextObject>> = unsafe { std::mem::transmute(executable.get_loader()) };
+    let loader: &Arc<BuiltinProgram<C>> = executable.get_loader();
     let noop_range = Uniform::new_inclusive(0, loader.get_config().noop_instruction_rate * 2);
     let mut diversification_rng = SmallRng::from_rng(thread_rng()).map_err(|_| EbpfError::JitNotCompiled)?;
     let immediate_value_key = diversification_rng.gen::<i64>();
