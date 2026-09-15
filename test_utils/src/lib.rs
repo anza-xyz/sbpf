@@ -339,7 +339,7 @@ macro_rules! test_interpreter_and_jit {
             vm.registers[1] = interp_input_start;
             let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
                 &$executable,
-                &mut $crate::solana_sbpf::vm::ExecutionMode::Interpreted,
+                &mut $crate::solana_sbpf::vm::ExecutionMode::TokenThreadingInterpreted,
                 &mut call_frames,
             );
             (
