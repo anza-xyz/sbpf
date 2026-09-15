@@ -3192,7 +3192,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
         );
         let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
             &executable,
-            &mut ExecutionMode::Interpreted,
+            &mut ExecutionMode::TokenThreadingInterpreted,
             &mut call_frames,
         );
         let trace_interpreter = vm.register_trace.clone();

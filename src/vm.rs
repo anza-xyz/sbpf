@@ -101,6 +101,10 @@ pub(crate) mod defaults {
 pub enum ExecutionMode {
     /// Execute the program in an interpreted mode.
     Interpreted,
+    /// Execute the program in token threading interpreted mode.
+    ///
+    /// The program must be at least SBPFv3.
+    TokenThreadingInterpreted,
     /// Execute the program in JIT mode.
     ///
     /// The program must be JIT compiled.
@@ -448,6 +452,28 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 ExecutionMode::Interpreted => {}
 
                 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                ExecutionMode::TokenThreadingInterpreted => {
+                    if matches!(
+                        executable.get_sbpf_version(),
+                        SBPFVersion::V3 | SBPFVersion::V4
+                    ) {
+                        self.call_depth = self.registers[10]
+                            + (self.loader.get_config().max_call_depth - 1) as u64 * 0x1000;
+                        let interpreter_entrypoint: unsafe extern "Rust" fn(*mut EbpfVm<C>) =
+                            unsafe { std::mem::transmute(crate::token_threading::INTERPRETER) };
+                        unsafe {
+                            break 'execute interpreter_entrypoint(self);
+                        }
+                    }
+                }
+                #[cfg(not(all(
+                    feature = "jit",
+                    not(target_os = "windows"),
+                    target_arch = "x86_64"
+                )))]
+                ExecutionMode::TokenThreadingInterpreted => {}
+
+                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
                 ExecutionMode::PreferJit => {
                     if let Some(compiled_program) = executable.get_compiled_program() {
                         *mode = ExecutionMode::Jit;
@@ -587,14 +613,8 @@ fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
         return crate::debugger::execute(&mut interpreter, debug_port);
     }
 
-    if matches!(interpreter.executable.get_sbpf_version(), SBPFVersion::V3 | SBPFVersion::V4) {
-        interpreter.vm.call_depth = interpreter.vm.registers[10] + (interpreter.vm.loader.get_config().max_call_depth - 1) as u64 * 0x1000;
-        let interpreter_entrypoint: unsafe extern "Rust" fn(*mut EbpfVm<C>) = unsafe { std::mem::transmute(crate::token_threading::INTERPRETER) };
-        unsafe { interpreter_entrypoint(interpreter.vm); }
-    } else {
-        while interpreter.step() {}
-        interpreter.vm.registers[11] = interpreter.reg[11];
-    }
+    while interpreter.step() {}
+    interpreter.vm.registers[11] = interpreter.reg[11];
 }
 
 #[cfg(test)]
