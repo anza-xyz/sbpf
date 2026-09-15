@@ -1186,11 +1186,11 @@ fn get_instruction_template_metas() -> &'static [u8] {
             } else {
                 let mut result = instruction_template.windows(EPILOG_PATTERN.len()).position(|window| window == &EPILOG_PATTERN).unwrap() as u8;
                 let mut instruction_template = &instruction_template[0..result as usize];
-                if &instruction_template[0..DECODE_IMM32_PATTERN.len()] == &DECODE_IMM32_PATTERN {
+                if instruction_template.get(0..DECODE_IMM32_PATTERN.len()) == Some(&DECODE_IMM32_PATTERN) {
                     result |= INSN_HAS_IMM;
                     instruction_template = &instruction_template[DECODE_IMM32_PATTERN.len()..];
                 }
-                if &instruction_template[0..DECODE_OFF_PATTERN.len()] == &DECODE_OFF_PATTERN {
+                if instruction_template.get(0..DECODE_OFF_PATTERN.len()) == Some(&DECODE_OFF_PATTERN) {
                     result |= INSN_HAS_OFF;
                     // instruction_template = &instruction_template[DECODE_OFF_PATTERN.len()..];
                 }
@@ -1247,6 +1247,9 @@ pub fn compile<C: ContextObject>(executable: &Executable<C>) -> Result<(Vec::<u3
         let instruction_length = (instruction_template_meta & INSN_LEN) as usize;
         let instruction_template = &instruction_templates[instruction_template_index][0..instruction_length];
         text_section.extend(instruction_template);
+        if instruction_template.len() == 0 {
+            panic!("unknown instruction, can't JIT: {:08X}", insn);
+        }
         // TODO: The patch offsets are incorrect
         if instruction_template_meta & INSN_HAS_IMM != 0 {
             if *insn as u8 == crate::ebpf::LD_DW_IMM {
