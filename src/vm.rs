@@ -237,6 +237,237 @@ impl DynamicAnalysis {
     }
 }
 
+/// One recorded syscall invocation
+#[derive(Clone, Debug)]
+pub struct SyscallTraceEntry {
+    pub pc: u64,
+    pub program_id: [u8; 32],
+    pub name: String,
+    pub args: [u64; 5],
+    pub result: u64,
+    pub function_pc: u64,
+    pub call_depth: u64,
+}
+
+/// One recorded memory load or store
+#[derive(Clone, Debug)]
+pub struct MemTraceEntry {
+    pub pc: u64,
+    pub program_id: [u8; 32],
+    pub is_store: bool,
+    pub size: u8,
+    pub vm_addr: u64,
+    pub value: u64,
+    pub account_idx: Option<usize>,
+    pub account_offset: Option<u64>,
+    pub function_pc: u64,
+    pub call_depth: u64,
+    /// All 12 registers at match time; only filled when `capture_regs_on_mem_match` is true
+    pub regs: Option<[u64; 12]>,
+}
+
+/// One recorded instruction execution
+#[derive(Clone, Debug)]
+pub struct InsnTraceEntry {
+    pub pc: u64,
+    pub program_id: [u8; 32],
+    pub opcode: u8,
+    pub opcode_name: &'static str,
+    pub category: &'static str,
+    pub dst: u8,
+    pub src: u8,
+    pub imm: i64,
+    pub off: i16,
+    pub dst_val_before: u64,
+    pub dst_val_after: u64,
+    pub src_val: u64,
+    /// For jump instructions: true if branch was taken
+    pub branch_taken: Option<bool>,
+    /// For jump instructions: target PC if taken
+    pub branch_target: Option<u64>,
+    pub function_pc: u64,
+    pub call_depth: u64,
+}
+
+/// Memory dump result captured at a specific PC
+#[derive(Clone, Debug, Default)]
+pub struct MemDumpResult {
+    pub pc: u64,
+    pub program_id: [u8; 32],
+    pub vm_addr: u64,
+    pub bytes: Vec<u8>,
+}
+
+/// Register snapshot captured at a specific PC
+#[derive(Clone, Debug, Default)]
+pub struct RegSnapshot {
+    pub pc: u64,
+    pub program_id: [u8; 32],
+    pub regs: [u64; 12],
+}
+
+/// CPI (cross-program invocation) decode entry
+#[derive(Clone, Debug, Default)]
+pub struct CpiDecodeEntry {
+    pub pc: u64,
+    pub program_id: [u8; 32],
+    pub accounts_len: u64,
+    pub data_len: u64,
+    pub data_preview: Vec<u8>,
+}
+
+/// One recorded function call or return
+#[derive(Clone, Debug)]
+pub struct CallTraceEntry {
+    /// PC of the CALL or RETURN instruction
+    pub pc: u64,
+    pub program_id: [u8; 32],
+    /// Target PC (for CALL: callee entry; for RETURN: return-to PC)
+    pub target_pc: u64,
+    /// function_pc at the time this instruction executes
+    pub function_pc: u64,
+    /// call_depth BEFORE this instruction (so for CALL: depth before push; for RETURN: depth after pop)
+    pub call_depth: u64,
+    /// true = RETURN, false = CALL
+    pub is_return: bool,
+    /// r0-r5 at the moment of CALL (args) or r0 at RETURN (return value)
+    pub args: [u64; 6],
+}
+
+/// VM address range of one serialized account's data region
+#[derive(Clone, Debug)]
+pub struct AccountVmRange {
+    pub vm_start: u64,
+    pub vm_end: u64,
+    pub account_idx: usize,
+}
+
+/// Instruction category flags for --trace-insn filtering
+#[derive(Clone, Debug, Default)]
+pub struct InsnTraceCategories {
+    pub call: bool,
+    pub jump: bool,
+    pub alu: bool,
+}
+
+/// Trace filtering configuration set by the host
+#[derive(Clone, Debug, Default)]
+pub struct TraceConfig {
+    pub trace_syscalls: bool,
+    pub trace_mem: bool,
+    pub trace_stream: bool,
+    pub trace_mem_read: bool,
+    pub trace_mem_write: bool,
+    pub trace_mem_sizes: Vec<u8>,
+    pub trace_mem_offset_start: Option<u64>,
+    pub trace_mem_offset_end: Option<u64>,
+    pub trace_insn: bool,
+    pub insn_categories: InsnTraceCategories,
+    pub target_program_addr: Option<u64>,
+    /// When set, only record trace entries from this program_id
+    pub trace_filter_program_id: Option<[u8; 32]>,
+    pub trace_mem_account_idx: Option<usize>,
+    pub account_ranges: Vec<AccountVmRange>,
+    pub dump_mem_specs: Vec<(u64, u64, u64)>,
+    pub trace_regs_at_pcs: Vec<u64>,
+    pub trace_mem_value_match: Option<u64>,
+    pub trace_pc_range: Option<(u64, u64)>,
+    pub trace_function_pc: Option<u64>,
+    pub trace_cpi_decode: bool,
+    pub current_program_id: [u8; 32],
+    /// Record every CALL and RETURN with args/return-value
+    pub trace_calls: bool,
+    /// When a mem_trace entry matches trace_mem_value_match, also record all 12 registers
+    pub capture_regs_on_mem_match: bool,
+    /// Print when ALU dst register matches this value
+    pub trace_alu_value_match: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub enum TraceEvent {
+    Syscall(SyscallTraceEntry),
+    MemAccess(MemTraceEntry),
+    Instruction(InsnTraceEntry),
+    Call(CallTraceEntry),
+    CpiDecode(CpiDecodeEntry),
+    MemDump(MemDumpResult),
+    RegSnapshot(RegSnapshot),
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    bytes
+        .iter()
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<String>()
+}
+
+impl TraceEvent {
+    pub fn stream_print(&self) {
+        match self {
+            TraceEvent::Syscall(e) => eprintln!(
+                "[SBPF_STREAM] SYSCALL pc={} name={} args=[{:#x},{:#x},{:#x},{:#x},{:#x}] result={:#x} program={}",
+                e.pc,
+                e.name,
+                e.args[0],
+                e.args[1],
+                e.args[2],
+                e.args[3],
+                e.args[4],
+                e.result,
+                bytes_to_hex(&e.program_id)
+            ),
+            TraceEvent::MemAccess(e) => eprintln!(
+                "[SBPF_STREAM] MEM {} {}B @ {:#x} val={:#x} acct={:?} off={:?} program={}",
+                if e.is_store { "STORE" } else { "LOAD" },
+                e.size,
+                e.vm_addr,
+                e.value,
+                e.account_idx,
+                e.account_offset,
+                bytes_to_hex(&e.program_id)
+            ),
+            TraceEvent::Instruction(e) => eprintln!(
+                "[SBPF_STREAM] INSN pc={} {} dst_before={:#x} dst_after={:#x} program={}",
+                e.pc,
+                e.opcode_name,
+                e.dst_val_before,
+                e.dst_val_after,
+                bytes_to_hex(&e.program_id)
+            ),
+            TraceEvent::Call(e) => eprintln!(
+                "[SBPF_STREAM] {} pc={} target={} depth={} program={}",
+                if e.is_return { "RET" } else { "CALL" },
+                e.pc,
+                e.target_pc,
+                e.call_depth,
+                bytes_to_hex(&e.program_id)
+            ),
+            TraceEvent::CpiDecode(e) => eprintln!(
+                "[SBPF_STREAM] CPI pc={} target_program={} accounts_len={} data_len={} program={}",
+                e.pc,
+                bytes_to_hex(&e.program_id),
+                e.accounts_len,
+                e.data_len,
+                bytes_to_hex(&e.program_id)
+            ),
+            TraceEvent::MemDump(e) => eprintln!(
+                "[SBPF_STREAM] MEMDUMP pc={} addr={:#x} len={} program={}",
+                e.pc,
+                e.vm_addr,
+                e.bytes.len(),
+                bytes_to_hex(&e.program_id)
+            ),
+            TraceEvent::RegSnapshot(e) => eprintln!(
+                "[SBPF_STREAM] REGS pc={} r0={:#x} r1={:#x} r2={:#x} program={}",
+                e.pc,
+                e.regs[0],
+                e.regs[1],
+                e.regs[2],
+                bytes_to_hex(&e.program_id)
+            ),
+        }
+    }
+}
 /// A call frame used for function calls inside the Interpreter
 #[derive(Clone, Default)]
 pub struct CallFrame {
@@ -361,6 +592,14 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub loader: Arc<BuiltinProgram<C>>,
     /// Collector for the instruction trace
     pub register_trace: Vec<RegisterTraceEntry>,
+    pub syscall_trace: Vec<SyscallTraceEntry>,
+    pub mem_trace: Vec<MemTraceEntry>,
+    pub insn_trace: Vec<InsnTraceEntry>,
+    pub call_trace: Vec<CallTraceEntry>,
+    pub mem_dump_results: Vec<MemDumpResult>,
+    pub reg_snapshots: Vec<RegSnapshot>,
+    pub cpi_decode_trace: Vec<CpiDecodeEntry>,
+    pub trace_config: TraceConfig,
     /// TCP port for the debugger interface
     #[cfg(feature = "debugger")]
     pub debug_port: Option<u16>,
@@ -407,6 +646,14 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             #[cfg(feature = "debugger")]
             debug_metadata: None,
             register_trace: Vec::default(),
+            syscall_trace: Vec::new(),
+            mem_trace: Vec::new(),
+            insn_trace: Vec::new(),
+            call_trace: Vec::new(),
+            mem_dump_results: Vec::new(),
+            reg_snapshots: Vec::new(),
+            cpi_decode_trace: Vec::new(),
+            trace_config: TraceConfig::default(),
         }
     }
 
@@ -426,6 +673,11 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         mode: &mut ExecutionMode,
         call_frames: &mut [CallFrame],
     ) -> (u64, ProgramResult) {
+        let trace_enabled = std::env::var("SBPF_TRACE").is_ok();
+        if trace_enabled {
+            *mode = ExecutionMode::Interpreted; // fix: dereference
+        }
+
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
@@ -434,9 +686,42 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
 
+        if std::env::var("SBPF_DEBUG_SYSVAR").is_ok() {
+            self.debug_dump_serialized_input();
+        }
+
         'execute: {
             match *mode {
-                ExecutionMode::Interpreted => {}
+                ExecutionMode::Interpreted => {
+                    #[cfg(feature = "debugger")]
+                    let debug_port = self.debug_port.clone();
+
+                    let mut interpreter =
+                        Interpreter::new(self, executable, self.registers, call_frames);
+
+                    if trace_enabled {
+                        // fix: only print when tracing
+                        let (prog_addr, prog_bytes) = executable.get_text_bytes();
+                        eprintln!(
+                            "[SBPF_TRACE] === START prog=0x{:x} len={} ===",
+                            prog_addr,
+                            prog_bytes.len()
+                        );
+                    }
+
+                    #[cfg(feature = "debugger")]
+                    if let Some(debug_port) = debug_port {
+                        crate::debugger::execute(&mut interpreter, debug_port);
+                    } else {
+                        while interpreter.step() {}
+                    }
+                    #[cfg(not(feature = "debugger"))]
+                    while interpreter.step() {}
+
+                    interpreter.dump_trace_on_error();
+
+                    break 'execute; // fix: explicit break so we don't hit bottom
+                }
 
                 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
                 ExecutionMode::PreferJit => {
@@ -444,6 +729,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                         *mode = ExecutionMode::Jit;
                         break 'execute compiled_program.invoke(config, self, self.registers);
                     }
+                    // fallthrough to interpreted below
                 }
                 #[cfg(not(all(
                     feature = "jit",
@@ -457,7 +743,6 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                     let Some(compiled_program) = executable.get_compiled_program() else {
                         return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
                     };
-                    *mode = ExecutionMode::Jit;
                     break 'execute compiled_program.invoke(config, self, self.registers);
                 }
                 #[cfg(not(all(
@@ -469,8 +754,8 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             }
 
             *mode = ExecutionMode::Interpreted;
-            let interpreter = Interpreter::new(self, executable, self.registers, call_frames);
-            break 'execute run_interpreter(interpreter);
+            let mut interpreter = Interpreter::new(self, executable, self.registers, call_frames);
+            while interpreter.step() {}
         }
 
         let instruction_count = if config.enable_instruction_meter {
@@ -485,7 +770,184 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         std::mem::swap(&mut result, &mut self.program_result);
         (instruction_count, result)
     }
+    fn debug_dump_serialized_input(&self) {
+        use std::convert::TryInto;
+        // Sysvar1nstructions1111111111111111111111111
+        const SYSVAR_IX_KEY: [u8; 32] = [
+            0x06, 0xa7, 0xd5, 0x17, 0x18, 0x7b, 0xd1, 0x6b, 0xcb, 0x35, 0xa1, 0x22, 0xa1, 0x7b,
+            0x7c, 0xe2, 0x55, 0xdf, 0xbf, 0x41, 0x03, 0xef, 0x19, 0xd1, 0x40, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00,
+        ];
 
+        let mm = unsafe { &self.memory_mapping.read() };
+        let all_regions = mm.get_regions();
+        let input_start = crate::ebpf::MM_INPUT_START;
+
+        // Filter to INPUT space regions only (vm_addr >= MM_INPUT_START)
+        eprintln!(
+            "[SBPF_DEBUG] === all regions: {} total, scanning INPUT space (>= 0x{:x}) ===",
+            all_regions.len(),
+            input_start
+        );
+
+        let mut sysvar_found = false;
+        let mut sysvar_data_region: Option<(u64, u64, u64)> = None; // (host, vm, len)
+
+        for (idx, r) in all_regions.iter().enumerate() {
+            if r.vm_addr_range().start < input_start {
+                continue;
+            }
+            let len = r.len() as usize;
+            if len == 0 {
+                continue;
+            }
+
+            let data = unsafe { &*r.host_buffer().ptr() };
+
+            // Search for SYSVAR_IX_KEY in this region
+            if len >= 32 {
+                for pos in 0..len.saturating_sub(31) {
+                    if &data[pos..pos + 32] == &SYSVAR_IX_KEY {
+                        sysvar_found = true;
+                        eprintln!(
+                            "[SBPF_DEBUG]   region[{}] vm=0x{:x} len={}: SYSVAR_IX_KEY at offset {} (vm 0x{:x})",
+                            idx, r.vm_addr_range().start , len, pos, r.vm_addr_range().start  + pos as u64
+                        );
+                        // Key is at offset 8 within account header
+                        if pos >= 8 {
+                            let hdr_start = pos - 8;
+                            let marker = data[hdr_start];
+                            eprintln!(
+                                "[SBPF_DEBUG]     header marker=0x{:02x} (0xff=original)",
+                                marker
+                            );
+                            if hdr_start + 88 <= len {
+                                let dl = u64::from_le_bytes(
+                                    data[hdr_start + 80..hdr_start + 88].try_into().unwrap(),
+                                );
+                                eprintln!("[SBPF_DEBUG]     data_len={}", dl);
+                                // The next region should contain sysvar data
+                                // data is mapped at vm_addr + 88 from the header start
+                                // but with direct mapping, data is in a SEPARATE region
+                                sysvar_data_region = Some((
+                                    0,
+                                    r.vm_addr_range().start + (hdr_start as u64) + 88,
+                                    dl,
+                                ));
+                            }
+                        }
+                        // Dump context around key
+                        let ctx_end = (pos + 96).min(len);
+                        eprintln!(
+                            "[SBPF_DEBUG]     context [{}..{}]: {:02x?}",
+                            pos,
+                            ctx_end,
+                            &data[pos..ctx_end]
+                        );
+                    }
+                }
+            }
+
+            // Check for sysvar data signature (03 00 = 3 instructions)
+            if len >= 4 && data[0] == 0x03 && data[1] == 0x00 {
+                eprintln!(
+                    "[SBPF_DEBUG]   region[{}] vm=0x{:x} len={}: POSSIBLE SYSVAR DATA (starts 03 00)",
+                    idx, r.vm_addr_range().start , len
+                );
+                if len >= 4 {
+                    let cur_ix = u16::from_le_bytes(data[len - 2..].try_into().unwrap());
+                    eprintln!("[SBPF_DEBUG]     current_ix={}, total_len={}", cur_ix, len);
+                }
+                let num_ix = u16::from_le_bytes(data[0..2].try_into().unwrap()) as usize;
+                for ix_i in 0..num_ix.min(4) {
+                    let off =
+                        u16::from_le_bytes(data[2 + 2 * ix_i..4 + 2 * ix_i].try_into().unwrap())
+                            as usize;
+                    if off + 2 <= len {
+                        let na =
+                            u16::from_le_bytes(data[off..off + 2].try_into().unwrap()) as usize;
+                        let pid_off = off + 2 + 33 * na;
+                        if pid_off + 32 <= len {
+                            eprintln!(
+                                "[SBPF_DEBUG]     ix[{}] off={} num_accounts={} program_id={:02x?}",
+                                ix_i,
+                                off,
+                                na,
+                                &data[pid_off..pid_off + 32]
+                            );
+                        } else {
+                            eprintln!(
+                                "[SBPF_DEBUG]     ix[{}] off={} num_accounts={} pid_off={} OUT_OF_BOUNDS",
+                                ix_i, off, na, pid_off
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // If sysvar key found but need to find its data region
+        if let Some((_, expected_vm, expected_len)) = sysvar_data_region {
+            eprintln!(
+                "[SBPF_DEBUG]   looking for sysvar data region at vm=0x{:x} len={}",
+                expected_vm, expected_len
+            );
+            if let Some((found_idx, found_r)) = mm.find_region(expected_vm) {
+                let data_offset = (expected_vm - found_r.vm_addr_range().start) as usize;
+                let avail = (found_r.len() as usize).saturating_sub(data_offset);
+                let read_len = avail.min(expected_len as usize);
+                let sdata = unsafe { &*found_r.host_buffer().ptr() };
+                eprintln!(
+                    "[SBPF_DEBUG]   sysvar data found in region[{}] vm=0x{:x}, read {} bytes",
+                    found_idx,
+                    found_r.vm_addr_range().start,
+                    read_len
+                );
+                if read_len >= 2 {
+                    let num_ix = u16::from_le_bytes(sdata[0..2].try_into().unwrap());
+                    eprintln!("[SBPF_DEBUG]     num_instructions={}", num_ix);
+                }
+                let dump_len = read_len.min(200);
+                eprintln!(
+                    "[SBPF_DEBUG]     first {} bytes: {:02x?}",
+                    dump_len,
+                    &sdata[..dump_len]
+                );
+                if read_len >= 4 {
+                    let cur_ix =
+                        u16::from_le_bytes(sdata[read_len - 2..read_len].try_into().unwrap());
+                    eprintln!("[SBPF_DEBUG]     current_instruction_index={}", cur_ix);
+                }
+            } else {
+                eprintln!(
+                    "[SBPF_DEBUG]   *** SYSVAR DATA REGION NOT FOUND at vm=0x{:x} ***",
+                    expected_vm
+                );
+            }
+        }
+
+        if !sysvar_found {
+            eprintln!(
+                "[SBPF_DEBUG]   *** NO SYSVAR_INSTRUCTIONS KEY FOUND IN ANY INPUT REGION ***"
+            );
+            // Dump summary of all INPUT regions for diagnosis
+            for (idx, r) in all_regions.iter().enumerate() {
+                if r.vm_addr_range().start < input_start || r.len() == 0 {
+                    continue;
+                }
+                let len = r.len() as usize;
+                let data = unsafe { &*r.host_buffer().ptr() };
+                eprintln!(
+                    "[SBPF_DEBUG]     region[{}] vm=0x{:x} len={} first_bytes={:02x?}",
+                    idx,
+                    r.vm_addr_range().start,
+                    len,
+                    data
+                );
+            }
+        }
+        eprintln!("[SBPF_DEBUG] === end scan ===");
+    }
     /// Invokes a built-in function
     pub fn invoke_function(&mut self, function: BuiltinFunction<C>) {
         function(
@@ -641,3 +1103,4 @@ mod tests {
         check_slot!(env, register_trace, RegisterTrace);
     }
 }
+
