@@ -236,7 +236,7 @@ impl X86Instruction {
             second_operand: destination as u8,
             immediate_size: match opcode {
                 0xc1 => OperandSize::S8,
-                0x81 => OperandSize::S32,
+                0x69 | 0x81 => OperandSize::S32,
                 0xf7 if opcode_extension == 0 => OperandSize::S32,
                 _ => OperandSize::S0,
             },

@@ -33,7 +33,7 @@ use crate::{
         allocate_pages_pooled, free_pages_pooled, get_system_page_size, protect_pages,
         round_to_page_size, PagePermissions,
     },
-    memory_region::MemoryMapping,
+    memory_region::{MemoryMapping, MemoryRegion},
     program::BuiltinFunction,
     vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm, RuntimeEnvironmentSlot},
     x86::{
@@ -44,7 +44,10 @@ use crate::{
 };
 
 /// The maximum machine code length in bytes of a program with no guest instructions
-pub const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
+pub const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 8192;
+const STOCK_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
+// Covers all twelve shared fast paths, including randomized NOPs.
+const ALIGNED_TRANSLATION_CODE_RESERVE: usize = 4096;
 /// The maximum machine code length in bytes of a single guest instruction
 pub const MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION: usize = 110;
 /// The maximum machine code length in bytes of an instruction meter checkpoint
@@ -68,12 +71,25 @@ pub struct JitProgram {
 }
 
 impl JitProgram {
-    fn new(pc: usize, code_size: usize) -> Result<Self, EbpfError> {
+    fn new(pc: usize, code_size: usize, reserve: Option<usize>) -> Result<(Self, bool), EbpfError> {
         let page_size = get_system_page_size();
         let pc_loc_table_size = round_to_page_size(pc * std::mem::size_of::<u32>(), page_size);
         let over_allocated_code_size = round_to_page_size(code_size, page_size);
         let (raw, allocation_size) =
             allocate_pages_pooled(pc_loc_table_size + over_allocated_code_size);
+
+        // Only spend the spare tail of the pooled allocation, so the allocation request
+        // and its size class stay unchanged.
+        let text_size = match reserve {
+            Some(reserve)
+                if over_allocated_code_size + reserve
+                    <= allocation_size.saturating_sub(pc_loc_table_size) =>
+            {
+                over_allocated_code_size + reserve
+            }
+            _ => over_allocated_code_size,
+        };
+        let reserved = text_size != over_allocated_code_size;
 
         unsafe {
             let pc_section = std::slice::from_raw_parts_mut(raw.cast::<u32>(), pc);
@@ -82,15 +98,20 @@ impl JitProgram {
             // relative_to_target_pc. The pool may hand back recycled memory, so
             // zero just the pc_section bytes here.
             pc_section.fill(0);
-            Ok(Self {
-                page_size,
-                allocation_size,
-                pc_section,
-                text_section: std::slice::from_raw_parts_mut(
-                    raw.add(pc_loc_table_size),
-                    over_allocated_code_size,
-                ),
-            })
+            Ok((
+                Self {
+                    page_size,
+                    allocation_size,
+                    pc_section,
+                    // Slice the allocation directly instead of widening the estimate sized
+                    // view, which would only have provenance up to its own length.
+                    text_section: std::slice::from_raw_parts_mut(
+                        raw.add(pc_loc_table_size),
+                        text_size,
+                    ),
+                },
+                reserved,
+            ))
         }
     }
 
@@ -360,6 +381,7 @@ pub struct JitCompiler<'a, C: ContextObject> {
     immediate_value_key: i64,
     diversification_rng: SmallRng,
     stopwatch_is_active: bool,
+    enable_aligned_translation: bool,
 }
 
 #[rustfmt::skip]
@@ -383,7 +405,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             pc = program.len() / ebpf::INSN_SIZE;
         }
 
-        let mut code_length_estimate = MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH + MAX_START_PADDING_LENGTH + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION * pc;
+        let mut code_length_estimate = STOCK_EMPTY_PROGRAM_MACHINE_CODE_LENGTH + MAX_START_PADDING_LENGTH + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION * pc;
         if config.noop_instruction_rate != 0 {
             code_length_estimate += code_length_estimate / config.noop_instruction_rate as usize;
         }
@@ -397,8 +419,13 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         let mut diversification_rng = SmallRng::from_rng(thread_rng()).map_err(|_| EbpfError::JitNotCompiled)?;
         let immediate_value_key = diversification_rng.gen::<i64>();
 
+        let reserve = (config.enable_address_translation
+            && (config.aligned_memory_mapping || executable.get_sbpf_version() >= crate::program::SBPFVersion::V4))
+            .then_some(ALIGNED_TRANSLATION_CODE_RESERVE);
+        let (result, enable_aligned_translation) = JitProgram::new(pc, code_length_estimate, reserve)?;
+
         Ok(Self {
-            result: JitProgram::new(pc, code_length_estimate)?,
+            result,
             text_section_jumps: vec![],
             anchors: [std::ptr::null(); ANCHOR_COUNT],
             offset_in_text_section: 0,
@@ -414,6 +441,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             immediate_value_key,
             diversification_rng,
             stopwatch_is_active: false,
+            enable_aligned_translation,
         })
     }
 
@@ -1189,6 +1217,88 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // RSP += 8;
     }
 
+    // Record the displacement before emit_ins can append a randomized NOP.
+    fn emit_local_jump(&mut self, opcode: u8) -> usize {
+        let displacement = self.offset_in_text_section + 2;
+        self.emit_ins(X86Instruction::conditional_jump_immediate(opcode, 0));
+        displacement
+    }
+
+    fn resolve_local_jump(&mut self, displacement: usize) {
+        let relative = i32::try_from(self.offset_in_text_section as isize - (displacement + 4) as isize).unwrap();
+        self.result.text_section[displacement..displacement + 4].copy_from_slice(&relative.to_le_bytes());
+    }
+
+    fn emit_aligned_translation(&mut self, len: u64, is_store: bool, decode_immediate: bool) {
+        // R11 carries the guest address on entry and the load result on return.
+        // Preserve RAX and RCX. Entry RSP points to the return address; the PC at RSP - 8
+        // and store value at RSP - 88 stay untouched until the fallback.
+        // These spill slots are inside the ABI red zone; no call occurs before
+        // restoring them, and they do not overlap the caller's saved values.
+        for (reg, offset) in [(RAX, -16), (RCX, -24)] {
+            self.emit_ins(X86Instruction::store(OperandSize::S64, reg, RSP, X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)));
+        }
+        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, RAX, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping))));
+        self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_SCRATCH, RCX));
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 5, RCX, ebpf::VIRTUAL_ADDRESS_BITS as i64, None));
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x3b, RCX, RAX, Some(X86IndirectAccess::Offset(mem::offset_of!(MemoryMapping, jit_regions_len) as i32))));
+        let region_miss = self.emit_local_jump(0x83); // index >= length (also handles a disabled view)
+        self.emit_ins(X86Instruction::load(OperandSize::S64, RAX, RAX, X86IndirectAccess::Offset(mem::offset_of!(MemoryMapping, jit_regions) as i32)));
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x69, RCX as u8, RCX, mem::size_of::<MemoryRegion>() as i64, None));
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, RCX, RAX, None));
+        let readonly_store = if is_store {
+            self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S8, RAX, 0, Some(X86IndirectAccess::Offset(mem::offset_of!(MemoryRegion, is_writable) as i32))));
+            Some(self.emit_local_jump(0x84))
+        } else {
+            None
+        };
+        // Earlier failures have not modified the guest address and need no R11 spill.
+        self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, RSP, X86IndirectAccess::OffsetIndexShift(-32, RSP, 0)));
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_SCRATCH, RAX, Some(X86IndirectAccess::Offset(mem::offset_of!(MemoryRegion, vm_addr) as i32))));
+        let before_region = self.emit_local_jump(0x82); // address precedes the region's actual start
+        self.emit_ins(X86Instruction::test(OperandSize::S64, REGISTER_SCRATCH, RAX, Some(X86IndirectAccess::Offset(mem::offset_of!(MemoryRegion, gap_bit) as i32))));
+        let stack_gap = self.emit_local_jump(0x85);
+        // With the gap bit clear, high / 2 and low do not overlap, where
+        // high = offset & gap_mask. Thus offset - high / 2 = high / 2 | low.
+        self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_SCRATCH, RCX));
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x23, RCX, RAX, Some(X86IndirectAccess::Offset(mem::offset_of!(MemoryRegion, gap_mask) as i32))));
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 5, RCX, 1, None));
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, RCX, REGISTER_SCRATCH, None));
+        self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_SCRATCH, RCX));
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RCX, len as i64, None));
+        let extent_overflow = self.emit_local_jump(0x82); // extent overflow
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x3b, RCX, RAX, Some(X86IndirectAccess::Offset(mem::offset_of!(MemoryRegion, len) as i32))));
+        let out_of_bounds = self.emit_local_jump(0x87);
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x03, REGISTER_SCRATCH, RAX, Some(X86IndirectAccess::Offset(mem::offset_of!(MemoryRegion, host_addr) as i32))));
+        let size = match len { 1 => OperandSize::S8, 2 => OperandSize::S16, 4 => OperandSize::S32, 8 => OperandSize::S64, _ => unreachable!() };
+        if is_store {
+            self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, RCX, X86IndirectAccess::OffsetIndexShift(-88, RSP, 0)));
+            if decode_immediate {
+                self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RCX, self.immediate_value_key as i32 as i64, None));
+            }
+            // CL avoids the legacy high-byte encoding of SIL when no REX prefix is emitted.
+            self.emit_ins(X86Instruction::store(size, RCX, REGISTER_SCRATCH, X86IndirectAccess::Offset(0)));
+        } else {
+            self.emit_ins(X86Instruction::load(size, REGISTER_SCRATCH, REGISTER_SCRATCH, X86IndirectAccess::Offset(0)));
+        }
+        for (reg, offset) in [(RCX, -24), (RAX, -16)] {
+            self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, reg, X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)));
+        }
+        // Return without reserving or popping the PC slot on successful accesses.
+        self.emit_ins(X86Instruction::return_near());
+        for displacement in [before_region, stack_gap, extent_overflow, out_of_bounds] {
+            self.resolve_local_jump(displacement);
+        }
+        self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, REGISTER_SCRATCH, X86IndirectAccess::OffsetIndexShift(-32, RSP, 0)));
+        self.resolve_local_jump(region_miss);
+        if let Some(displacement) = readonly_store {
+            self.resolve_local_jump(displacement);
+        }
+        for (reg, offset) in [(RCX, -24), (RAX, -16)] {
+            self.emit_ins(X86Instruction::load(OperandSize::S64, RSP, reg, X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)));
+        }
+    }
+
     fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
         let value_stack_slot = X86IndirectAccess::OffsetIndexShift(-96, RSP, 0);
@@ -1659,6 +1769,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         ] {
             let target_offset = *anchor_base + len.trailing_zeros() as usize;
             self.set_anchor(ANCHOR_TRANSLATE_MEMORY_ADDRESS + target_offset);
+            if self.enable_aligned_translation {
+                let start = self.offset_in_text_section;
+                self.emit_aligned_translation(*len as u64, *anchor_base != 0, *anchor_base == 8);
+                debug_assert!(self.offset_in_text_section - start <= ALIGNED_TRANSLATION_CODE_RESERVE / 12);
+            }
             // skip over the pc slot pushed by the caller, we'll pop it before returning
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 8, None)); // RSP -= 8
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
@@ -1747,5 +1862,102 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 - mem::size_of::<i32>() as i32; // Jump from end of instruction
             unsafe { ptr::write_unaligned(jump.location as *mut i32, offset_value); }
         }
+    }
+}
+
+#[cfg(all(test, not(feature = "shuttle-test")))]
+mod shared_translation_tests {
+    use super::*;
+    use crate::{
+        program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        static_analysis::DummyContextObject,
+        verifier::RequisiteVerifier,
+    };
+    use std::sync::Arc;
+
+    fn executable(
+        instruction_count: usize,
+        noop_instruction_rate: u32,
+    ) -> Executable<DummyContextObject> {
+        let mut program = [ebpf::ADD64_IMM, 0, 0, 0, 0, 0, 0, 0].repeat(instruction_count - 1);
+        program.extend_from_slice(&[ebpf::EXIT, 0, 0, 0, 0, 0, 0, 0]);
+        let config = Config {
+            aligned_memory_mapping: true,
+            noop_instruction_rate,
+            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+            ..Config::default()
+        };
+        let executable = Executable::from_text_bytes(
+            &program,
+            Arc::new(BuiltinProgram::new_loader(config)),
+            SBPFVersion::V0,
+            FunctionRegistry::default(),
+        )
+        .unwrap();
+        executable.verify::<RequisiteVerifier>().unwrap();
+        executable
+    }
+
+    #[test]
+    fn shared_paths_fit_reserve_with_a_nop_after_every_instruction() {
+        let executable = executable(1, 1);
+        let mut compiler = JitCompiler::new(&executable).unwrap();
+        assert!(compiler.enable_aligned_translation);
+        compiler.next_noop_insertion = 0;
+        compiler.noop_range = Uniform::new_inclusive(0, 0);
+        for (is_store, decode_immediate) in [(false, false), (true, false), (true, true)] {
+            for len in [1, 2, 4, 8] {
+                let start = compiler.offset_in_text_section;
+                compiler.emit_aligned_translation(len, is_store, decode_immediate);
+                assert!(
+                    compiler.offset_in_text_section - start
+                        <= ALIGNED_TRANSLATION_CODE_RESERVE / 12
+                );
+            }
+        }
+        assert!(compiler.offset_in_text_section <= ALIGNED_TRANSLATION_CODE_RESERVE);
+    }
+
+    #[test]
+    fn immediate_multiply_encodes_both_register_operands() {
+        let executable = executable(1, 0);
+        let mut compiler = JitCompiler::new(&executable).unwrap();
+        compiler.emit_ins(X86Instruction::alu_immediate(
+            OperandSize::S64,
+            0x69,
+            RCX as u8,
+            RCX,
+            56,
+            None,
+        ));
+        assert_eq!(
+            &compiler.result.text_section[..compiler.offset_in_text_section],
+            &[0x48, 0x69, 0xc9, 56, 0, 0, 0],
+        );
+    }
+
+    #[test]
+    fn insufficient_allocation_slack_keeps_original_helpers() {
+        for instruction_count in 1..=4096 {
+            let executable = executable(instruction_count, 0);
+            let compiler = JitCompiler::new(&executable).unwrap();
+            if !compiler.enable_aligned_translation {
+                let allocation_size = compiler.result.allocation_size;
+                let compiled = compiler.compile().unwrap();
+                assert_eq!(compiled.mem_size(), allocation_size);
+                return;
+            }
+        }
+        panic!("expected to encounter a full pool size class");
+    }
+
+    #[test]
+    fn large_program_compiles_in_its_stock_size_class() {
+        let executable = executable(700_001, 256);
+        executable.jit_compile().unwrap();
+        assert_eq!(
+            executable.get_compiled_program().unwrap().mem_size(),
+            128 * 1024 * 1024
+        );
     }
 }
