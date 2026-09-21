@@ -45,7 +45,7 @@ pub mod static_analysis;
 pub mod verifier;
 pub mod vm;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-mod x86;
+pub mod x86;
 
 trait ErrCheckedArithmetic: Sized {
     fn err_checked_add(self, other: Self) -> Result<Self, ArithmeticOverflow>;
