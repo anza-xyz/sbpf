@@ -238,7 +238,8 @@ const ANCHOR_INTERNAL_FUNCTION_CALL_REG: usize = 14;
 const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 21;
 const ANCHOR_COUNT: usize = 34; // Update me when adding or removing anchors
 
-const REGISTER_MAP: [X86Register; 11] = [
+/// Mapping of guest to host registers
+pub const REGISTER_MAP: [X86Register; 11] = [
     CALLER_SAVED_REGISTERS[0], // RAX
     ARGUMENT_REGISTERS[1],     // RSI
     ARGUMENT_REGISTERS[2],     // RDX
@@ -253,11 +254,11 @@ const REGISTER_MAP: [X86Register; 11] = [
 ];
 
 /// RDI: Used together with slot_in_vm()
-const REGISTER_PTR_TO_VM: X86Register = ARGUMENT_REGISTERS[0];
+pub const REGISTER_PTR_TO_VM: X86Register = ARGUMENT_REGISTERS[0];
 /// R10: Program counter limit
-const REGISTER_INSTRUCTION_METER: X86Register = CALLER_SAVED_REGISTERS[7];
+pub const REGISTER_INSTRUCTION_METER: X86Register = CALLER_SAVED_REGISTERS[7];
 /// R11: Scratch register
-const REGISTER_SCRATCH: X86Register = CALLER_SAVED_REGISTERS[8];
+pub const REGISTER_SCRATCH: X86Register = CALLER_SAVED_REGISTERS[8];
 
 /// Bit width of an instruction operand
 #[derive(Copy, Clone, Debug)]
