@@ -274,17 +274,28 @@ pub enum OperandSize {
     S64 = 64,
 }
 
-enum Value {
+/// Instruction operand
+///
+/// Last boolean on variants flags user provided values.
+pub enum Value {
+    /// Register value used as is
     Register(X86Register),
+    /// Register dereferenced via memory load
     RegisterIndirect(X86Register, i32, bool),
+    /// Register value plus a i32
     RegisterPlusConstant32(X86Register, i32, bool),
+    /// Register value plus a i64
     RegisterPlusConstant64(X86Register, i64, bool),
+    /// Constant i64
     Constant64(i64, bool),
 }
 
-struct Argument {
-    index: usize,
-    value: Value,
+/// Function call argument
+pub struct Argument {
+    /// Position in the function signature
+    pub index: usize,
+    /// Value to pass in that position
+    pub value: Value,
 }
 
 #[derive(Debug)]
@@ -886,7 +897,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         Ok(self.result)
     }
 
-    fn should_sanitize_constant(&self, value: i64) -> bool {
+    /// Some user provided constants can skip sanitization, returns `false` for those
+    pub fn should_sanitize_constant(&self, value: i64) -> bool {
         if !self.config.sanitize_user_provided_values {
             return false;
         }
@@ -905,11 +917,13 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
-    fn slot_in_vm(&self, slot: RuntimeEnvironmentSlot) -> i32 {
+    /// Decrypts and offsets the vm structure for `X86IndirectAccess::Offset()`
+    pub fn slot_in_vm(&self, slot: RuntimeEnvironmentSlot) -> i32 {
         (slot as i32) - self.runtime_environment_key
     }
 
-    pub(crate) fn emit<T>(&mut self, data: T) {
+    /// Emits a fixed length machinecode sequence into the text section
+    pub fn emit<T>(&mut self, data: T) {
         unsafe {
             let ptr = self.result.text_section.as_ptr().add(self.offset_in_text_section);
             #[allow(clippy::cast_ptr_alignment)]
@@ -918,7 +932,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.offset_in_text_section += mem::size_of::<T>();
     }
 
-    pub(crate) fn emit_variable_length(&mut self, size: OperandSize, data: u64) {
+    /// Emits a variable length machinecode sequence into the text section
+    pub fn emit_variable_length(&mut self, size: OperandSize, data: u64) {
         match size {
             OperandSize::S0 => {},
             OperandSize::S8 => self.emit::<u8>(data as u8),
@@ -928,9 +943,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
+    /// Emits a [X86Instruction] into the text section
     // This function helps the optimizer to inline the machinecode emission while avoiding stack allocations
     #[inline(always)]
-    fn emit_ins(&mut self, instruction: X86Instruction) {
+    pub fn emit_ins(&mut self, instruction: X86Instruction) {
         instruction.emit(self);
         if self.next_noop_insertion == 0 {
             self.next_noop_insertion = self.noop_range.sample(&mut self.diversification_rng);
@@ -941,7 +957,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
-    fn emit_sanitized_load_immediate(&mut self, destination: X86Register, value: i64) {
+    /// Loads a user provided constant into the destination with sanitization
+    pub fn emit_sanitized_load_immediate(&mut self, destination: X86Register, value: i64) {
         let lower_key = self.immediate_value_key as i32 as i64;
         if value >= i32::MIN as i64 && value <= i32::MAX as i64 {
             self.emit_ins(X86Instruction::load_immediate(destination, value.wrapping_sub(lower_key)));
@@ -963,7 +980,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
-    fn emit_sanitized_alu(&mut self, size: OperandSize, opcode: u8, opcode_extension: u8, destination: X86Register, immediate: i64) {
+    /// Performs arithmetic on a user provided immediate value with sanitization
+    pub fn emit_sanitized_alu(&mut self, size: OperandSize, opcode: u8, opcode_extension: u8, destination: X86Register, immediate: i64) {
         if self.should_sanitize_constant(immediate) {
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
             self.emit_ins(X86Instruction::alu(size, opcode, REGISTER_SCRATCH, destination, None));
@@ -995,7 +1013,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::pop(RDX));
     }
 
-    fn emit_validate_instruction_count(&mut self, pc: Option<usize>) {
+    /// Emits a instruction meter check (without any updates thereof)
+    pub fn emit_validate_instruction_count(&mut self, pc: Option<usize>) {
         if !self.config.enable_instruction_meter {
             return;
         }
@@ -1009,25 +1028,29 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
     }
 
-    fn emit_profile_instruction_count(&mut self, target_pc: usize) {
+    /// Charges the instruction meter (without any check thereof)
+    pub fn emit_profile_instruction_count(&mut self, target_pc: usize) {
         if !self.config.enable_instruction_meter {
             return;
         }
         self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, target_pc as i64 - self.pc as i64 - 1); // instruction_meter += target_pc - (self.pc + 1);
     }
 
-    fn emit_undo_profile_instruction_count(&mut self, target_pc: usize) {
+    /// Refunds the instruction meter (without any check thereof)
+    pub fn emit_undo_profile_instruction_count(&mut self, target_pc: usize) {
         if self.config.enable_instruction_meter {
             self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, self.pc as i64 + 1 - target_pc as i64); // instruction_meter += (self.pc + 1) - target_pc;
         }
     }
 
-    fn emit_validate_and_profile_instruction_count(&mut self, target_pc: usize) {
+    /// Checks and charges the instruction meter
+    pub fn emit_validate_and_profile_instruction_count(&mut self, target_pc: usize) {
         self.emit_validate_instruction_count(Some(self.pc));
         self.emit_profile_instruction_count(target_pc);
     }
 
-    fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<X86Register>) {
+    /// Calls an external Rust function
+    pub fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<X86Register>) {
         let mut saved_registers = CALLER_SAVED_REGISTERS.to_vec();
         if let Some(reg) = result_reg {
             if let Some(dst) = saved_registers.iter().position(|x| *x == reg) {
@@ -1139,7 +1162,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
-    fn emit_internal_call(&mut self, dst: Value) {
+    /// Calls an internal function within the same program
+    pub fn emit_internal_call(&mut self, dst: Value) {
         // Store PC in case the bounds check fails
         self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
         self.last_instruction_meter_validation_pc = self.pc;
@@ -1180,7 +1204,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
-    /// Emits a syscall handler invocation
+    /// Calls an external function from the syscall registry
     pub fn emit_external_call(&mut self, function: BuiltinFunction<C>) {
         self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, function as usize as i64));
         self.emit_ins(X86Instruction::push(REGISTER_SCRATCH, None));
@@ -1189,7 +1213,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // RSP += 8;
     }
 
-    fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
+    /// Helper for load and store instructions
+    pub fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
         let value_stack_slot = X86IndirectAccess::OffsetIndexShift(-96, RSP, 0);
 
@@ -1274,7 +1299,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
-    fn emit_conditional_branch_reg(&mut self, size: OperandSize, op: u8, bitwise: bool, first_operand: X86Register, second_operand: X86Register, target_pc: usize) {
+    /// Helper for conditional branch instructions without an immediate value
+    pub fn emit_conditional_branch_reg(&mut self, size: OperandSize, op: u8, bitwise: bool, first_operand: X86Register, second_operand: X86Register, target_pc: usize) {
         self.emit_validate_and_profile_instruction_count(target_pc);
         if bitwise { // Logical
             self.emit_ins(X86Instruction::test(size, first_operand, second_operand, None));
@@ -1286,7 +1312,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_undo_profile_instruction_count(target_pc);
     }
 
-    fn emit_conditional_branch_imm(&mut self, size: OperandSize, op: u8, bitwise: bool, immediate: i64, second_operand: X86Register, target_pc: usize) {
+    /// Helper for conditional branch instructions with an immediate value
+    pub fn emit_conditional_branch_imm(&mut self, size: OperandSize, op: u8, bitwise: bool, immediate: i64, second_operand: X86Register, target_pc: usize) {
         self.emit_validate_and_profile_instruction_count(target_pc);
         if self.should_sanitize_constant(immediate) {
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, immediate);
@@ -1305,7 +1332,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_undo_profile_instruction_count(target_pc);
     }
 
-    fn emit_shift(&mut self, size: OperandSize, opcode_extension: u8, source: X86Register, destination: X86Register, immediate: Option<i64>) {
+    /// Helper for bit shift instructions
+    pub fn emit_shift(&mut self, size: OperandSize, opcode_extension: u8, source: X86Register, destination: X86Register, immediate: Option<i64>) {
         if let Some(immediate) = immediate {
             self.emit_ins(X86Instruction::alu_immediate(size, 0xc1, opcode_extension, destination, immediate, None));
             return;
@@ -1329,8 +1357,9 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
     }
 
+    /// Helper for multiplication and division instructions
     #[allow(clippy::too_many_arguments)]
-    fn emit_product_quotient_remainder(
+    pub fn emit_product_quotient_remainder(
         &mut self,
         size: OperandSize,
         alt_dst: bool,
@@ -1715,16 +1744,19 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.anchors[anchor] = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section) };
     }
 
-    // instruction_length = 5 (Unconditional jump / call)
-    // instruction_length = 6 (Conditional jump)
-    fn relative_to_anchor(&self, anchor: usize, instruction_length: usize) -> i32 {
+    /// Resolves or records a relocation for jumps/calls to the subroutines
+    ///
+    /// instruction_length = 5 (Unconditional jump / call)
+    /// instruction_length = 6 (Conditional jump)
+    pub fn relative_to_anchor(&self, anchor: usize, instruction_length: usize) -> i32 {
         let instruction_end = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section).add(instruction_length) };
         let destination = self.anchors[anchor];
         debug_assert!(!destination.is_null());
         (unsafe { destination.offset_from(instruction_end) } as i32) // Relative jump
     }
 
-    fn relative_to_target_pc(&mut self, target_pc: usize, instruction_length: usize) -> i32 {
+    /// Resolves or records a relocation for jumps/calls inside the program
+    pub fn relative_to_target_pc(&mut self, target_pc: usize, instruction_length: usize) -> i32 {
         let instruction_end = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section).add(instruction_length) };
         let destination = if self.result.pc_section[target_pc] != 0 {
             // Backward jump
