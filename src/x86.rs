@@ -1,3 +1,5 @@
+//! Machinecode emission for x86-64
+
 #![allow(clippy::arithmetic_side_effects)]
 use crate::{
     jit::{JitCompiler, OperandSize},
@@ -13,41 +15,70 @@ macro_rules! exclude_operand_sizes {
     }
 }
 
+/// Symbolic names for x86-64 registers
 #[allow(dead_code, clippy::upper_case_acronyms)]
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[repr(u8)]
 pub enum X86Register {
+    /// eax / rax
     RAX = 0,
+    /// ecx / rcx
     RCX = 1,
+    /// edx / rdx
     RDX = 2,
+    /// ebx / rbx
     RBX = 3,
+    /// esp / rsp
     RSP = 4,
+    /// ebp / rbp
     RBP = 5,
+    /// esi / rsi
     RSI = 6,
+    /// edi / rdi
     RDI = 7,
+    /// r8d / r8
     R8 = 8,
+    /// r9d / r9
     R9 = 9,
+    /// r10d / r10
     R10 = 10,
+    /// r11d / r11
     R11 = 11,
+    /// r12d / r12
     R12 = 12,
+    /// r13d / r13
     R13 = 13,
+    /// r14d / r14
     R14 = 14,
+    /// r15d / r15
     R15 = 15,
+    /// mm0
     MM0 = 16,
+    /// mm1
     MM1 = 17,
+    /// mm2
     MM2 = 18,
+    /// mm3
     MM3 = 19,
+    /// mm4
     MM4 = 20,
+    /// mm5
     MM5 = 21,
+    /// mm6
     MM6 = 22,
+    /// mm7
     MM7 = 23,
 }
 use X86Register::*;
 
 // System V AMD64 ABI
 // Works on: Linux, macOS, BSD and Solaris but not on Windows
+
+/// Registers which can pass arguments at function calls
 pub const ARGUMENT_REGISTERS: [X86Register; 6] = [RDI, RSI, RDX, RCX, R8, R9];
+/// Registers which have to be saved by the caller
 pub const CALLER_SAVED_REGISTERS: [X86Register; 9] = [RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11];
+/// Registers which have to be saved by the callee
 pub const CALLEE_SAVED_REGISTERS: [X86Register; 6] = [RBP, RBX, R12, R13, R14, R15];
 
 struct X86Rex {
@@ -69,6 +100,7 @@ struct X86Sib {
     base: u8,
 }
 
+/// Scale, index, base (SIB)
 #[derive(Copy, Clone)]
 pub enum X86IndirectAccess {
     /// [second_operand + offset]
@@ -79,7 +111,7 @@ pub enum X86IndirectAccess {
 
 #[allow(dead_code)]
 #[derive(Copy, Clone)]
-pub enum FenceType {
+pub(crate) enum FenceType {
     /// lfence
     Load = 5,
     /// mfence
@@ -88,6 +120,7 @@ pub enum FenceType {
     Store = 7,
 }
 
+/// Generic x86 instruction frame
 #[derive(Copy, Clone)]
 pub struct X86Instruction {
     size: OperandSize,
@@ -102,6 +135,7 @@ pub struct X86Instruction {
 }
 
 impl X86Instruction {
+    /// Can be used to fill out unspecified fields in the constructor
     pub const DEFAULT: X86Instruction = X86Instruction {
         size: OperandSize::S0,
         opcode_escape_sequence: 0,
@@ -114,6 +148,7 @@ impl X86Instruction {
         immediate: 0,
     };
 
+    /// Emits this instruction into the text section
     #[inline(always)]
     pub fn emit<C: ContextObject>(&self, jit: &mut JitCompiler<C>) {
         debug_assert!(!matches!(self.size, OperandSize::S0));
@@ -810,7 +845,7 @@ impl X86Instruction {
 
     /// lfence / sfence / mfence
     #[allow(dead_code)]
-    pub const fn fence(fence_type: FenceType) -> Self {
+    pub(crate) const fn fence(fence_type: FenceType) -> Self {
         Self {
             size: OperandSize::S32,
             opcode_escape_sequence: 1,

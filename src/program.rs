@@ -424,9 +424,7 @@ macro_rules! declare_builtin_function {
         ) -> Result<$Ok:ty, $Err:ty> {
             $($rust:tt)*
         }
-        $(fn codegen(
-            $jit:ident : &mut $crate::program::JitCompiler<$ContextObject2:ty>,
-        ) {
+        $(fn codegen($jit:ident : &mut JitCompiler<$ContextObject2:ty>) {
             $($codegen:tt)*
         })?
     ) => {
