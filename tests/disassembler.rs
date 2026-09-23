@@ -9,10 +9,13 @@
 // copied, modified, or distributed except according to those terms.
 
 extern crate solana_sbpf;
-use solana_sbpf::program::SBPFVersion;
+use solana_sbpf::disassembler::disassemble_instruction;
+use solana_sbpf::ebpf::{self, Insn};
+use solana_sbpf::program::{FunctionRegistry, SBPFVersion};
 use solana_sbpf::{
     assembler::assemble, program::BuiltinProgram, static_analysis::Analysis, vm::Config,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use test_utils::TestContextObject;
 
@@ -402,4 +405,25 @@ fn test_callx() {
         };
         disasm!("entrypoint:\n    callx r8\n", config);
     }
+}
+
+#[test]
+fn test_disable_lddw() {
+    let insn = Insn {
+        opc: ebpf::LD_DW_IMM,
+        ptr: 0,
+        dst: 0,
+        src: 0,
+        off: 0,
+        imm: 0,
+    };
+    let result = disassemble_instruction(
+        &insn,
+        0,
+        &BTreeMap::new(),
+        &FunctionRegistry::default(),
+        &BuiltinProgram::<TestContextObject>::new_mock(),
+        SBPFVersion::V2,
+    );
+    assert_eq!(result, format!("unknown opcode={:#x}", insn.opc))
 }
