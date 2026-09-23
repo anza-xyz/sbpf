@@ -474,7 +474,7 @@ fn test_hor64() {
         off: 0,
         imm: 42,
     };
-    const HOR: &str = "hor r1, 42";
+    const HOR: &str = "hor64 r1, 42";
     const UNKNOWN: &str = "unknown opcode=0xf7";
     for (version, expected) in [
         (SBPFVersion::V0, UNKNOWN),
