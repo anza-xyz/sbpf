@@ -39,6 +39,17 @@ macro_rules! disasm {
     }};
 }
 
+fn disasm_single_insn(insn: &Insn, sbpf_version: SBPFVersion) -> String {
+    disassemble_instruction(
+        insn,
+        0,
+        &BTreeMap::new(),
+        &FunctionRegistry::default(),
+        &BuiltinProgram::<TestContextObject>::new_mock(),
+        sbpf_version,
+    )
+}
+
 #[test]
 fn test_empty() {
     disasm!("");
@@ -417,13 +428,24 @@ fn test_disable_lddw() {
         off: 0,
         imm: 0,
     };
-    let result = disassemble_instruction(
-        &insn,
-        0,
-        &BTreeMap::new(),
-        &FunctionRegistry::default(),
-        &BuiltinProgram::<TestContextObject>::new_mock(),
-        SBPFVersion::V2,
+    assert_eq!(
+        disasm_single_insn(&insn, SBPFVersion::V0),
+        format!("lddw r0, 0x0")
     );
-    assert_eq!(result, format!("unknown opcode={:#x}", insn.opc))
+    assert_eq!(
+        disasm_single_insn(&insn, SBPFVersion::V1),
+        format!("lddw r0, 0x0")
+    );
+    assert_eq!(
+        disasm_single_insn(&insn, SBPFVersion::V2),
+        format!("unknown opcode={:#x}", insn.opc)
+    );
+    assert_eq!(
+        disasm_single_insn(&insn, SBPFVersion::V3),
+        format!("lddw r0, 0x0")
+    );
+    assert_eq!(
+        disasm_single_insn(&insn, SBPFVersion::V4),
+        format!("lddw r0, 0x0")
+    );
 }
