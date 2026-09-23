@@ -423,17 +423,30 @@ fn test_disable_lddw() {
     let insn = Insn {
         opc: ebpf::LD_DW_IMM,
         ptr: 0,
-        dst: 0,
+        dst: 1,
         src: 0,
         off: 0,
-        imm: 0,
+        imm: 42,
     };
-    assert_eq!(disasm_one(&insn, SBPFVersion::V0), format!("lddw r0, 0x0"));
-    assert_eq!(disasm_one(&insn, SBPFVersion::V1), format!("lddw r0, 0x0"));
-    assert_eq!(
-        disasm_one(&insn, SBPFVersion::V2),
-        format!("unknown opcode={:#x}", insn.opc)
-    );
-    assert_eq!(disasm_one(&insn, SBPFVersion::V3), format!("lddw r0, 0x0"));
-    assert_eq!(disasm_one(&insn, SBPFVersion::V4), format!("lddw r0, 0x0"));
+    for (version, expected) in [
+        (
+            SBPFVersion::V0,
+            format!("lddw r{:}, {:#x}", insn.dst, insn.imm),
+        ),
+        (
+            SBPFVersion::V1,
+            format!("lddw r{:}, {:#x}", insn.dst, insn.imm),
+        ),
+        (SBPFVersion::V2, format!("unknown opcode={:#x}", insn.opc)),
+        (
+            SBPFVersion::V3,
+            format!("lddw r{:}, {:#x}", insn.dst, insn.imm),
+        ),
+        (
+            SBPFVersion::V4,
+            format!("lddw r{:}, {:#x}", insn.dst, insn.imm),
+        ),
+    ] {
+        assert_eq!(disasm_one(&insn, version), expected);
+    }
 }
