@@ -173,7 +173,7 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::MOV32_REG  => { name = "mov32";  desc = alu_reg_str(name, insn);  },
         ebpf::ARSH32_IMM => { name = "arsh32"; desc = alu_imm_str(name, insn);  },
         ebpf::ARSH32_REG => { name = "arsh32"; desc = alu_reg_str(name, insn);  },
-        ebpf::LE         => { name = "le";     desc = byteswap_str(name, insn); },
+        ebpf::LE         if !sbpf_version.disable_le() => { name = "le";     desc = byteswap_str(name, insn); },
         ebpf::BE         => { name = "be";     desc = byteswap_str(name, insn); },
 
         // BPF_ALU64_STORE class
