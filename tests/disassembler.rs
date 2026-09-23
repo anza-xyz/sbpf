@@ -440,3 +440,26 @@ fn test_disable_lddw() {
         assert_eq!(disasm_one(&insn, version), expected, "SBPF {version:?}");
     }
 }
+
+#[test]
+fn test_disable_le() {
+    let insn = Insn {
+        opc: ebpf::LE,
+        ptr: 0,
+        dst: 1,
+        src: 0,
+        off: 0,
+        imm: 16,
+    };
+    const LE: &str = "le16 r1";
+    const UNKNOWN: &str = "unknown opcode=0xd4";
+    for (version, expected) in [
+        (SBPFVersion::V0, LE),
+        (SBPFVersion::V1, LE),
+        (SBPFVersion::V2, UNKNOWN),
+        (SBPFVersion::V3, LE),
+        (SBPFVersion::V4, LE),
+    ] {
+        assert_eq!(disasm_one(&insn, version), expected, "SBPF {version:?}");
+    }
+}
