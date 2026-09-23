@@ -39,7 +39,7 @@ macro_rules! disasm {
     }};
 }
 
-fn disasm_single_insn(insn: &Insn, sbpf_version: SBPFVersion) -> String {
+fn disasm_one(insn: &Insn, sbpf_version: SBPFVersion) -> String {
     disassemble_instruction(
         insn,
         0,
@@ -428,24 +428,12 @@ fn test_disable_lddw() {
         off: 0,
         imm: 0,
     };
+    assert_eq!(disasm_one(&insn, SBPFVersion::V0), format!("lddw r0, 0x0"));
+    assert_eq!(disasm_one(&insn, SBPFVersion::V1), format!("lddw r0, 0x0"));
     assert_eq!(
-        disasm_single_insn(&insn, SBPFVersion::V0),
-        format!("lddw r0, 0x0")
-    );
-    assert_eq!(
-        disasm_single_insn(&insn, SBPFVersion::V1),
-        format!("lddw r0, 0x0")
-    );
-    assert_eq!(
-        disasm_single_insn(&insn, SBPFVersion::V2),
+        disasm_one(&insn, SBPFVersion::V2),
         format!("unknown opcode={:#x}", insn.opc)
     );
-    assert_eq!(
-        disasm_single_insn(&insn, SBPFVersion::V3),
-        format!("lddw r0, 0x0")
-    );
-    assert_eq!(
-        disasm_single_insn(&insn, SBPFVersion::V4),
-        format!("lddw r0, 0x0")
-    );
+    assert_eq!(disasm_one(&insn, SBPFVersion::V3), format!("lddw r0, 0x0"));
+    assert_eq!(disasm_one(&insn, SBPFVersion::V4), format!("lddw r0, 0x0"));
 }
