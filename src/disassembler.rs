@@ -123,7 +123,7 @@ pub fn disassemble_instruction<C: ContextObject>(
     let desc;
     match insn.opc {
         // BPF_LD class
-        ebpf::LD_DW_IMM  => { name = "lddw"; desc = format!("{} r{:}, {:#x}", name, insn.dst, insn.imm); },
+        ebpf::LD_DW_IMM if !sbpf_version.disable_lddw() => { name = "lddw"; desc = format!("{} r{:}, {:#x}", name, insn.dst, insn.imm); },
 
         // BPF_LDX class
         ebpf::LD_B_REG  if !sbpf_version.move_memory_instruction_classes() => { name = "ldxb";  desc = ld_reg_str(name, insn); },
