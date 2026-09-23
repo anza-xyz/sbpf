@@ -463,3 +463,26 @@ fn test_disable_le() {
         assert_eq!(disasm_one(&insn, version), expected, "SBPF {version:?}");
     }
 }
+
+#[test]
+fn test_hor64() {
+    let insn = Insn {
+        opc: ebpf::HOR64_IMM,
+        ptr: 0,
+        dst: 1,
+        src: 0,
+        off: 0,
+        imm: 42,
+    };
+    const HOR: &str = "hor r1, 42";
+    const UNKNOWN: &str = "unknown opcode=0xf7";
+    for (version, expected) in [
+        (SBPFVersion::V0, UNKNOWN),
+        (SBPFVersion::V1, UNKNOWN),
+        (SBPFVersion::V2, HOR),
+        (SBPFVersion::V3, UNKNOWN),
+        (SBPFVersion::V4, UNKNOWN),
+    ] {
+        assert_eq!(disasm_one(&insn, version), expected, "SBPF {version:?}");
+    }
+}
