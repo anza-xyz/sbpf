@@ -1,4 +1,7 @@
-#![feature(test)]
+#![cfg_attr(
+    all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"),
+    feature(test)
+)]
 #![cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 
 extern crate test;
