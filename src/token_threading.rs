@@ -940,7 +940,7 @@ std::arch::global_asm!(concat!(
     ),
     "cmp ", util!("slot_in_vm", "{vm_slot_program_result} + 0x00"), ", {program_result_err}\n",
     "je error_handler_epilog\n",
-    "mov ", register_map!("scratch", 64), ", [", register_map!("scratch", 64), " + {vm_slot_program_result} + 0x08]\n",
+    "mov ", register_map!("scratch", 64), ", ", util!("slot_in_vm", "{vm_slot_program_result} + 0x08"), "\n",
     "subroutine_external_call_resolved:\n",
     "sub rsp, 0x10\n",
     "mov [rsp], ", register_map!("scratch", 64), "\n",
