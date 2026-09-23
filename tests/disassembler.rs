@@ -426,27 +426,17 @@ fn test_disable_lddw() {
         dst: 1,
         src: 0,
         off: 0,
-        imm: 42,
+        imm: 0x2a,
     };
+    const LDDW: &str = "lddw r1, 0x2a";
+    const UNKNOWN: &str = "unknown opcode=0x18";
     for (version, expected) in [
-        (
-            SBPFVersion::V0,
-            format!("lddw r{:}, {:#x}", insn.dst, insn.imm),
-        ),
-        (
-            SBPFVersion::V1,
-            format!("lddw r{:}, {:#x}", insn.dst, insn.imm),
-        ),
-        (SBPFVersion::V2, format!("unknown opcode={:#x}", insn.opc)),
-        (
-            SBPFVersion::V3,
-            format!("lddw r{:}, {:#x}", insn.dst, insn.imm),
-        ),
-        (
-            SBPFVersion::V4,
-            format!("lddw r{:}, {:#x}", insn.dst, insn.imm),
-        ),
+        (SBPFVersion::V0, LDDW),
+        (SBPFVersion::V1, LDDW),
+        (SBPFVersion::V2, UNKNOWN),
+        (SBPFVersion::V3, LDDW),
+        (SBPFVersion::V4, LDDW),
     ] {
-        assert_eq!(disasm_one(&insn, version), expected);
+        assert_eq!(disasm_one(&insn, version), expected, "SBPF {version:?}");
     }
 }
