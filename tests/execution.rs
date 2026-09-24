@@ -3535,10 +3535,7 @@ fn test_lddw() {
 
 #[test]
 fn test_le() {
-    let config = Config {
-        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
-        ..Config::default()
-    };
+    let config = Config::default();
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
