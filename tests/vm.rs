@@ -145,3 +145,119 @@ fn test_gdbstub_architecture() {
         }
     });
 }
+
+#[cfg(feature = "debugger")]
+#[test]
+fn test_gdbstub_sbpfv3_pc_and_text() {
+    use gdbstub::{
+        conn::Connection,
+        stub::{state_machine::GdbStubStateMachine, GdbStub},
+    };
+    use solana_sbpf::{elf::Executable, interpreter::Interpreter, vm::CallFrame};
+    use std::convert::{Infallible, TryInto};
+    use std::sync::Arc;
+    use test_utils::{create_vm, TestContextObject};
+
+    struct TestConnection(Vec<u8>);
+
+    impl Connection for TestConnection {
+        type Error = Infallible;
+
+        fn write(&mut self, byte: u8) -> Result<(), Self::Error> {
+            self.0.push(byte);
+            Ok(())
+        }
+
+        fn flush(&mut self) -> Result<(), Self::Error> {
+            Ok(())
+        }
+    }
+
+    let elf = std::fs::read("tests/elfs/relative_call.so").unwrap();
+    let executable =
+        Executable::<TestContextObject>::from_elf(&elf, Arc::new(BuiltinProgram::new_mock()))
+            .unwrap();
+    let (text_vaddr, text) = executable.get_text_bytes();
+    let entry_offset = executable.get_entrypoint_instruction_offset() * 8;
+    let expected_pc = text_vaddr + entry_offset as u64;
+    let expected_instruction = &text[entry_offset..entry_offset + 8];
+
+    let mut context_object = TestContextObject::default();
+    let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+    create_vm!(
+        vm,
+        &executable,
+        &mut context_object,
+        stack,
+        heap,
+        Vec::new(),
+        None
+    );
+    let mut registers = vm.registers;
+    registers[11] = executable.get_entrypoint_instruction_offset() as u64;
+    let mut interpreter = Interpreter::new(&mut vm, &executable, registers, &mut call_frames);
+
+    // Drive the real protocol parser and target handlers synchronously. Each
+    // complete request produces its reply without sockets or worker threads.
+    let mut state = Some(
+        GdbStub::new(TestConnection(Vec::new()))
+            .run_state_machine(&mut interpreter)
+            .unwrap(),
+    );
+    let mut request = |packet: &str| {
+        let checksum = packet.bytes().fold(0u8, u8::wrapping_add);
+        for byte in format!("${packet}#{checksum:02x}").bytes() {
+            let GdbStubStateMachine::Idle(stub) = state.take().unwrap() else {
+                panic!("expected an idle debugger before receiving a request");
+            };
+            state = Some(stub.incoming_data(&mut interpreter, byte).unwrap());
+        }
+        let connection = match state.as_mut().unwrap() {
+            GdbStubStateMachine::Idle(stub) => stub.borrow_conn(),
+            GdbStubStateMachine::Disconnected(stub) => stub.borrow_conn(),
+            _ => panic!("unexpected debugger state after request"),
+        };
+        let reply = String::from_utf8(std::mem::take(&mut connection.0)).unwrap();
+        let payload = reply.trim_start_matches('+').strip_prefix('$').unwrap();
+        let (payload, checksum) = payload.rsplit_once('#').unwrap();
+        assert_eq!(
+            payload.bytes().fold(0u8, u8::wrapping_add),
+            u8::from_str_radix(checksum, 16).unwrap()
+        );
+        let mut expanded = Vec::new();
+        let mut bytes = payload.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == b'*' {
+                let count = bytes.next().unwrap() - 29;
+                expanded.extend(std::iter::repeat(*expanded.last().unwrap()).take(count as usize));
+            } else {
+                expanded.push(byte);
+            }
+        }
+        String::from_utf8(expanded).unwrap()
+    };
+
+    let architecture = request("qXfer:features:read:target.xml:0,fff");
+    assert!(architecture.contains("<architecture>sbpfv3</architecture>"));
+
+    let pc = request("pb");
+    let pc_bytes: Vec<_> = pc
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+        .collect();
+    assert_eq!(
+        u64::from_le_bytes(pc_bytes.try_into().unwrap()),
+        expected_pc
+    );
+
+    let instruction = request(&format!("m{expected_pc:x},8"));
+    let expected_hex: String = expected_instruction
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(instruction, expected_hex);
+
+    assert_eq!(request("D"), "OK");
+    assert!(matches!(state, Some(GdbStubStateMachine::Disconnected(_))));
+}
