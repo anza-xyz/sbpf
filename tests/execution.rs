@@ -2398,7 +2398,10 @@ declare_builtin_function!(
             };
         #[allow(unused_mut)]
         if depth > 0 {
-            let mut config = Config::default();
+            let mut config = Config {
+                enable_register_tracing: true,
+                ..Config::default()
+            };
             if version == 0 {
                 config.enabled_sbpf_versions = SBPFVersion::V0..=SBPFVersion::V0;
             } else {
