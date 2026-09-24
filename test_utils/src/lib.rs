@@ -520,17 +520,16 @@ macro_rules! test_interpreter_and_jit_elf {
         file.read_to_end(&mut elf).unwrap();
         #[allow(unused_mut)]
         {
-            let mut loader = BuiltinProgram::new_loader($config);
+            let mut loader = BuiltinProgram::new_loader(Config {
+                enable_register_tracing: true,
+                ..$config
+            });
             $(test_interpreter_and_jit_elf!(register, loader, $syscall_name => $syscall);)*
             let mut executable = Executable::<TestContextObject>::from_elf(&elf, Arc::new(loader)).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
         }
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        let config = Config {
-            enable_register_tracing: true,
-            ..Config::default()
-        };
-        test_interpreter_and_jit_elf!($source, config, $mem, ($($syscall_name => $syscall_function),*), $context_object, $expected_result);
+        test_interpreter_and_jit_elf!($source, Config::default(), $mem, ($($syscall_name => $syscall_function),*), $context_object, $expected_result);
     };
 }
