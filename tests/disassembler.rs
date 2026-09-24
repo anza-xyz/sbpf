@@ -74,6 +74,51 @@ fn test_static_syscall() {
     disasm!("entrypoint:\n    syscall 5\n", config);
 }
 
+#[test]
+fn test_internal_call() {
+    let mut function_registry = FunctionRegistry::default();
+    let target_pc: usize = 42;
+    let loader = &BuiltinProgram::<TestContextObject>::new_mock();
+
+    for version in [
+        SBPFVersion::V0,
+        SBPFVersion::V1,
+        SBPFVersion::V2,
+        SBPFVersion::V3,
+        SBPFVersion::V4,
+    ] {
+        let key: u32 = if version.static_syscalls() {
+            target_pc as u32
+        } else {
+            ebpf::hash_symbol_name(&usize::from(target_pc).to_le_bytes())
+        };
+        let _ = function_registry.register_function(key as u32, "test_func", target_pc);
+        let src = if version.static_syscalls() { 1 } else { 0 };
+        let imm = if version.static_syscalls() {
+            (target_pc - 1) as i64
+        } else {
+            key as i64
+        };
+        let insn = Insn {
+            opc: ebpf::CALL_IMM,
+            ptr: 0,
+            dst: 0,
+            src: src,
+            off: 0,
+            imm,
+        };
+        let disassembled = disassemble_instruction(
+            &insn,
+            0,
+            &BTreeMap::new(),
+            &function_registry,
+            loader,
+            version,
+        );
+        assert_eq!(disassembled, "call test_func", "SBPF {version:?}");
+    }
+}
+
 // Example for InstructionType::AluBinary.
 #[test]
 fn test_add64() {
