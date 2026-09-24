@@ -44,6 +44,7 @@ pub mod program;
 pub mod static_analysis;
 pub mod verifier;
 pub mod vm;
+pub mod codegen;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 pub mod x86;
 
