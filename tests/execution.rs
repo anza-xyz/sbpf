@@ -413,14 +413,13 @@ fn test_rsh64_reg() {
 
 #[test]
 fn test_be16() {
-    let input = [0x11, 0x22];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxh r0, [r1]
+        lddw r0, 0x2211
         be16 r0
         exit",
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1122),
     );
@@ -428,14 +427,13 @@ fn test_be16() {
 
 #[test]
 fn test_be16_high() {
-    let input = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxdw r0, [r1]
+        lddw r0, 0x8877665544332211
         be16 r0
         exit",
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1122),
     );
@@ -443,14 +441,13 @@ fn test_be16_high() {
 
 #[test]
 fn test_be32() {
-    let input = [0x11, 0x22, 0x33, 0x44];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxw r0, [r1]
+        lddw r0, 0x44332211
         be32 r0
         exit",
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x11223344),
     );
@@ -458,14 +455,13 @@ fn test_be32() {
 
 #[test]
 fn test_be32_high() {
-    let input = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxdw r0, [r1]
+        lddw r0, 0x8877665544332211
         be32 r0
         exit",
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x11223344),
     );
@@ -473,14 +469,13 @@ fn test_be32_high() {
 
 #[test]
 fn test_be64() {
-    let input = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxdw r0, [r1]
+        lddw r0, 0x8877665544332211
         be64 r0
         exit",
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1122334455667788),
     );
@@ -3544,63 +3539,58 @@ fn test_le() {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
-    let input = [0x22, 0x11];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxh r0, [r1]
+        lddw r0, 0x1122
         le16 r0
         exit",
         config.clone(),
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1122),
     );
-    let input = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxdw r0, [r1]
+        lddw r0, 0x8877665544332211
         le16 r0
         exit",
         config.clone(),
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x2211),
     );
-    let input = [0x44, 0x33, 0x22, 0x11];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxw r0, [r1]
+        lddw r0, 0x11223344
         le32 r0
         exit",
         config.clone(),
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x11223344),
     );
-    let input = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxdw r0, [r1]
+        lddw r0, 0x8877665544332211
         le32 r0
         exit",
         config.clone(),
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x44332211),
     );
-    let input = [0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11];
     test_interpreter_and_jit_asm!(
         "
         add64 r10, 0
-        ldxdw r0, [r1]
+        lddw r0, 0x1122334455667788
         le64 r0
         exit",
         config,
-        &raw const input,
+        NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1122334455667788),
     );
