@@ -76,9 +76,6 @@ fn test_static_syscall() {
 
 #[test]
 fn test_internal_call() {
-    let target_pc: usize = 42;
-    let loader = &BuiltinProgram::<TestContextObject>::new_mock();
-
     for version in [
         SBPFVersion::V0,
         SBPFVersion::V1,
@@ -86,38 +83,15 @@ fn test_internal_call() {
         SBPFVersion::V3,
         SBPFVersion::V4,
     ] {
-        let key = if version.static_syscalls() {
-            target_pc as u32
-        } else {
-            ebpf::hash_symbol_name(&target_pc.to_le_bytes())
+        let config = Config {
+            enabled_sbpf_versions: version..=version,
+            enable_symbol_and_section_labels: true,
+            ..Config::default()
         };
-        let mut function_registry = FunctionRegistry::default();
-        function_registry
-            .register_function(key as u32, "test_func", target_pc)
-            .unwrap();
-        let src = if version.static_syscalls() { 1 } else { 0 };
-        let imm = if version.static_syscalls() {
-            (target_pc - 1) as i64
-        } else {
-            key as i64
-        };
-        let insn = Insn {
-            opc: ebpf::CALL_IMM,
-            ptr: 0,
-            dst: 0,
-            src,
-            off: 0,
-            imm,
-        };
-        let disassembled = disassemble_instruction(
-            &insn,
-            0,
-            &BTreeMap::new(),
-            &function_registry,
-            loader,
-            version,
+        disasm!(
+            "entrypoint:\n    call function_1\n\nfunction_1:\n    exit\n",
+            config
         );
-        assert_eq!(disassembled, "call test_func", "SBPF {version:?}");
     }
 }
 
