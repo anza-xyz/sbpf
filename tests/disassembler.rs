@@ -76,7 +76,6 @@ fn test_static_syscall() {
 
 #[test]
 fn test_internal_call() {
-    let mut function_registry = FunctionRegistry::default();
     let target_pc: usize = 42;
     let loader = &BuiltinProgram::<TestContextObject>::new_mock();
 
@@ -87,12 +86,15 @@ fn test_internal_call() {
         SBPFVersion::V3,
         SBPFVersion::V4,
     ] {
-        let key: u32 = if version.static_syscalls() {
+        let key = if version.static_syscalls() {
             target_pc as u32
         } else {
-            ebpf::hash_symbol_name(&usize::from(target_pc).to_le_bytes())
+            ebpf::hash_symbol_name(&target_pc.to_le_bytes())
         };
-        let _ = function_registry.register_function(key as u32, "test_func", target_pc);
+        let mut function_registry = FunctionRegistry::default();
+        function_registry
+            .register_function(key as u32, "test_func", target_pc)
+            .unwrap();
         let src = if version.static_syscalls() { 1 } else { 0 };
         let imm = if version.static_syscalls() {
             (target_pc - 1) as i64
@@ -103,7 +105,7 @@ fn test_internal_call() {
             opc: ebpf::CALL_IMM,
             ptr: 0,
             dst: 0,
-            src: src,
+            src,
             off: 0,
             imm,
         };
