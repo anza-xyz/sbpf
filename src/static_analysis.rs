@@ -991,6 +991,63 @@ impl<'a> Analysis<'a> {
                 state.0 = *basic_block_start;
                 for insn in self.instructions[basic_block.instructions.clone()].iter() {
                     match insn.opc {
+                        // V2 reuses legacy arithmetic opcodes for memory accesses.
+                        ebpf::LD_1B_REG | ebpf::LD_2B_REG | ebpf::LD_4B_REG | ebpf::LD_8B_REG
+                            if sbpf_version.move_memory_instruction_classes() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Memory);
+                            bind(&mut state, insn, false, DataResource::Register(insn.src));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::ST_1B_IMM | ebpf::ST_2B_IMM | ebpf::ST_4B_IMM | ebpf::ST_8B_IMM
+                            if sbpf_version.move_memory_instruction_classes() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Memory);
+                        }
+                        ebpf::ST_1B_REG | ebpf::ST_2B_REG | ebpf::ST_4B_REG | ebpf::ST_8B_REG
+                            if sbpf_version.move_memory_instruction_classes() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.src));
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Memory);
+                        }
+                        // PQR shares encodings with JMP32 in later versions.
+                        ebpf::LMUL32_IMM
+                        | ebpf::LMUL64_IMM
+                        | ebpf::UHMUL64_IMM
+                        | ebpf::SHMUL64_IMM
+                        | ebpf::UDIV32_IMM
+                        | ebpf::UDIV64_IMM
+                        | ebpf::SDIV32_IMM
+                        | ebpf::SDIV64_IMM
+                        | ebpf::UREM32_IMM
+                        | ebpf::UREM64_IMM
+                        | ebpf::SREM32_IMM
+                        | ebpf::SREM64_IMM
+                            if sbpf_version.enable_pqr() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::LMUL32_REG
+                        | ebpf::LMUL64_REG
+                        | ebpf::UHMUL64_REG
+                        | ebpf::SHMUL64_REG
+                        | ebpf::UDIV32_REG
+                        | ebpf::UDIV64_REG
+                        | ebpf::SDIV32_REG
+                        | ebpf::SDIV64_REG
+                        | ebpf::UREM32_REG
+                        | ebpf::UREM64_REG
+                        | ebpf::SREM32_REG
+                        | ebpf::SREM64_REG
+                            if sbpf_version.enable_pqr() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.src));
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
                         ebpf::JEQ32_IMM
                         | ebpf::JGT32_IMM
                         | ebpf::JGE32_IMM
