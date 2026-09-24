@@ -145,3 +145,120 @@ fn test_gdbstub_architecture() {
         }
     });
 }
+
+#[cfg(feature = "debugger")]
+#[test]
+fn test_gdbstub_sbpfv3_pc_and_text() {
+    use solana_sbpf::elf::Executable;
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    use std::convert::TryInto;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use test_utils::{create_vm, TestContextObject};
+
+    fn request(reader: &mut BufReader<TcpStream>, writer: &mut TcpStream, packet: &str) -> String {
+        let checksum = packet.bytes().fold(0u8, u8::wrapping_add);
+        write!(writer, "${packet}#{checksum:02x}").unwrap();
+        let mut reply = Vec::new();
+        reader.read_until(b'#', &mut reply).unwrap();
+        let mut checksum = [0; 2];
+        reader.read_exact(&mut checksum).unwrap();
+        let reply = String::from_utf8(reply).unwrap();
+        let payload = reply
+            .trim_start_matches('+')
+            .trim_start_matches('$')
+            .trim_end_matches('#');
+        let mut expanded = Vec::new();
+        let mut bytes = payload.bytes();
+        while let Some(byte) = bytes.next() {
+            if byte == b'*' {
+                let count = bytes.next().unwrap() - 29;
+                expanded.extend(std::iter::repeat(*expanded.last().unwrap()).take(count as usize));
+            } else {
+                expanded.push(byte);
+            }
+        }
+        String::from_utf8(expanded).unwrap()
+    }
+
+    let elf = std::fs::read("tests/elfs/relative_call.so").unwrap();
+    let executable =
+        Executable::<TestContextObject>::from_elf(&elf, Arc::new(BuiltinProgram::new_mock()))
+            .unwrap();
+    let (text_vaddr, text) = executable.get_text_bytes();
+    let entry_offset = executable.get_entrypoint_instruction_offset() * 8;
+    let expected_pc = text_vaddr + entry_offset as u64;
+    let expected_instruction = &text[entry_offset..entry_offset + 8];
+
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let mut context_object = TestContextObject::default();
+            let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+            create_vm!(
+                vm,
+                &executable,
+                &mut context_object,
+                stack,
+                heap,
+                Vec::new(),
+                None
+            );
+            vm.context().remaining = 10_000_000;
+            vm.debug_port = Some(port);
+            vm.execute_program(
+                &executable,
+                &mut ExecutionMode::Interpreted,
+                &mut call_frames,
+            );
+        });
+
+        let address = format!("127.0.0.1:{port}");
+        let mut writer = (0..20)
+            .find_map(|_| match TcpStream::connect(&address) {
+                Ok(stream) => Some(stream),
+                Err(_) => {
+                    std::thread::sleep(Duration::from_millis(100));
+                    None
+                }
+            })
+            .expect("debugger did not start");
+        writer
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut reader = BufReader::new(writer.try_clone().unwrap());
+
+        let architecture = request(
+            &mut reader,
+            &mut writer,
+            "qXfer:features:read:target.xml:0,fff",
+        );
+        assert!(architecture.contains("<architecture>sbpfv3</architecture>"));
+
+        let pc = request(&mut reader, &mut writer, "pb");
+        let pc_bytes: Vec<_> = pc
+            .as_bytes()
+            .chunks_exact(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        assert_eq!(
+            u64::from_le_bytes(pc_bytes.try_into().unwrap()),
+            expected_pc
+        );
+
+        let instruction = request(&mut reader, &mut writer, &format!("m{expected_pc:x},8"));
+        let expected_hex: String = expected_instruction
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(instruction, expected_hex);
+
+        assert_eq!(request(&mut reader, &mut writer, "D"), "OK");
+    });
+}
