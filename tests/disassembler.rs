@@ -9,10 +9,13 @@
 // copied, modified, or distributed except according to those terms.
 
 extern crate solana_sbpf;
-use solana_sbpf::program::SBPFVersion;
+use solana_sbpf::disassembler::disassemble_instruction;
+use solana_sbpf::ebpf::{self, Insn};
+use solana_sbpf::program::{FunctionRegistry, SBPFVersion};
 use solana_sbpf::{
     assembler::assemble, program::BuiltinProgram, static_analysis::Analysis, vm::Config,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use test_utils::TestContextObject;
 
@@ -34,6 +37,17 @@ macro_rules! disasm {
         analysis.disassemble(&mut reasm).unwrap();
         assert_eq!(src, String::from_utf8(reasm).unwrap());
     }};
+}
+
+fn disassemble_insn(insn: &Insn, sbpf_version: SBPFVersion) -> String {
+    disassemble_instruction(
+        insn,
+        0,
+        &BTreeMap::new(),
+        &FunctionRegistry::default(),
+        &BuiltinProgram::<TestContextObject>::new_mock(),
+        sbpf_version,
+    )
 }
 
 #[test]
@@ -58,6 +72,27 @@ fn test_static_syscall() {
         ..Config::default()
     };
     disasm!("entrypoint:\n    syscall 5\n", config);
+}
+
+#[test]
+fn test_internal_call() {
+    for version in [
+        SBPFVersion::V0,
+        SBPFVersion::V1,
+        SBPFVersion::V2,
+        SBPFVersion::V3,
+        SBPFVersion::V4,
+    ] {
+        let config = Config {
+            enabled_sbpf_versions: version..=version,
+            enable_symbol_and_section_labels: true,
+            ..Config::default()
+        };
+        disasm!(
+            "entrypoint:\n    call function_1\n\nfunction_1:\n    exit\n",
+            config
+        );
+    }
 }
 
 // Example for InstructionType::AluBinary.
@@ -401,5 +436,86 @@ fn test_callx() {
             ..Config::default()
         };
         disasm!("entrypoint:\n    callx r8\n", config);
+    }
+}
+
+#[test]
+fn test_disable_lddw() {
+    let insn = Insn {
+        opc: ebpf::LD_DW_IMM,
+        ptr: 0,
+        dst: 1,
+        src: 0,
+        off: 0,
+        imm: 0x2a,
+    };
+    const LDDW: &str = "lddw r1, 0x2a";
+    const UNKNOWN: &str = "unknown opcode=0x18";
+    for (version, expected) in [
+        (SBPFVersion::V0, LDDW),
+        (SBPFVersion::V1, LDDW),
+        (SBPFVersion::V2, UNKNOWN),
+        (SBPFVersion::V3, LDDW),
+        (SBPFVersion::V4, LDDW),
+    ] {
+        assert_eq!(
+            disassemble_insn(&insn, version),
+            expected,
+            "SBPF {version:?}"
+        );
+    }
+}
+
+#[test]
+fn test_disable_le() {
+    let insn = Insn {
+        opc: ebpf::LE,
+        ptr: 0,
+        dst: 1,
+        src: 0,
+        off: 0,
+        imm: 16,
+    };
+    const LE: &str = "le16 r1";
+    const UNKNOWN: &str = "unknown opcode=0xd4";
+    for (version, expected) in [
+        (SBPFVersion::V0, LE),
+        (SBPFVersion::V1, LE),
+        (SBPFVersion::V2, UNKNOWN),
+        (SBPFVersion::V3, LE),
+        (SBPFVersion::V4, LE),
+    ] {
+        assert_eq!(
+            disassemble_insn(&insn, version),
+            expected,
+            "SBPF {version:?}"
+        );
+    }
+}
+
+#[test]
+fn test_hor64() {
+    let insn = Insn {
+        opc: ebpf::HOR64_IMM,
+        ptr: 0,
+        dst: 1,
+        src: 0,
+        off: 0,
+        imm: 42,
+    };
+    const HOR: &str = "hor64 r1, 42";
+    const UNKNOWN: &str = "unknown opcode=0xf7";
+    for (version, expected) in [
+        (SBPFVersion::V0, UNKNOWN),
+        (SBPFVersion::V1, UNKNOWN),
+        (SBPFVersion::V2, HOR),
+        (SBPFVersion::V3, UNKNOWN),
+        (SBPFVersion::V4, UNKNOWN),
+    ] {
+        assert_eq!(
+            disassemble_insn(&insn, version),
+            expected,
+            "SBPF {version:?}"
+        );
     }
 }
