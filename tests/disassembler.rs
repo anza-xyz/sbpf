@@ -39,7 +39,7 @@ macro_rules! disasm {
     }};
 }
 
-fn disasm_one(insn: &Insn, sbpf_version: SBPFVersion) -> String {
+fn disassemble_insn(insn: &Insn, sbpf_version: SBPFVersion) -> String {
     disassemble_instruction(
         insn,
         0,
@@ -458,7 +458,11 @@ fn test_disable_lddw() {
         (SBPFVersion::V3, LDDW),
         (SBPFVersion::V4, LDDW),
     ] {
-        assert_eq!(disasm_one(&insn, version), expected, "SBPF {version:?}");
+        assert_eq!(
+            disassemble_insn(&insn, version),
+            expected,
+            "SBPF {version:?}"
+        );
     }
 }
 
@@ -481,7 +485,11 @@ fn test_disable_le() {
         (SBPFVersion::V3, LE),
         (SBPFVersion::V4, LE),
     ] {
-        assert_eq!(disasm_one(&insn, version), expected, "SBPF {version:?}");
+        assert_eq!(
+            disassemble_insn(&insn, version),
+            expected,
+            "SBPF {version:?}"
+        );
     }
 }
 
@@ -504,6 +512,10 @@ fn test_hor64() {
         (SBPFVersion::V3, UNKNOWN),
         (SBPFVersion::V4, UNKNOWN),
     ] {
-        assert_eq!(disasm_one(&insn, version), expected, "SBPF {version:?}");
+        assert_eq!(
+            disassemble_insn(&insn, version),
+            expected,
+            "SBPF {version:?}"
+        );
     }
 }
