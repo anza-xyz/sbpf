@@ -412,6 +412,76 @@ fn test_rsh64_reg() {
 }
 
 #[test]
+fn test_le16() {
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        lddw r0, 0x2211
+        le16 r0
+        exit",
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Ok(0x2211),
+    );
+}
+
+#[test]
+fn test_le16_high() {
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        lddw r0, 0x8877665544332211
+        le16 r0
+        exit",
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Ok(0x2211),
+    );
+}
+
+#[test]
+fn test_le32() {
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        lddw r0, 0x44332211
+        le32 r0
+        exit",
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Ok(0x44332211),
+    );
+}
+
+#[test]
+fn test_le32_high() {
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        lddw r0, 0x8877665544332211
+        le32 r0
+        exit",
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Ok(0x44332211),
+    );
+}
+
+#[test]
+fn test_le64() {
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        lddw r0, 0x8877665544332211
+        le64 r0
+        exit",
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Ok(0x8877665544332211),
+    );
+}
+
+#[test]
 fn test_be16() {
     test_interpreter_and_jit_asm!(
         "
@@ -3530,66 +3600,6 @@ fn test_lddw() {
         NO_INPUT,
         TestContextObject::new(3),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
-    );
-}
-
-#[test]
-fn test_le() {
-    let config = Config::default();
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        lddw r0, 0x1122
-        le16 r0
-        exit",
-        config.clone(),
-        NO_INPUT,
-        TestContextObject::new(4),
-        ProgramResult::Ok(0x1122),
-    );
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        lddw r0, 0x8877665544332211
-        le16 r0
-        exit",
-        config.clone(),
-        NO_INPUT,
-        TestContextObject::new(4),
-        ProgramResult::Ok(0x2211),
-    );
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        lddw r0, 0x11223344
-        le32 r0
-        exit",
-        config.clone(),
-        NO_INPUT,
-        TestContextObject::new(4),
-        ProgramResult::Ok(0x11223344),
-    );
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        lddw r0, 0x8877665544332211
-        le32 r0
-        exit",
-        config.clone(),
-        NO_INPUT,
-        TestContextObject::new(4),
-        ProgramResult::Ok(0x44332211),
-    );
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        lddw r0, 0x1122334455667788
-        le64 r0
-        exit",
-        config,
-        NO_INPUT,
-        TestContextObject::new(4),
-        ProgramResult::Ok(0x1122334455667788),
     );
 }
 
