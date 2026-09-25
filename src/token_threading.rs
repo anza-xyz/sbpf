@@ -605,9 +605,7 @@ macro_rules! all_opcodes {
 
         // LE
         util!("decode_imm", register_map!("scratch", 64)),
-        "mov ", register_map!("scratch", 64), ", ", $dst64, "\n",
-        "call subroutine_le\n",
-        "mov ", $dst64, ", ", register_map!("scratch", 64), "\n",
+        "bzhi ", $dst64, ", ", $dst64, ", ", register_map!("scratch", 64), "\n",
         util!("epilog"),
 
         // JSLE64_IMM
@@ -625,9 +623,9 @@ macro_rules! all_opcodes {
 
         // BE
         util!("decode_imm", register_map!("scratch", 64)),
-        "mov ", register_map!("scratch", 64), ", ", $dst64, "\n",
-        "call subroutine_be\n",
-        "mov ", $dst64, ", ", register_map!("scratch", 64), "\n",
+        "bswap ", $dst64, "\n",
+        "neg ", register_map!("scratch", 32), "\n",
+        "shrx ", $dst64, ", ", $dst64, ", ", register_map!("scratch", 64), "\n",
         util!("epilog"),
 
         // JSLT64_REG
@@ -1025,42 +1023,6 @@ std::arch::global_asm!(concat!(
         arg("lea ", register_map!("r0", 64), ", [", register_map!("scratch", 64), " + {vm_slot_register_trace}]\n"),
         arg("lea ", register_map!("r1", 64), ", [", register_map!("scratch", 64), " + {vm_slot_registers}]\n"),
     ),
-    "ret\n",
-
-    "subroutine_le:\n",
-    "cmp dword ptr [", register_map!("insn_ptr", 64), " + 4], 16\n",
-    "je 16f\n",
-    "cmp dword ptr [", register_map!("insn_ptr", 64), " + 4], 32\n",
-    "je 32f\n",
-    "cmp dword ptr [", register_map!("insn_ptr", 64), " + 4], 64\n",
-    "je 64f\n",
-    "jmp unsupported_instruction\n",
-    "16:\n",
-    "movzx ", register_map!("scratch", 32), ",", register_map!("scratch", 16), "\n",
-    "ret\n",
-    "32:\n",
-    "mov ", register_map!("scratch", 32), ",", register_map!("scratch", 32), "\n",
-    "ret\n",
-    "64:\n",
-    "ret\n",
-
-    "subroutine_be:\n",
-    "cmp dword ptr [", register_map!("insn_ptr", 64), " + 4], 16\n",
-    "je 16f\n",
-    "cmp dword ptr [", register_map!("insn_ptr", 64), " + 4], 32\n",
-    "je 32f\n",
-    "cmp dword ptr [", register_map!("insn_ptr", 64), " + 4], 64\n",
-    "je 64f\n",
-    "jmp unsupported_instruction\n",
-    "16:\n",
-    "rol ", register_map!("scratch", 16), ", 8\n",
-    "movzx ", register_map!("scratch", 32), ",", register_map!("scratch", 16), "\n",
-    "ret\n",
-    "32:\n",
-    "bswap ", register_map!("scratch", 32), "\n",
-    "ret\n",
-    "64:\n",
-    "bswap ", register_map!("scratch", 64), "\n",
     "ret\n",
 
     util!("error_handler", "call_depth_exeeded"),
