@@ -37,6 +37,61 @@ fn entry_read(analysis: &Analysis<'_>, pc: usize, reg: u8) -> bool {
 }
 
 #[test]
+fn callx_reads_the_version_specific_target_register() {
+    for (version, field) in [
+        (SBPFVersion::V0, 0),
+        (SBPFVersion::V1, 0),
+        (SBPFVersion::V2, 1),
+        (SBPFVersion::V3, 2),
+        (SBPFVersion::V4, 2),
+    ] {
+        for target in 6..10 {
+            for initialized in [false, true] {
+                let mut fields = [6, 7, 8]; // imm, src, dst
+                fields[field] = target;
+                let mut code = Vec::new();
+                if initialized {
+                    code.push(insn(ebpf::MOV64_IMM, target, 0, 0, 0));
+                }
+                let call_pc = code.len();
+                code.push(insn(
+                    ebpf::CALL_REG,
+                    fields[2],
+                    fields[1],
+                    0,
+                    fields[0] as i32,
+                ));
+                code.push(insn(ebpf::EXIT, 0, 0, 0, 0));
+                let exe = executable(&code, version);
+                let analysis = Analysis::from_executable(&exe).unwrap();
+                let edges = &analysis.dfg_reverse_edges[&DfgNode::InstructionNode(call_pc)];
+                for reg in 6..10 {
+                    let reads = edges.iter().any(|edge| {
+                        edge.resource == DataResource::Register(reg)
+                            && edge.kind == DfgEdgeKind::Filled
+                    });
+                    assert_eq!(
+                        reads,
+                        reg == target,
+                        "{version:?}, target r{target}, read r{reg}"
+                    );
+                }
+                let source = if initialized {
+                    DfgNode::InstructionNode(0)
+                } else {
+                    DfgNode::PhiNode(analysis.entrypoint)
+                };
+                assert!(edges.iter().any(|edge| {
+                    edge.source == source
+                        && edge.resource == DataResource::Register(target)
+                        && edge.kind == DfgEdgeKind::Filled
+                }));
+            }
+        }
+    }
+}
+
+#[test]
 fn v2_loads_overwrite_destination_but_read_address() {
     for opcode in [
         ebpf::LD_1B_REG,

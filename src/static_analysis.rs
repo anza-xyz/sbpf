@@ -1107,17 +1107,15 @@ impl<'a> Analysis<'a> {
                             bind(&mut state, insn, false, DataResource::Register(insn.dst));
                         }
                         ebpf::CALL_REG | ebpf::CALL_IMM => {
-                            if insn.opc == ebpf::CALL_REG
-                                && !(ebpf::FIRST_SCRATCH_REG
-                                    ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS)
-                                    .contains(&(insn.imm as usize))
-                            {
-                                bind(
-                                    &mut state,
-                                    insn,
-                                    false,
-                                    DataResource::Register(insn.imm as u8),
-                                );
+                            if insn.opc == ebpf::CALL_REG {
+                                let target = if sbpf_version.callx_uses_src_reg() {
+                                    insn.src
+                                } else if sbpf_version.callx_uses_dst_reg() {
+                                    insn.dst
+                                } else {
+                                    insn.imm as u8
+                                };
+                                bind(&mut state, insn, false, DataResource::Register(target));
                             }
                             bind(&mut state, insn, false, DataResource::Memory);
                             bind(&mut state, insn, true, DataResource::Memory);
