@@ -90,7 +90,11 @@ declare_builtin_function!(
         if len == 0 {
             return Ok(0);
         }
-        let buf = Result::from(context_object.memory_mapping.map(AccessType::Store, vm_addr, len))?;
+        let buf = Result::from(
+            context_object
+                .memory_mapping
+                .map(AccessType::Store, vm_addr, len),
+        )?;
         unsafe {
             for p in buf.ptr_mut().as_mut_unchecked() {
                 *p ^= 0b101010;
@@ -152,8 +156,11 @@ declare_builtin_function!(
         if len == 0 {
             return Ok(0);
         }
-        let host_buffer =
-            Result::from(context_object.memory_mapping.map(AccessType::Load, vm_addr, len))?;
+        let host_buffer = Result::from(context_object.memory_mapping.map(
+            AccessType::Load,
+            vm_addr,
+            len,
+        ))?;
         unsafe {
             let c_buf = host_buffer.ptr().as_ref_unchecked();
             let len = c_buf.iter().position(|c| *c == 0).unwrap_or(len as usize);

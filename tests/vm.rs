@@ -33,8 +33,8 @@ fn test_gdbstub_architecture() {
     use std::time::Duration;
     use test_utils::{create_vm, TestContextObject};
 
-    const GDBSTUB_TEST_DEBUG_PORT: &'static str = "11212";
-    const METADATA: &'static str = "6CSmiViMaAguKgxNVwU8TWMPViQbtL5KKoFrDwWwtYNR";
+    const GDBSTUB_TEST_DEBUG_PORT: &str = "11212";
+    const METADATA: &str = "6CSmiViMaAguKgxNVwU8TWMPViQbtL5KKoFrDwWwtYNR";
 
     fn read_reply<R: BufRead>(reader: &mut R) -> std::io::Result<String> {
         let mut buf = Vec::new();
@@ -100,7 +100,7 @@ fn test_gdbstub_architecture() {
                 let mut retries = 20;
                 let (mut reader, mut writer) = loop {
                     retries -= 1;
-                    match std::net::TcpStream::connect(&stub_addr) {
+                    match std::net::TcpStream::connect(stub_addr) {
                         Err(e) => {
                             if retries == 0 {
                                 return Err(e);
@@ -229,7 +229,10 @@ fn test_gdbstub_sbpfv3_pc_and_text() {
         while let Some(byte) = bytes.next() {
             if byte == b'*' {
                 let count = bytes.next().unwrap() - 29;
-                expanded.extend(std::iter::repeat(*expanded.last().unwrap()).take(count as usize));
+                expanded.extend(std::iter::repeat_n(
+                    *expanded.last().unwrap(),
+                    count as usize,
+                ));
             } else {
                 expanded.push(byte);
             }
@@ -243,7 +246,9 @@ fn test_gdbstub_sbpfv3_pc_and_text() {
     let pc = request("pb");
     let pc_bytes: Vec<_> = pc
         .as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
         .collect();
     assert_eq!(

@@ -573,7 +573,7 @@ impl<C: ContextObject> EncryptedHostAddressToEbpfVm<C> {
 #[inline(never)]
 fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
     #[cfg(feature = "debugger")]
-    if let Some(debug_port) = interpreter.vm.debug_port.clone() {
+    if let Some(debug_port) = interpreter.vm.debug_port {
         return crate::debugger::execute(&mut interpreter, debug_port);
     }
 
