@@ -7,10 +7,10 @@ fn main() {
         149, 0, 0, 0, 0, 0, 0, 0,
     ];
     let mut duration = std::time::Duration::new(0, 0);
-    let iters = 5;
+    let iters = 500;
     for i in 0..iters {
             let start = std::time::Instant::now();
-            std::hint::black_box(solana_sbpf::codegen::x64::enter(&bpf));
+            std::hint::black_box(solana_sbpf::codegen::x64::interpret(&bpf));
             duration += start.elapsed();
     }
     println!("{:?}", duration / iters);

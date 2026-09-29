@@ -4,7 +4,10 @@ use dynasmrt::relocations::{Relocation, SimpleRelocation};
 
 use crate::codegen::{x64, Buffer, Opcode, Template};
 use crate::ebpf;
+use std::arch::naked_asm;
 use std::convert::TryFrom;
+use std::io::Write as _;
+use std::os::fd::AsRawFd as _;
 use std::sync::LazyLock;
 
 const RAX: u8 = 0;
@@ -65,13 +68,13 @@ macro_rules! x64asm {
 
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_IMM $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [DWORD 4 + Rq(REG_INSN)] ;; $output.reloc_add_insn_off32()
+            $($curr)* [ DWORD -4i32 + Rq(REG_INSN)] ;; $output.reloc_add_insn_off32()
         ]} $($rest)*)
     };
 
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_OFF $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [DWORD 2 + Rq(REG_INSN)] ;; $output.reloc_add_insn_off32()
+            $($curr)* [DWORD -6i32 + Rq(REG_INSN)] ;; $output.reloc_add_insn_off32()
         ]} $($rest)*)
     };
 
@@ -350,6 +353,9 @@ trait X64Generator {
             | ebpf::JSLE64_REG => {
                 let is_64 = (op & ebpf::BPF_CLS_MASK) == ebpf::BPF_JMP64;
                 let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
+                x64asm!(self
+                    ; movsx rdx, WORD REL32_OFF
+                );
                 match (is_64, is_imm) {
                     (true, true) => x64asm!(self
                         ; movsxd Rq(REG_TEMP), DWORD REL32_IMM
@@ -374,15 +380,15 @@ trait X64Generator {
                     ebpf::BPF_JSLE => x64asm!(self; jg BYTE =>fallthrough),
                     _ => self.invalid_insn(),
                 }
-                self.bpf_taken_branch(fallthrough);
+                self.bpf_taken_branch();
+                self.dynamic_label(fallthrough);
             }
-            ebpf::JA => {
-                let _unused_label = self.new_dynamic_label();
-                self.bpf_taken_branch(_unused_label)
-            },
+            ebpf::JA => self.bpf_taken_branch(),
 
             ebpf::CALL_IMM | ebpf::CALL_REG => x64asm!(self; int3),
-            ebpf::EXIT => x64asm!(self; ret),
+            ebpf::EXIT => x64asm!(self;
+                jmp QWORD [rbp - 8]
+            ),
 
             ebpf::LD_B_REG
             | ebpf::LD_H_REG
@@ -447,7 +453,7 @@ trait X64Generator {
     }
 
     // Generate code to handle branch taken case.
-    fn bpf_taken_branch(&mut self, fallthrough: DynamicLabel);
+    fn bpf_taken_branch(&mut self);
 }
 
 struct JITGenerator {}
@@ -517,7 +523,7 @@ impl X64Generator for JITGenerator {
         todo!("add the current insn offset to add_to={add_to}")
     }
 
-    fn bpf_taken_branch(&mut self, fallthrough: DynamicLabel) {
+    fn bpf_taken_branch(&mut self) {
         todo!()
     }
 
@@ -615,12 +621,20 @@ impl InterpreterGenerator {
 
     pub fn new() -> Self {
         unsafe {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("interpreter.bin").unwrap();
+            file.set_len(Self::STEPS_SIZE as u64).unwrap();
+
             let buffer = libc::mmap(
                 std::ptr::null_mut(),
                 Self::STEPS_SIZE + Self::HELPERS_SIZE,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_32BIT,
-                -1,
+                libc::MAP_SHARED | libc::MAP_32BIT,
+                file.as_raw_fd(),
                 0,
             );
             if buffer == libc::MAP_FAILED {
@@ -796,20 +810,14 @@ impl X64Generator for InterpreterGenerator {
         // Intentionally empty: interpreter maintains current register's location in `INSN_REG`.
     }
 
-    fn bpf_taken_branch(&mut self, fallthrough: DynamicLabel) {
+    fn bpf_taken_branch(&mut self) {
         let base_addr =
             i32::try_from(self.interpreter.buffer as usize).expect("interpreter in first 2GB");
         x64asm!(self
-            ; movsx Rq(REG_TEMP), WORD [ Rq(REG_INSN) + 2i8 ]
-            ; lea Rq(REG_INSN), [ Rq(REG_INSN) + Rq(REG_TEMP)*8 + 8 ]
-            ; => fallthrough
-            ; movzx Rq(REG_TEMP), WORD [ Rq(REG_INSN) ]
-            ; shl Rq(REG_TEMP), InterpreterGenerator::STEP_SIZE_LOG2 as i8
-            ; lea Rq(REG_TEMP), [ DWORD base_addr + Rq(REG_TEMP) ]
-            ; jmp Rq(REG_TEMP)
+            // ; movsx Rq(REG_TEMP), WORD [ Rq(REG_INSN) - 6i8 ]
+            ; lea Rq(REG_INSN), [ Rq(REG_INSN) + rdx*8 ]
         );
         self.terminal = true;
-        self.generate_epilogue = false;
     }
 
 }
@@ -830,10 +838,10 @@ pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
                 generator.terminal = false;
                 if generator.generate_epilogue {
                     x64asm!(generator
-                        ; add Rq(REG_INSN), 8
                         ; movzx Rq(REG_TEMP), WORD [ Rq(REG_INSN) ]
                         ; shl Rq(REG_TEMP), InterpreterGenerator::STEP_SIZE_LOG2 as i8
                         ; lea Rq(REG_TEMP), [ DWORD base_addr + Rq(REG_TEMP) ]
+                        ; add Rq(REG_INSN), 8
                         ; jmp Rq(REG_TEMP)
                     );
                 }
@@ -868,7 +876,49 @@ pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
         }
     }
 
+
     unsafe {
+        let ptr = generator.interpreter.buffer;
+        let len = InterpreterGenerator::STEPS_SIZE;
+        let pid = std::process::id();
+        let tid = libc::syscall(libc::SYS_gettid) as u32;
+        let now = || {
+            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+            (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
+        };
+
+        let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
+        // 1. JIT Header (40 bytes)
+        f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
+        f.write_all(&1u32.to_le_bytes()).unwrap();          // Version
+        f.write_all(&40u32.to_le_bytes()).unwrap();         // Header size
+        f.write_all(&62u32.to_le_bytes()).unwrap();         // ELF Machine: EM_X86_64
+        f.write_all(&0u32.to_le_bytes()).unwrap();          // Pad
+        f.write_all(&pid.to_le_bytes()).unwrap();
+        f.write_all(&now().to_le_bytes()).unwrap();
+        f.write_all(&0u64.to_le_bytes()).unwrap();          // Flags
+
+        // Triggers perf record's MMAP detection
+        let m = libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ | libc::PROT_EXEC, libc::MAP_PRIVATE, f.as_raw_fd(), 0);
+        if m != libc::MAP_FAILED { libc::munmap(m, 4096); }
+
+        // 2. JIT_CODE_LOAD Record Header (60 bytes = 56 byte record + 4 byte name)
+        let rec_size = (60 + len) as u32;
+        f.write_all(&0u32.to_le_bytes()).unwrap();          // ID: JIT_CODE_LOAD
+        f.write_all(&rec_size.to_le_bytes()).unwrap();
+        f.write_all(&now().to_le_bytes()).unwrap();
+        f.write_all(&pid.to_le_bytes()).unwrap();
+        f.write_all(&tid.to_le_bytes()).unwrap();
+        f.write_all(&(ptr as u64).to_le_bytes()).unwrap();  // VMA
+        f.write_all(&(ptr as u64).to_le_bytes()).unwrap();  // Code Address
+        f.write_all(&(len as u64).to_le_bytes()).unwrap();   // Code Size
+        f.write_all(&1u64.to_le_bytes()).unwrap();          // Index
+        f.write_all(b"jit\0").unwrap();                     // Symbol Name
+
+        // 3. Raw Code Bytes
+        f.write_all(std::slice::from_raw_parts(ptr, len)).unwrap();
+
         libc::mprotect(
             generator.interpreter.buffer.cast(),
             InterpreterGenerator::STEPS_SIZE,
@@ -878,59 +928,87 @@ pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
     generator.interpreter
 });
 
-pub fn enter(bpf: &[u8]) {
-    let mut r = [0; 10];
-    let mut rax = bpf.as_ptr() as usize;
-    let mut rcx = INTERPRETER.buffer as usize;
-    let mut rdx = 0;
-
-    unsafe {
-        std::arch::asm!(
-            "push rbp",
-            "mov rbp, rsp",
-            "push rbx",
-            "movzx rbx, word ptr [rax]",
-            "shl rbx, 6",
-            "lea rcx, [ rcx + rbx ]",
-            "xor ebx, ebx",
-            "call rcx",
-            "pop rbx",
-            "pop rbp",
-            inout("rax") rax,
-            inout("rcx") rcx,
-            inout("rdx") rdx,
-            inout("rsi") r[0],
-            inout("rdi") r[1],
-            inout("r8") r[2],
-            inout("r9") r[3],
-            inout("r10") r[4],
-            inout("r11") r[5],
-            inout("r12") r[6],
-            inout("r13") r[7],
-            inout("r14") r[8],
-            inout("r15") r[9],
-            out("xmm0") _,
-        )
-    }
-    println!("{:?}", r);
-    let _ = (r, rax, rcx, rdx);
+/// Interpret the bpf buffer.
+pub extern "sysv64" fn interpret(bpf: &[u8]) {
+    enter(bpf, INTERPRETER.buffer as usize)
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::codegen::x64::{InterpreterGenerator, INTERPRETER};
+#[unsafe(naked)]
+pub extern "sysv64" fn enter(bpf: &[u8], base_addr: usize) {
+    // This function is meant to only do the bare minimum setup for the runtime to operate.
+    // e.g. it will setup the VM pointer, stash the registers and setup rbp, but it won't e.g. deal
+    // with writing the return value into the VM.
+    naked_asm!(
+        // TODO: only really need to save callee saved registers.
+        "push rbp",
+        "mov rbp, rsp",
 
-    #[test]
-    fn dump_interpreter_code() {
-        unsafe {
-            std::fs::write(
-                "code.bin",
-                std::slice::from_raw_parts(
-                    INTERPRETER.buffer.cast_const(),
-                    InterpreterGenerator::STEPS_SIZE,
-                ),
-            )
-            .unwrap();
-        }
-    }
+        "sub rsp, 176",
+        "mov    [rbp - 24],  rax",
+        "mov    [rbp - 32],  rcx",
+        "mov    [rbp - 40],  rdx",
+        "mov    [rbp - 48],  rbx",
+        "mov    [rbp - 56],  rsi",
+        "mov    [rbp - 64],  rdi",
+        "mov    [rbp - 72],  r8",
+        "mov    [rbp - 80],  r9",
+        "mov    [rbp - 88],  r10",
+        "mov    [rbp - 96],  r11",
+        "mov    [rbp - 104], r12",
+        "mov    [rbp - 112], r13",
+        "mov    [rbp - 120], r14",
+        "mov    [rbp - 128], r15",
+        "movdqa [rbp - 144], xmm0",
+        "movdqa [rbp - 160], xmm1",
+
+        // the "return" address
+        "lea    rcx, [rip+0f]",
+        "mov    qword ptr [rbp - 8], rcx",
+
+        "mov rax, rdi",
+
+        // TODO: find an epilog in the interpreter and jump to it instad of computing the jump
+        // address here...
+        "movzx rdi, word ptr [rdi]",
+        "shl rdi, 6",
+        "lea rcx, [ rdx + rdi ]",
+
+        // TODO: populate initial register values from VM
+        "xor esi, esi",
+        "xor edi, edi",
+        "xor edx, edx",
+        "xor ebx, ebx",
+        "xor r8, r8",
+        "xor r9, r9",
+        "xor r10, r10",
+        "xor r11, r11",
+        "xor r12, r12",
+        "xor r13, r13",
+        "xor r14, r14",
+        "xor r15, r15",
+        "jmp rcx",
+
+        "0:",
+        "mov    rax,  [rbp - 24]",
+        "mov    rcx,  [rbp - 32]",
+        "mov    rdx,  [rbp - 40]",
+        "mov    rbx,  [rbp - 48]",
+        "mov    rsi,  [rbp - 56]",
+        "mov    rdi,  [rbp - 64]",
+        "mov    r8,   [rbp - 72]",
+        "mov    r9,   [rbp - 80]",
+        "mov    r10,  [rbp - 88]",
+        "mov    r11,  [rbp - 96]",
+        "mov    r12,  [rbp - 104]",
+        "mov    r13,  [rbp - 112]",
+        "mov    r14,  [rbp - 120]",
+        "mov    r15,  [rbp - 128]",
+        "movdqa xmm0, [rbp - 144]",
+        "movdqa xmm1, [rbp - 160]",
+
+        // Done, return to the caller.
+        "mov rsp, rbp",
+        "pop rbp",
+        "ret",
+    )
 }
