@@ -12,7 +12,7 @@ use gdbstub::arch::RegId;
 use gdbstub::target::{ext::monitor_cmd::MonitorCmd, Target, TargetError, TargetResult};
 use gdbstub::{outputln, target};
 
-use core::convert::TryInto;
+use core::convert::{TryFrom, TryInto};
 
 use bpf_arch::reg::id::BpfRegId;
 use bpf_arch::reg::BpfRegs;
@@ -172,12 +172,8 @@ fn get_host_ptr<C: ContextObject>(
     interpreter: &mut Interpreter<C>,
     mut vm_addr: u64,
 ) -> Result<*const u8, EbpfError> {
-    if !interpreter
-        .executable
-        .get_sbpf_version()
-        .enable_lower_rodata_vaddr()
-        && vm_addr < ebpf::MM_BYTECODE_START
-    {
+    let sbpf_version = interpreter.executable.get_sbpf_version();
+    if !sbpf_version.enable_lower_rodata_vaddr() && vm_addr < ebpf::MM_BYTECODE_START {
         vm_addr += ebpf::MM_BYTECODE_START;
     }
 
@@ -185,15 +181,16 @@ fn get_host_ptr<C: ContextObject>(
     // (PF_R, at MM_RODATA_START), and only rodata gets a MemoryRegion. Serve
     // text reads from the Executable directly so the debugger can disassemble
     // code.
-    if interpreter
-        .executable
-        .get_sbpf_version()
-        .enable_lower_rodata_vaddr()
-    {
+    if sbpf_version.enable_lower_rodata_vaddr() {
         let (text_vaddr, text_bytes) = interpreter.executable.get_text_bytes();
-        if vm_addr >= text_vaddr && vm_addr < text_vaddr.saturating_add(text_bytes.len() as u64) {
-            let offset = (vm_addr - text_vaddr) as usize;
-            return Ok(unsafe { text_bytes.as_ptr().add(offset) as *mut u8 });
+        // read_addrs resolves each byte separately, so even the final text
+        // byte is a valid read, but the pointer past the end is not.
+        if let Some(byte) = vm_addr
+            .checked_sub(text_vaddr)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .and_then(|offset| text_bytes.get(offset))
+        {
+            return Ok(byte as *const u8);
         }
     }
 

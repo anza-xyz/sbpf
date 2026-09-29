@@ -258,6 +258,15 @@ fn test_gdbstub_sbpfv3_pc_and_text() {
         .collect();
     assert_eq!(instruction, expected_hex);
 
+    // Debugger reads are byte-granular, including at the ends of .text.
+    for offset in [0, text.len() - 1] {
+        let address = text_vaddr + offset as u64;
+        assert_eq!(
+            request(&format!("m{address:x},1")),
+            format!("{:02x}", text[offset])
+        );
+    }
+
     assert_eq!(request("D"), "OK");
     assert!(matches!(state, Some(GdbStubStateMachine::Disconnected(_))));
 }
