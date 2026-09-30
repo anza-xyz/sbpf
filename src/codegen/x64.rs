@@ -1,8 +1,8 @@
-use dynasmrt::DynamicLabel;
 use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry, StaticLabel};
 use dynasmrt::relocations::{Relocation, SimpleRelocation};
+use dynasmrt::DynamicLabel;
 
-use crate::codegen::{x64, Buffer, Opcode, Template};
+use crate::codegen::{x64, Template};
 use crate::ebpf;
 use std::arch::naked_asm;
 use std::convert::TryFrom;
@@ -35,6 +35,8 @@ const GPREG_MAP: [u8; 11] = [
 
 const REG_INSN: u8 = RAX; // rax
 const REG_TEMP: u8 = RCX; // rcx
+
+const SIG_INVALID_INSN: i32 = -1;
 
 /// Is the value in the provided register disposable/temporary?
 pub const fn disposable_reg(reg: u8) -> bool {
@@ -93,6 +95,8 @@ macro_rules! x64asm {
 }
 
 trait X64Generator {
+    type DynamicLabel: Copy;
+
     fn extend(&mut self, buffer: &[u8]);
     fn offset(&self) -> usize;
     fn push(&mut self, byte: u8);
@@ -117,22 +121,23 @@ trait X64Generator {
     );
     fn dynamic_reloc(
         &mut self,
-        id: DynamicLabel,
+        id: Self::DynamicLabel,
         target_offset: isize,
         field_offset: u8,
         ref_offset: u8,
         kind: u8,
     );
-    fn new_dynamic_label(&mut self) -> DynamicLabel;
-    fn local_label(&mut self, name: &'static str);
-    fn dynamic_label(&mut self, id: DynamicLabel);
+    fn new_dynamic_label(&mut self) -> Self::DynamicLabel;
+    fn dynamic_label(&mut self, id: Self::DynamicLabel);
 
     fn op(&self) -> u8;
     fn dst(&self) -> u8;
     fn src(&self) -> u8;
 
-    /// This instruction is invalid.
-    fn invalid_insn(&mut self);
+    /// Terminate execution with the specified code.
+    ///
+    /// This will discard the guest code stack and return the exit code in REG_TEMP.
+    fn exit(&mut self, code: i32);
 
     /// Introduce a relocation that, to the previous 4 bytes emitted, adds an offset to the
     /// beginning of the “current” eBPF instruction.
@@ -353,9 +358,6 @@ trait X64Generator {
             | ebpf::JSLE64_REG => {
                 let is_64 = (op & ebpf::BPF_CLS_MASK) == ebpf::BPF_JMP64;
                 let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
-                x64asm!(self
-                    ; movsx rdx, WORD REL32_OFF
-                );
                 match (is_64, is_imm) {
                     (true, true) => x64asm!(self
                         ; movsxd Rq(REG_TEMP), DWORD REL32_IMM
@@ -378,7 +380,7 @@ trait X64Generator {
                     ebpf::BPF_JLE => x64asm!(self; ja BYTE =>fallthrough),
                     ebpf::BPF_JSLT => x64asm!(self; jge BYTE =>fallthrough),
                     ebpf::BPF_JSLE => x64asm!(self; jg BYTE =>fallthrough),
-                    _ => self.invalid_insn(),
+                    _ => self.exit(SIG_INVALID_INSN),
                 }
                 self.bpf_taken_branch();
                 self.dynamic_label(fallthrough);
@@ -386,9 +388,12 @@ trait X64Generator {
             ebpf::JA => self.bpf_taken_branch(),
 
             ebpf::CALL_IMM | ebpf::CALL_REG => x64asm!(self; int3),
-            ebpf::EXIT => x64asm!(self;
-                jmp QWORD [rbp - 8]
-            ),
+            ebpf::EXIT => {
+                x64asm!(self
+                    ; xor Rd(REG_TEMP), Rd(REG_TEMP)
+                    ; ret
+                );
+            }
 
             ebpf::LD_B_REG
             | ebpf::LD_H_REG
@@ -448,7 +453,7 @@ trait X64Generator {
             | 231..=237
             | 239..=245
             | 248..=253
-            | 255 => self.invalid_insn(),
+            | 255 => self.exit(SIG_INVALID_INSN),
         }
     }
 
@@ -456,27 +461,94 @@ trait X64Generator {
     fn bpf_taken_branch(&mut self);
 }
 
-struct JITGenerator {}
+#[derive(Clone, Copy)]
+enum RelocationKind {
+    // template_taken_branch relocation.
+    //
+    // When BPF instruction represents a branch, and the branch is taken, the control flow has to
+    // transfer to the machine code representing the target BPF instruction's code. Offset to this
+    // machine code is what this relocation must overwrite based on the BPF instruction being
+    // templated.
+    TakenBranch,
+}
+
+#[derive(Clone, Copy)]
+struct TemplateRelocation {
+    offset: usize,
+
+    kind: RelocationKind,
+}
+
+#[derive(Clone, Copy)]
+struct JITLabel {
+    id: usize,
+}
+
+struct JITGenerator {
+    template: super::Template<64, TemplateRelocation>,
+    op: u8,
+    dst: u8,
+    src: u8,
+    labels: [usize; 4], // offset to code where the label lies
+    num_labels: usize,
+    // Relocations in which we have to place the offset to the current instruction
+    insn_offset_relocs: [usize; 16],
+    num_insn_offset_relocs: usize,
+
+    // FIXME: these have to be resolved as the template is finalized.
+    dynamic_relocs: [usize; 16],
+    num_dynamic_relocs: usize,
+}
+
+impl JITGenerator {
+    pub const fn new() -> Self {
+        Self {
+            template: super::Template::new(),
+            op: 0,
+            dst: 0,
+            src: 0,
+            labels: [0; _],
+            num_labels: 0,
+            insn_offset_relocs: [0; _],
+            num_insn_offset_relocs: 0,
+            dynamic_relocs: [0; _],
+            num_dynamic_relocs: 0,
+        }
+    }
+
+    fn finalize(&mut self) -> Template<64, TemplateRelocation> {
+        // TODO: fixup dynamic relocs...
+        // the only ones to remain may be the insn_offset_relocs.
+        self.template
+    }
+}
 
 impl X64Generator for JITGenerator {
+    type DynamicLabel = JITLabel;
+
+    #[track_caller]
     fn extend(&mut self, buffer: &[u8]) {
-        todo!()
+        self.template.extend(buffer);
     }
 
     fn offset(&self) -> usize {
-        todo!()
+        self.template.offset()
     }
 
     fn push(&mut self, byte: u8) {
-        todo!()
+        self.template.push(byte)
     }
 
     fn push_i32(&mut self, value: i32) {
-        todo!()
+        self.template.push_i32(value);
     }
 
     fn push_i8(&mut self, value: i8) {
-        todo!()
+        self.template.push_i8(value);
+    }
+
+    fn align(&mut self, alignment: usize, with: u8) {
+        // Ignore alignment requests; we're generating templates.
     }
 
     fn forward_reloc(
@@ -490,45 +562,48 @@ impl X64Generator for JITGenerator {
         todo!()
     }
 
-
-    fn new_dynamic_label(&mut self) -> DynamicLabel {
-        todo!()
+    fn new_dynamic_label(&mut self) -> JITLabel {
+        assert!(self.num_labels < self.labels.len());
+        let label = JITLabel {
+            id: self.num_labels,
+        };
+        self.num_labels += 1;
+        label
     }
 
-    fn local_label(&mut self, name: &'static str) {
-        todo!()
-    }
-    fn dynamic_label(&mut self, id: DynamicLabel) {
-        todo!()
+    fn dynamic_label(&mut self, id: JITLabel) {
+        self.labels[id.id] = self.offset();
     }
 
     fn op(&self) -> u8 {
-        todo!()
+        self.op
     }
 
     fn dst(&self) -> u8 {
-        todo!()
+        self.dst
     }
 
     fn src(&self) -> u8 {
-        todo!()
+        self.src
     }
 
-    fn invalid_insn(&mut self) {
-        x64asm!(self; jmp ->invalid_insn);
+    fn exit(&mut self, code: i32) {
+        x64asm!(self
+            ; mov Rq(REG_TEMP), code
+            ; jmp QWORD [rbp - 8]
+        );
     }
 
     fn reloc_add_insn_off32(&mut self) {
         let add_to = self.offset().checked_sub(4).unwrap();
-        todo!("add the current insn offset to add_to={add_to}")
+        self.insn_offset_relocs[self.num_insn_offset_relocs] = add_to;
+        self.num_insn_offset_relocs += 1;
     }
 
     fn bpf_taken_branch(&mut self) {
-        todo!()
-    }
-
-    fn align(&mut self, alignment: usize, with: u8) {
-        todo!()
+        x64asm!(self
+            ; jmp ->template_taken_branch
+        );
     }
 
     fn global_reloc(
@@ -539,45 +614,82 @@ impl X64Generator for JITGenerator {
         ref_offset: u8,
         kind: u8,
     ) {
-        todo!()
+        let ref_kind = kind >> 6;
+        let ref_size = kind & 0x3F;
+        match name {
+            "template_taken_branch" => {
+                assert!(target_offset == 0);
+                assert!(ref_offset == 0);
+                assert!(ref_kind == 0); // relative
+                assert!(ref_size == 2); // dword
+                self.template.add_relocation(TemplateRelocation {
+                    offset: self.offset() + field_offset as usize,
+                    kind: RelocationKind::TakenBranch,
+                });
+            }
+            _ => panic!("unknown global reloc: {}", name),
+        }
     }
 
     fn dynamic_reloc(
         &mut self,
-        id: DynamicLabel,
+        id: Self::DynamicLabel,
         target_offset: isize,
         field_offset: u8,
         ref_offset: u8,
         kind: u8,
     ) {
-        todo!()
+        assert!(target_offset == 0);
+        // assert!(field_offset == 0);
+        assert!(ref_offset == 0);
+        assert!(kind == 0);
+        self.dynamic_relocs[id.id] = self.offset() + field_offset as usize;
     }
 }
 
 // TODO: when dynasm supports const codegen, we can make these be generated at compile time into an
 // array.
-// pub(super) static JIT_TEMPLATES: LazyLock<Vec<super::Template<64>>> = LazyLock::new(|| {
-//     let mut result = Vec::with_capacity(u16::MAX as usize);
-//     for bpf_src in 0..16 {
-//         for bpf_dst in 0..16 {
-//             for bpf_op in 0..=u8::MAX {
-//                 let mut template = Template::new();
-//                 let (Some(src), Some(dst)) = (GPREG_MAP.get(bpf_src), GPREG_MAP.get(bpf_dst))
-//                 else {
-//                     result.push(template);
-//                     continue;
-//                 };
-//                 // generate_opcode_template(&mut template, bpf_op, *src, *dst);
-//                 result.push(template);
-//             }
-//         }
-//     }
-//     assert!(
-//         result.len() == u16::MAX as usize,
-//         "must generate a template for each of the thingies"
-//     );
-//     result
-// });
+pub(super) static JIT_TEMPLATES: LazyLock<Vec<super::Template<64, TemplateRelocation>>> =
+    LazyLock::new(|| {
+        let mut result = Vec::with_capacity(0x10000);
+        for bpf_src in 0..16 {
+            for bpf_dst in 0..16 {
+                for bpf_op in 0..=u8::MAX {
+                    let mut generator = JITGenerator::new();
+                    generator.src = GPREG_MAP.get(bpf_src).copied().unwrap_or(u8::MAX);
+                    generator.dst = GPREG_MAP.get(bpf_dst).copied().unwrap_or(u8::MAX);
+                    generator.op = bpf_op;
+                    generator.bpf_insn_template();
+                    result.push(generator.finalize());
+                }
+            }
+        }
+        result
+    });
+
+pub fn jit(bpf: &[u8]) -> Vec<u8> {
+    let templates = &*JIT_TEMPLATES;
+    assert!(bpf.as_ptr().cast::<u64>().is_aligned());
+    assert!(bpf.len() % 8 == 0);
+    let program: &[u64] = unsafe { bpf.align_to::<u64>().1 };
+    let mut pc_section = Vec::<u32>::with_capacity(program.len());
+    let mut position: u32 = 0;
+    // first scan
+    for op in program {
+        let template = templates[*op as u16 as usize];
+        pc_section.push(position);
+        position += template.offset() as u32;
+    }
+
+    let mut text_section = Vec::<u8>::with_capacity(position as usize);
+    // 2nd scan
+    for op in program {
+        let template = templates[*op as u16 as usize];
+        // TODO: apply relocations.
+        text_section.extend(template.buffer());
+    }
+    text_section
+}
 
 pub struct Interpreter {
     buffer: *mut u8,
@@ -590,10 +702,7 @@ unsafe impl Sync for Interpreter {}
 impl Drop for Interpreter {
     fn drop(&mut self) {
         unsafe {
-            libc::munmap(
-                self.buffer.cast(),
-                InterpreterGenerator::STEPS_SIZE + InterpreterGenerator::HELPERS_SIZE,
-            );
+            libc::munmap(self.buffer.cast(), InterpreterGenerator::STEPS_SIZE);
         }
     }
 }
@@ -617,7 +726,6 @@ struct InterpreterGenerator {
 impl InterpreterGenerator {
     const STEP_SIZE_LOG2: u8 = 6; // 64 bytes
     const STEPS_SIZE: usize = 0x1_0000 * (1 << Self::STEP_SIZE_LOG2);
-    const HELPERS_SIZE: usize = 10240;
 
     pub fn new() -> Self {
         unsafe {
@@ -626,12 +734,13 @@ impl InterpreterGenerator {
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .open("interpreter.bin").unwrap();
+                .open("interpreter.bin")
+                .unwrap();
             file.set_len(Self::STEPS_SIZE as u64).unwrap();
 
             let buffer = libc::mmap(
                 std::ptr::null_mut(),
-                Self::STEPS_SIZE + Self::HELPERS_SIZE,
+                Self::STEPS_SIZE,
                 libc::PROT_READ | libc::PROT_WRITE,
                 libc::MAP_SHARED | libc::MAP_32BIT,
                 file.as_raw_fd(),
@@ -675,6 +784,8 @@ impl InterpreterGenerator {
 }
 
 impl X64Generator for InterpreterGenerator {
+    type DynamicLabel = DynamicLabel;
+
     fn extend(&mut self, buffer: &[u8]) {
         assert!(!self.terminal);
         assert!(self.offset.saturating_add(buffer.len()) < InterpreterGenerator::STEPS_SIZE);
@@ -775,12 +886,10 @@ impl X64Generator for InterpreterGenerator {
         self.labels.new_dynamic_label()
     }
 
-    fn local_label(&mut self, name: &'static str) {
-        self.labels
-            .define_local(name, dynasmrt::AssemblyOffset(self.offset));
-    }
     fn dynamic_label(&mut self, id: DynamicLabel) {
-        self.labels.define_dynamic(id, dynasmrt::AssemblyOffset(self.offset)).unwrap()
+        self.labels
+            .define_dynamic(id, dynasmrt::AssemblyOffset(self.offset))
+            .unwrap()
     }
 
     fn op(&self) -> u8 {
@@ -795,12 +904,10 @@ impl X64Generator for InterpreterGenerator {
         self.src
     }
 
-    fn invalid_insn(&mut self) {
+    fn exit(&mut self, code: i32) {
         x64asm!(self
-            // TODO: something of this sort, returning straight back to the runtime exit point,
-            // pretty much a longjmp?
-            ; mov rsp, rbp
-            ; ret
+            ; mov Rq(REG_TEMP), code
+            ; jmp QWORD [rbp - 8]
         );
         self.generate_epilogue = false;
         self.terminal = true;
@@ -811,15 +918,12 @@ impl X64Generator for InterpreterGenerator {
     }
 
     fn bpf_taken_branch(&mut self) {
-        let base_addr =
-            i32::try_from(self.interpreter.buffer as usize).expect("interpreter in first 2GB");
         x64asm!(self
-            // ; movsx Rq(REG_TEMP), WORD [ Rq(REG_INSN) - 6i8 ]
-            ; lea Rq(REG_INSN), [ Rq(REG_INSN) + rdx*8 ]
+            ; movsx Rq(REG_TEMP), WORD REL32_OFF
+            ; lea Rq(REG_INSN), [ Rq(REG_INSN) + Rq(REG_TEMP)*8 ]
         );
         self.terminal = true;
     }
-
 }
 
 pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
@@ -876,14 +980,16 @@ pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
         }
     }
 
-
     unsafe {
         let ptr = generator.interpreter.buffer;
         let len = InterpreterGenerator::STEPS_SIZE;
         let pid = std::process::id();
         let tid = libc::syscall(libc::SYS_gettid) as u32;
         let now = || {
-            let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
             (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
         };
@@ -891,30 +997,39 @@ pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
         let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
         // 1. JIT Header (40 bytes)
         f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
-        f.write_all(&1u32.to_le_bytes()).unwrap();          // Version
-        f.write_all(&40u32.to_le_bytes()).unwrap();         // Header size
-        f.write_all(&62u32.to_le_bytes()).unwrap();         // ELF Machine: EM_X86_64
-        f.write_all(&0u32.to_le_bytes()).unwrap();          // Pad
+        f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
+        f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
+        f.write_all(&62u32.to_le_bytes()).unwrap(); // ELF Machine: EM_X86_64
+        f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
         f.write_all(&pid.to_le_bytes()).unwrap();
         f.write_all(&now().to_le_bytes()).unwrap();
-        f.write_all(&0u64.to_le_bytes()).unwrap();          // Flags
+        f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
 
         // Triggers perf record's MMAP detection
-        let m = libc::mmap(std::ptr::null_mut(), 4096, libc::PROT_READ | libc::PROT_EXEC, libc::MAP_PRIVATE, f.as_raw_fd(), 0);
-        if m != libc::MAP_FAILED { libc::munmap(m, 4096); }
+        let m = libc::mmap(
+            std::ptr::null_mut(),
+            4096,
+            libc::PROT_READ | libc::PROT_EXEC,
+            libc::MAP_PRIVATE,
+            f.as_raw_fd(),
+            0,
+        );
+        if m != libc::MAP_FAILED {
+            libc::munmap(m, 4096);
+        }
 
         // 2. JIT_CODE_LOAD Record Header (60 bytes = 56 byte record + 4 byte name)
         let rec_size = (60 + len) as u32;
-        f.write_all(&0u32.to_le_bytes()).unwrap();          // ID: JIT_CODE_LOAD
+        f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
         f.write_all(&rec_size.to_le_bytes()).unwrap();
         f.write_all(&now().to_le_bytes()).unwrap();
         f.write_all(&pid.to_le_bytes()).unwrap();
         f.write_all(&tid.to_le_bytes()).unwrap();
-        f.write_all(&(ptr as u64).to_le_bytes()).unwrap();  // VMA
-        f.write_all(&(ptr as u64).to_le_bytes()).unwrap();  // Code Address
-        f.write_all(&(len as u64).to_le_bytes()).unwrap();   // Code Size
-        f.write_all(&1u64.to_le_bytes()).unwrap();          // Index
-        f.write_all(b"jit\0").unwrap();                     // Symbol Name
+        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // VMA
+        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // Code Address
+        f.write_all(&(len as u64).to_le_bytes()).unwrap(); // Code Size
+        f.write_all(&1u64.to_le_bytes()).unwrap(); // Index
+        f.write_all(b"jit\0").unwrap(); // Symbol Name
 
         // 3. Raw Code Bytes
         f.write_all(std::slice::from_raw_parts(ptr, len)).unwrap();
@@ -930,11 +1045,17 @@ pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
 
 /// Interpret the bpf buffer.
 pub extern "sysv64" fn interpret(bpf: &[u8]) {
-    enter(bpf, INTERPRETER.buffer as usize)
+    let first_opcode = u16::from_le_bytes(<[u8; 2]>::try_from(&bpf[0..2]).unwrap()) as usize;
+    let address = unsafe {
+        INTERPRETER
+            .buffer
+            .add(first_opcode << InterpreterGenerator::STEP_SIZE_LOG2)
+    };
+    enter(bpf, address as usize)
 }
 
 #[unsafe(naked)]
-pub extern "sysv64" fn enter(bpf: &[u8], base_addr: usize) {
+pub extern "sysv64" fn enter(bpf: &[u8], start_addr: usize) {
     // This function is meant to only do the bare minimum setup for the runtime to operate.
     // e.g. it will setup the VM pointer, stash the registers and setup rbp, but it won't e.g. deal
     // with writing the return value into the VM.
@@ -942,7 +1063,6 @@ pub extern "sysv64" fn enter(bpf: &[u8], base_addr: usize) {
         // TODO: only really need to save callee saved registers.
         "push rbp",
         "mov rbp, rsp",
-
         "sub rsp, 176",
         "mov    [rbp - 24],  rax",
         "mov    [rbp - 32],  rcx",
@@ -960,19 +1080,12 @@ pub extern "sysv64" fn enter(bpf: &[u8], base_addr: usize) {
         "mov    [rbp - 128], r15",
         "movdqa [rbp - 144], xmm0",
         "movdqa [rbp - 160], xmm1",
-
-        // the "return" address
+        // the "longjmp" destination address for signals
         "lea    rcx, [rip+0f]",
         "mov    qword ptr [rbp - 8], rcx",
-
+        // Initialize "internal" registers.
         "mov rax, rdi",
-
-        // TODO: find an epilog in the interpreter and jump to it instad of computing the jump
-        // address here...
-        "movzx rdi, word ptr [rdi]",
-        "shl rdi, 6",
-        "lea rcx, [ rdx + rdi ]",
-
+        "mov rcx, rdx",
         // TODO: populate initial register values from VM
         "xor esi, esi",
         "xor edi, edi",
@@ -986,8 +1099,7 @@ pub extern "sysv64" fn enter(bpf: &[u8], base_addr: usize) {
         "xor r13, r13",
         "xor r14, r14",
         "xor r15, r15",
-        "jmp rcx",
-
+        "call 1f",
         "0:",
         "mov    rax,  [rbp - 24]",
         "mov    rcx,  [rbp - 32]",
@@ -1005,10 +1117,11 @@ pub extern "sysv64" fn enter(bpf: &[u8], base_addr: usize) {
         "mov    r15,  [rbp - 128]",
         "movdqa xmm0, [rbp - 144]",
         "movdqa xmm1, [rbp - 160]",
-
         // Done, return to the caller.
         "mov rsp, rbp",
         "pop rbp",
         "ret",
+        "1:",
+        "jmp rcx",
     )
 }

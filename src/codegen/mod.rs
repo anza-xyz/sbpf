@@ -1,23 +1,39 @@
 pub mod x64;
 
-pub struct Buffer {
-
-}
+const MAX_RELOCATIONS: usize = 16;
 
 #[derive(Copy, Clone)]
-struct Template<const SIZE: usize> {
+struct Template<const SIZE: usize, R: Copy> {
     buffer: [u8; SIZE],
     bytes: usize,
+    // Relocations based on BPF instruction contents (offset, immediate) for which this template is
+    // instantiated for.
+    relocations: [std::mem::MaybeUninit<R>; MAX_RELOCATIONS],
+    num_relocations: usize,
 }
 
-impl<const SIZE: usize> Template<SIZE> {
+impl<const SIZE: usize, R: Copy> Template<SIZE, R> {
     pub const fn new() -> Self {
         Self {
             buffer: [0; SIZE],
             bytes: 0,
+            relocations: [std::mem::MaybeUninit::uninit(); MAX_RELOCATIONS],
+            num_relocations: 0,
         }
     }
 
+    pub const fn buffer(&self) -> &[u8] {
+        unsafe {
+            std::slice::from_raw_parts(self.buffer.as_ptr(), self.bytes)
+        }
+    }
+
+    pub const fn add_relocation(&mut self, relocation: R) {
+        self.relocations[self.num_relocations].write(relocation);
+        self.num_relocations += 1;
+    }
+
+    #[track_caller]
     pub const fn extend(&mut self, buffer: &[u8]) {
         let mut i = 0;
         while i < buffer.len() {
@@ -96,10 +112,4 @@ impl<const SIZE: usize> Template<SIZE> {
         _kind: u8,
     ) {
     }
-}
-
-#[repr(C)]
-pub struct Opcode<const INTERPRETED: bool> {
-    opcode: u8,
-    dstsrc: u8,
 }
