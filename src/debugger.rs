@@ -12,7 +12,7 @@ use gdbstub::arch::RegId;
 use gdbstub::target::{ext::monitor_cmd::MonitorCmd, Target, TargetError, TargetResult};
 use gdbstub::{outputln, target};
 
-use core::convert::TryInto;
+use core::convert::{TryFrom, TryInto};
 
 use bpf_arch::reg::id::BpfRegId;
 use bpf_arch::reg::BpfRegs;
@@ -172,13 +172,26 @@ fn get_host_ptr<C: ContextObject>(
     interpreter: &mut Interpreter<C>,
     mut vm_addr: u64,
 ) -> Result<*const u8, EbpfError> {
-    if !interpreter
-        .executable
-        .get_sbpf_version()
-        .enable_lower_rodata_vaddr()
-        && vm_addr < ebpf::MM_BYTECODE_START
-    {
-        vm_addr += ebpf::MM_BYTECODE_START;
+    let sbpf_version = interpreter.executable.get_sbpf_version();
+    if !sbpf_version.enable_lower_rodata_vaddr() && vm_addr < ebpf::MM_BYTECODE_START {
+        vm_addr = vm_addr.saturating_add(ebpf::MM_BYTECODE_START);
+    }
+
+    // SBPFv3+ separates .text (PF_X, at MM_BYTECODE_START) from rodata
+    // (PF_R, at MM_RODATA_START), and only rodata gets a MemoryRegion. Serve
+    // text reads from the Executable directly so the debugger can disassemble
+    // code.
+    if sbpf_version.enable_lower_rodata_vaddr() {
+        let (text_vaddr, text_bytes) = interpreter.executable.get_text_bytes();
+        // read_addrs resolves each byte separately, so even the final text
+        // byte is a valid read, but the pointer past the end is not.
+        if let Some(byte) = vm_addr
+            .checked_sub(text_vaddr)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .and_then(|offset| text_bytes.get(offset))
+        {
+            return Ok(byte as *const u8);
+        }
     }
 
     unsafe {
@@ -226,7 +239,7 @@ impl<'a, 'b, 'c, C: ContextObject> SingleThreadBase for Interpreter<'a, 'b, 'c, 
                 // The debugger is sometimes requesting more data than we have access to, just skip these
                 _ => continue,
             };
-            *val = unsafe { *host_ptr as u8 };
+            *val = unsafe { *host_ptr };
         }
         Ok(())
     }
@@ -413,8 +426,8 @@ impl<'a, 'b, 'c, C: ContextObject>
                 let reg = Register {
                     name: &name,
                     alt_name: None,
-                    bitsize: (usize::from(size)) * 8,
-                    offset: reg_id * (usize::from(size)),
+                    bitsize: usize::from(size).saturating_mul(8),
+                    offset: reg_id.saturating_mul(usize::from(size)),
                     encoding: Encoding::Uint,
                     format: Format::Hex,
                     set: &set,
@@ -643,7 +656,7 @@ impl<'a, 'b, 'c, C: ContextObject>
         }
 
         let start = offset;
-        let end = (offset + length).min(data.len());
+        let end = offset.saturating_add(length).min(data.len());
         let data = &data[start..end];
         let len = buf.len().min(data.len());
         buf[..len].copy_from_slice(&data[..len]);

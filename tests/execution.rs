@@ -2484,7 +2484,7 @@ declare_builtin_function!(
                 Arc::new(loader),
             )
             .unwrap();
-            let input =[depth as u8 - 1, throw as u8];
+            let input = [depth as u8 - 1, throw as u8];
             test_interpreter_and_jit!(
                 executable,
                 &raw const input,

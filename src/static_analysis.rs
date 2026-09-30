@@ -784,13 +784,8 @@ impl<'a> Analysis<'a> {
                 discovered += 1;
             }
             let cfg_node = self.cfg_nodes.get(&node.cfg_node).unwrap();
-            for j in edge_index..cfg_node.destinations.len() {
-                let w = self
-                    .cfg_nodes
-                    .get(&cfg_node.destinations[j])
-                    .unwrap()
-                    .topo_index
-                    .scc_id;
+            for (j, destination) in cfg_node.destinations.iter().enumerate().skip(edge_index) {
+                let w = self.cfg_nodes.get(destination).unwrap().topo_index.scc_id;
                 if nodes[w].discovery == usize::MAX {
                     recursion_stack.push((v, j + 1));
                     recursion_stack.push((w, 0));
