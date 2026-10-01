@@ -47,7 +47,6 @@ shuttle-test = ["dep:shuttle"]
 conf-stack-frame-size = []
 
 [dev-dependencies]
-solana-sbpf = { path = ".", features = ["tracer"] }
 elf = "0.0.10"
 json = "0.12"
 test_utils = { path = "test_utils/" }
