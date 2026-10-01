@@ -561,11 +561,7 @@ fn test_pqr_v0() {
     prog[17] = 1; // dst = R1
     prog[33] = 16; // src = R1
     prog[40] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for (opc, dst, src, expected_result) in [
         (ebpf::DIV32_IMM, 13u64, 4u64, 3u64),
         (ebpf::DIV64_IMM, 13u64, 4u64, 3u64),
@@ -658,11 +654,7 @@ fn test_pqr_v2() {
     prog[33] = 1; // dst = R1
     prog[41] = 16; // src = R1
     prog[48] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for (opc, dst, src, expected_result) in [
         (ebpf::UHMUL64_IMM, 13u64, 4u64, 0u64),
         (ebpf::UDIV32_IMM, 13u64, 4u64, 3u64),
@@ -828,11 +820,7 @@ fn test_err_pqr_divide_by_zero() {
     prog[1] = 10;
     prog[8] = ebpf::MOV32_IMM;
     prog[24] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for opc in [
         ebpf::UDIV32_REG,
         ebpf::UDIV64_REG,
@@ -1632,11 +1620,7 @@ fn test_conditional_jumps() {
     prog[64] = ebpf::MOV32_IMM;
     LittleEndian::write_u32(&mut prog[68..], THEN);
     prog[72] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for (opc, dst, src, expected_result) in [
         (ebpf::BPF_JEQ, 3, 3, THEN),
         (ebpf::BPF_JEQ, 3, 7, ELSE),
@@ -2045,11 +2029,7 @@ fn test_err_mem_access_out_of_bound() {
     prog[8] = ebpf::LD_DW_IMM;
     prog[24] = ebpf::ST_B_IMM;
     prog[32] = ebpf::EXIT;
-    let config = Config {
-        enable_register_tracing: true,
-        ..Config::default()
-    };
-    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let loader = Arc::new(BuiltinProgram::new_loader(Config::default()));
     for (address, k) in [
         (0x2u64, "allocated"),
         (0x8002u64, "unallocated"),
@@ -2463,10 +2443,7 @@ declare_builtin_function!(
             };
         #[allow(unused_mut)]
         if depth > 0 {
-            let mut config = Config {
-                enable_register_tracing: true,
-                ..Config::default()
-            };
+            let mut config = Config::default();
             if version == 0 {
                 config.enabled_sbpf_versions = SBPFVersion::V0..=SBPFVersion::V0;
             } else {
@@ -3231,10 +3208,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     let mem_size = 1024 * 1024;
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
-        Arc::new(BuiltinProgram::new_loader(Config {
-            enable_register_tracing: true,
-            ..Config::default()
-        })),
+        Arc::new(BuiltinProgram::new_loader(Config::default())),
         SBPFVersion::V4,
         FunctionRegistry::default(),
     );

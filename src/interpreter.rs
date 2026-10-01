@@ -210,9 +210,8 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         let dst = insn.dst as usize;
         let src = insn.src as usize;
 
-        if config.enable_register_tracing {
-            self.vm.register_trace.push(self.reg);
-        }
+        #[cfg(feature = "tracer")]
+        self.vm.register_trace.push(self.reg);
 
         match insn.opc {
             ebpf::LD_DW_IMM if !self.executable.get_sbpf_version().disable_lddw() => {

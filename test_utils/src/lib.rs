@@ -466,11 +466,7 @@ macro_rules! test_interpreter_and_jit_asm {
     ($source:expr, $config:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
         #[allow(unused_mut)]
         {
-            let config = Config {
-                enable_register_tracing: true,
-                ..$config
-            };
-            let loader = Arc::new(BuiltinProgram::new_loader(config));
+            let loader = Arc::new(BuiltinProgram::new_loader($config));
             let mut executable = assemble($source, loader).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
         }
@@ -495,10 +491,7 @@ macro_rules! test_syscall_asm {
         let _ = <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        let mut config = Config {
-            enable_register_tracing: true,
-            ..Config::default()
-        };
+        let mut config = Config::default();
         for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
             config.enabled_sbpf_versions = sbpf_version..=sbpf_version;
             let mut loader = BuiltinProgram::new_loader(config.clone());
@@ -520,10 +513,7 @@ macro_rules! test_interpreter_and_jit_elf {
         file.read_to_end(&mut elf).unwrap();
         #[allow(unused_mut)]
         {
-            let mut loader = BuiltinProgram::new_loader(Config {
-                enable_register_tracing: true,
-                ..$config
-            });
+            let mut loader = BuiltinProgram::new_loader($config);
             $(test_interpreter_and_jit_elf!(register, loader, $syscall_name => $syscall);)*
             let mut executable = Executable::<TestContextObject>::from_elf(&elf, Arc::new(loader)).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);

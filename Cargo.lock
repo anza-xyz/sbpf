@@ -410,6 +410,7 @@ dependencies = [
  "rand",
  "rustc-demangle",
  "shuttle",
+ "solana-sbpf",
  "test_utils",
  "thiserror",
  "winapi",
