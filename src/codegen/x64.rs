@@ -18,6 +18,8 @@ const RSI: u8 = 6;
 const RDI: u8 = 7;
 
 /// Mapping from a numbered eBPF register to an x64 one.
+///
+/// Keep in sync with the `.alias`es in `x64asm!`.
 const GPREG_MAP: [u8; 11] = [
     RSI, // r0 = rsi
     RDI, // r1 = rdi
@@ -33,9 +35,11 @@ const GPREG_MAP: [u8; 11] = [
          // care to generate instructions accordingly.
 ];
 
-const REG_INSN: u8 = RAX; // rax
+// Keep in sync with the `temp` `.alias` in `x64asm!`.
 const REG_TEMP: u8 = RCX; // rcx
-const REG_METER: u8 = RDX; // rdx
+
+/// Size of the stack frame allocated for each internal call (fixed frames, as in SBPFv3.)
+const STACK_FRAME_SIZE: i32 = 4096;
 
 const SIG_INVALID_INSN: i8 = -1;
 const SIG_EXCEEDED_MAX_INSTRUCTIONS: i8 = -2;
@@ -48,7 +52,28 @@ pub const fn disposable_reg(reg: u8) -> bool {
 macro_rules! x64asm {
     ($output: expr; $($tts:tt)*) => { x64asm!(@munch {$output; [] []} ; $($tts)*) };
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]}) => {
-        dynasm::dynasm!($output; .arch x64 $($acc)* $($curr)*)
+        dynasm::dynasm!($output
+            ; .arch x64
+            // BPF registers (see `GPREG_MAP`.)
+            ; .alias R0, rsi
+            ; .alias R1, rdi
+            ; .alias R2, r8
+            ; .alias R3, r9
+            ; .alias R4, r10
+            ; .alias R5, r11
+            ; .alias R6, r12
+            ; .alias R7, r13
+            ; .alias R8, r14
+            ; .alias R9, r15
+            ; .alias R10, rbx
+            // Internal registers.
+            ; .alias RINSN, rax
+            ; .alias RTEMP, rcx
+            ; .alias WTEMP, ecx
+            ; .alias BTEMP, cl
+            ; .alias RMETER, rdx
+            $($acc)* $($curr)*
+        )
     };
 
     // replace ALU_SRC() operand with either a source register for ALU instructions using source
@@ -72,19 +97,19 @@ macro_rules! x64asm {
 
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_IMM $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [ DWORD -4i32 + Rq(REG_INSN) ] ;; $output.global_reloc("template_insn_offset", -4, 4, 0, 0xC2)
+            $($curr)* [ DWORD -4i32 + RINSN ] ;; $output.template_reloc(TemplateRelocationKind::InsnOffset, -4, 4, 0)
         ]} $($rest)*)
     };
 
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_OFF $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [ DWORD -6i32 + Rq(REG_INSN) ] ;; $output.global_reloc("template_insn_offset", -6, 4, 0, 0xC2)
+            $($curr)* [ DWORD -6i32 + RINSN ] ;; $output.template_reloc(TemplateRelocationKind::InsnOffset, -6, 4, 0)
         ]} $($rest)*)
     };
 
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_NEXT_INSN $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [ DWORD 0i32 + Rq(REG_INSN) ] ;; $output.global_reloc("template_insn_offset", 0, 4, 0, 0xC2)
+            $($curr)* [ DWORD 0i32 + RINSN ] ;; $output.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
         ]} $($rest)*)
     };
 
@@ -127,6 +152,18 @@ trait X64Generator {
         ref_offset: u8,
         kind: u8,
     );
+    /// Record a template relocation for bytes immediately preceding the current offset.
+    ///
+    /// The field is overwritten based on BPF instruction data as the templates are assembled. This
+    /// is unlike the other types of relocations which have to be resolved or resolvable when the
+    /// template is finalized.
+    fn template_reloc(
+        &mut self,
+        kind: TemplateRelocationKind,
+        target_offset: isize,
+        field_offset: u8,
+        ref_offset: u8,
+    );
     fn new_dynamic_label(&mut self) -> Self::DynamicLabel;
     fn dynamic_label(&mut self, id: Self::DynamicLabel);
 
@@ -147,25 +184,25 @@ trait X64Generator {
             ebpf::OR32_IMM |
             ebpf::OR32_REG => x64asm!(self; or Rd(dst), ALU_SRC32),
             ebpf::OR64_IMM => x64asm!(self
-                ; mov Rd(REG_TEMP), ALU_SRC32
-                ; or Rq(dst), Rq(REG_TEMP)
+                ; mov WTEMP, ALU_SRC32
+                ; or Rq(dst), RTEMP
             ),
             #[rustfmt::skip]
             ebpf::OR64_REG => if dst != src { x64asm!(self
                 ; or Rq(dst), Rq(src)
             )},
             ebpf::HOR64_IMM => x64asm!(self
-                ; mov Rd(REG_TEMP), ALU_SRC32
-                ; shl Rq(REG_TEMP), 32
-                ; or Rq(dst), Rq(REG_TEMP)
+                ; mov WTEMP, ALU_SRC32
+                ; shl RTEMP, 32
+                ; or Rq(dst), RTEMP
             ),
             #[rustfmt::skip]
             ebpf::AND32_IMM |
             ebpf::AND32_REG => x64asm!(self; and Rd(dst), ALU_SRC32),
             #[rustfmt::skip]
             ebpf::AND64_IMM => x64asm!(self
-                ; mov Rd(REG_TEMP), ALU_SRC32
-                ; and Rq(dst), Rq(REG_TEMP)
+                ; mov WTEMP, ALU_SRC32
+                ; and Rq(dst), RTEMP
             ),
             #[rustfmt::skip]
             ebpf::AND64_REG => if dst != src { x64asm!(self
@@ -175,8 +212,8 @@ trait X64Generator {
             ebpf::XOR32_IMM |
             ebpf::XOR32_REG => x64asm!(self; xor Rd(dst), ALU_SRC32),
             ebpf::XOR64_IMM => x64asm!(self
-                ; mov Rd(REG_TEMP), ALU_SRC32
-                ; xor Rq(dst), Rq(REG_TEMP)
+                ; mov WTEMP, ALU_SRC32
+                ; xor Rq(dst), RTEMP
             ),
             ebpf::XOR64_REG => x64asm!(self; xor Rq(dst), Rq(src)),
             ebpf::MOV32_IMM => x64asm!(self; mov Rd(dst), ALU_SRC32),
@@ -191,16 +228,16 @@ trait X64Generator {
             ebpf::SUB64_REG => x64asm!(self; sub Rq(dst), Rq(src)),
             ebpf::MUL64_REG => x64asm!(self; mulx Rq(dst), Rq(dst), Rq(src)),
             ebpf::ADD64_IMM => x64asm!(self
-                ; movsxd Rq(REG_TEMP), REL32_IMM
-                ; add Rq(dst), Rq(REG_TEMP)
+                ; movsxd RTEMP, REL32_IMM
+                ; add Rq(dst), RTEMP
             ),
             ebpf::SUB64_IMM => x64asm!(self
-                ; movsxd Rq(REG_TEMP), REL32_IMM
-                ; sub Rq(dst), Rq(REG_TEMP)
+                ; movsxd RTEMP, REL32_IMM
+                ; sub Rq(dst), RTEMP
             ),
             ebpf::MUL64_IMM => x64asm!(self
-                ; movsxd Rq(REG_TEMP), REL32_IMM
-                ; mulx Rq(dst), Rq(dst), Rq(REG_TEMP)
+                ; movsxd RTEMP, REL32_IMM
+                ; mulx Rq(dst), Rq(dst), RTEMP
             ),
             ebpf::ADD32_IMM | ebpf::ADD32_REG => x64asm!(self
                 ; add Rd(dst), ALU_SRC32
@@ -227,17 +264,17 @@ trait X64Generator {
                 let result_reg = if is_div { RAX } else { RDX };
                 assert!(dst != RAX && dst != RDX);
                 x64asm!(self
-                    ; movsxd Rq(REG_TEMP), ALU_SRC32
+                    ; movsxd RTEMP, ALU_SRC32
                     ; movq xmm0, rax
                     ; movq xmm1, rdx
                     ; mov eax, Rd(dst)
                     ; xor edx, edx
                 );
                 if is_alu64 { x64asm!(self
-                    ; div Rq(REG_TEMP)
+                    ; div RTEMP
                     ; mov Rq(dst), Rq(result_reg)
                 )} else { x64asm!(self
-                    ; div Rd(REG_TEMP)
+                    ; div WTEMP
                     ; mov Rd(dst), Rd(result_reg)
                 )}
                 x64asm!(self
@@ -284,8 +321,8 @@ trait X64Generator {
                 ; shr Rq(dst), cl
             ),
             ebpf::LE => x64asm!(self
-                ; mov Rd(REG_TEMP), ALU_SRC32
-                ; bzhi Rq(dst), Rq(dst), Rq(REG_TEMP)
+                ; mov WTEMP, ALU_SRC32
+                ; bzhi Rq(dst), Rq(dst), RTEMP
             ),
 
             ebpf::JEQ32_REG
@@ -337,8 +374,8 @@ trait X64Generator {
                 let is_imm = (self.op() & ebpf::BPF_X) != ebpf::BPF_X;
                 match (is_64, is_imm) {
                     (true, true) => x64asm!(self
-                        ; movsxd Rq(REG_TEMP), DWORD REL32_IMM
-                        ; cmp Rq(dst), Rq(REG_TEMP)
+                        ; movsxd RTEMP, DWORD REL32_IMM
+                        ; cmp Rq(dst), RTEMP
                     ),
                     (true, false) => x64asm!(self; cmp Rq(dst), Rq(src)),
                     (false, true) => x64asm!(self; cmp Rd(dst), DWORD REL32_IMM),
@@ -364,12 +401,39 @@ trait X64Generator {
             }
             ebpf::JA => self.bpf_taken_branch(),
 
+            // SBPFv3 internal call: target is `next + imm`.
+            ebpf::CALL_IMM if src == GPREG_MAP[1] => {
+                self.bpf_validate_meter();
+                // Save r6-r9 and the frame pointer (r10), then allocate a new frame.
+                x64asm!(self
+                    ; push R6
+                    ; push R7
+                    ; push R8
+                    ; push R9
+                    ; push R10
+                    ; add R10, STACK_FRAME_SIZE
+                    ; push RINSN
+                );
+                self.bpf_internal_call();
+                x64asm!(self
+                    ; pop RINSN
+                    // `EXIT` leaves the remaining budget in `meter`, convert it back into the
+                    // limit relative to the instruction following this call.
+                    ; lea RTEMP, REL32_NEXT_INSN
+                    ; add RMETER, RTEMP
+                    ; pop R10
+                    ; pop R9
+                    ; pop R8
+                    ; pop R7
+                    ; pop R6
+                );
+            }
             ebpf::CALL_IMM | ebpf::CALL_REG => x64asm!(self; int3),
             ebpf::EXIT => {
                 self.bpf_validate_meter();
                 x64asm!(self
-                    ; sub Rq(REG_METER), Rq(REG_TEMP)
-                    ; xor Rd(REG_TEMP), Rd(REG_TEMP)
+                    ; sub RMETER, RTEMP
+                    ; xor WTEMP, WTEMP
                     ; ret
                 );
             }
@@ -439,34 +503,39 @@ trait X64Generator {
     // Generate code to handle branch taken case.
     fn bpf_taken_branch(&mut self);
 
+    /// Adjust the instruction meter for, and call, the target of an internal call.
+    ///
+    /// The callee returns here when it executes `EXIT`.
+    fn bpf_internal_call(&mut self);
+
     /// Terminate execution with the specified code.
     ///
-    /// This will discard the guest code stack and return the exit code in REG_TEMP and the
-    /// remaining instruction budget in REG_METER.
+    /// This will discard the guest code stack and return the exit code in `temp` and the
+    /// remaining instruction budget in `meter`.
     fn exit(&mut self, code: i8) {
         if code != SIG_EXCEEDED_MAX_INSTRUCTIONS {
-            // Update REG_METER only when we don't know that the remainder is already 0. Callers can
+            // Update `meter` only when we don't know that the remainder is already 0. Callers can
             // check the return code and determine if they need to interpret the remainder without
             // cluttering every point in generated JIT code.
             x64asm!(self
-                ; lea Rq(REG_TEMP), REL32_NEXT_INSN
-                ; sub Rq(REG_METER), Rq(REG_TEMP)
+                ; lea RTEMP, REL32_NEXT_INSN
+                ; sub RMETER, RTEMP
             );
         }
         x64asm!(self
-            ; mov Rb(REG_TEMP), code
+            ; mov BTEMP, code
             ; jmp QWORD [rbp - 8]
         );
     }
 
     /// Terminate the execution if the instruction budget has been exceeded.
     ///
-    /// REG_TEMP contains the address of the next BPF instruction.
+    /// `temp` contains the address of the next BPF instruction.
     fn bpf_validate_meter(&mut self) {
         let within_budget = self.new_dynamic_label();
         x64asm!(self
-            ; lea Rq(REG_TEMP), REL32_NEXT_INSN
-            ; cmp Rq(REG_TEMP), Rq(REG_METER)
+            ; lea RTEMP, REL32_NEXT_INSN
+            ; cmp RTEMP, RMETER
             ; jbe BYTE =>within_budget
             ;; self.exit(SIG_EXCEEDED_MAX_INSTRUCTIONS)
             ; =>within_budget
@@ -574,8 +643,8 @@ impl PatchFields {
 enum TemplateRelocationKind {
     /// `reloc_add_insn_off32` relocation.
     ///
-    /// The JIT holds a pointer to the second instruction of the eBPF program in `REG_INSN`,
-    /// whereas the templates default to addressing where `REG_INSN` is updated to point to right
+    /// The JIT holds a pointer to the second instruction of the eBPF program in `insn`,
+    /// whereas the templates default to addressing where `insn` is updated to point to right
     /// after the current instruction. This relocation adds the offset of the current instruction
     /// to the field.
     InsnOffset,
@@ -590,6 +659,14 @@ enum TemplateRelocationKind {
     ///
     /// Offset (in bytes) from the instruction following the branch to the branch target.
     TakenBranchMeterAdjustment,
+    /// `template_internal_call` relocation.
+    ///
+    /// Same as `TakenBranch`, but for the target of an internal call (`next + imm`.)
+    InternalCall,
+    /// `template_internal_call_cu_adjustment` relocation.
+    ///
+    /// Offset (in bytes) from the instruction following the call to the call target.
+    InternalCallMeterAdjustment,
 }
 
 /// A relocation that can only be resolved once the template is instantiated for a specific eBPF
@@ -688,12 +765,25 @@ impl X64Generator for JITGenerator {
         let patch = PatchFields::new(target_offset, field_offset, ref_offset, kind);
         let kind = match name {
             "template_taken_branch" => TemplateRelocationKind::TakenBranch,
-            "template_insn_offset" => TemplateRelocationKind::InsnOffset,
-            "template_taken_branch_cu_adjustment" => {
-                TemplateRelocationKind::TakenBranchMeterAdjustment
-            }
+            "template_internal_call" => TemplateRelocationKind::InternalCall,
             _ => panic!("global reference to an unknown symbol {}", name),
         };
+        self.template.add_relocation(TemplateRelocation {
+            location: self.offset(),
+            patch,
+            kind,
+        });
+    }
+
+    fn template_reloc(
+        &mut self,
+        kind: TemplateRelocationKind,
+        target_offset: isize,
+        field_offset: u8,
+        ref_offset: u8,
+    ) {
+        // kind = Absolute DWord
+        let patch = PatchFields::new(target_offset, field_offset, ref_offset, 0xC2);
         self.template.add_relocation(TemplateRelocation {
             location: self.offset(),
             patch,
@@ -735,9 +825,17 @@ impl X64Generator for JITGenerator {
 
     fn bpf_taken_branch(&mut self) {
         x64asm!(self
-            ; add Rq(REG_METER), DWORD 0
-            ;; self.global_reloc("template_taken_branch_cu_adjustment", 0, 4, 0, 0xC2)
+            ; add RMETER, DWORD 0
+            ;; self.template_reloc(TemplateRelocationKind::TakenBranchMeterAdjustment, 0, 4, 0)
             ; jmp ->template_taken_branch
+        );
+    }
+
+    fn bpf_internal_call(&mut self) {
+        x64asm!(self
+            ; add RMETER, DWORD 0
+            ;; self.template_reloc(TemplateRelocationKind::InternalCallMeterAdjustment, 0, 4, 0)
+            ; call ->template_internal_call
         );
     }
 }
@@ -798,6 +896,20 @@ pub fn jit(bpf: &[u8]) -> Vec<u8> {
                     *target_pc
                         .and_then(|target_pc| pc_section.get(target_pc))
                         .expect("branch target out of bounds")
+                }
+                TemplateRelocationKind::InternalCallMeterAdjustment => {
+                    let imm = (*insn >> 32) as i32;
+                    (imm as isize * ebpf::INSN_SIZE as isize) as usize
+                }
+                TemplateRelocationKind::InternalCall => {
+                    let imm = (*insn >> 32) as i32;
+                    let target_pc = (pc as isize)
+                        .checked_add(1 + imm as isize)
+                        .and_then(|target_pc| usize::try_from(target_pc).ok());
+                    // FIXME: the verifier should have rejected these.
+                    *target_pc
+                        .and_then(|target_pc| pc_section.get(target_pc))
+                        .expect("call target out of bounds")
                 }
             };
             relocation.apply(&mut text_section, template_start, target);
@@ -901,7 +1013,7 @@ impl X64Generator for InterpreterGenerator {
     }
 
     fn align(&mut self, alignment: usize, with: u8) {
-        let len = ((self.offset % alignment)..alignment).len();
+        let len = (alignment - self.offset % alignment) % alignment;
         assert!(
             self.offset.saturating_add(len) <= InterpreterGenerator::STEPS_SIZE,
             "0x{:x} 0x{:x} 0x{:x}",
@@ -938,14 +1050,11 @@ impl X64Generator for InterpreterGenerator {
         _ref_offset: u8,
         _kind: u8,
     ) {
-        match name {
-            "template_taken_branch" => TemplateRelocationKind::TakenBranch,
-            "template_insn_offset" => TemplateRelocationKind::InsnOffset,
-            "template_taken_branch_cu_adjustment" => {
-                TemplateRelocationKind::TakenBranchMeterAdjustment
-            }
-            _ => panic!("global reference to an unknown symbol {}", name),
-        };
+        panic!("global reference to an unknown symbol {}", name);
+    }
+
+    fn template_reloc(&mut self, _: TemplateRelocationKind, _: isize, _: u8, _: u8) {
+        // Intentionally empty: interpreter does not generate templates.
     }
 
     fn dynamic_reloc(
@@ -982,11 +1091,25 @@ impl X64Generator for InterpreterGenerator {
 
     fn bpf_taken_branch(&mut self) {
         x64asm!(self
-            ; movsx Rq(REG_TEMP), WORD REL32_OFF
-            ; lea Rq(REG_METER), [ Rq(REG_METER) + Rq(REG_TEMP)*8 ]
-            ; lea Rq(REG_INSN), [ Rq(REG_INSN) + Rq(REG_TEMP)*8 ]
+            ; movsx RTEMP, WORD REL32_OFF
+            ; lea RMETER, [ RMETER + RTEMP*8 ]
+            ; lea RINSN, [ RINSN + RTEMP*8 ]
         );
         self.terminal = true;
+    }
+
+    fn bpf_internal_call(&mut self) {
+        let base_addr = i32::try_from(self.interpreter.buffer as usize).unwrap();
+        x64asm!(self
+            ; movsxd RTEMP, DWORD REL32_IMM
+            ; lea RMETER, [ RMETER + RTEMP*8 ]
+            ; lea RINSN, [ RINSN + RTEMP*8 ]
+            ; movzx WTEMP, WORD [ RINSN ]
+            ; shl WTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
+            ; add WTEMP, DWORD base_addr
+            ; add RINSN, 8
+            ; call RTEMP
+        );
     }
 }
 
@@ -1001,14 +1124,20 @@ pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
             generator.dst = GPREG_MAP.get(bpf_dst).copied().unwrap_or(u8::MAX);
             for bpf_op in 0..=u8::MAX {
                 generator.op = bpf_op;
+                let step_start = generator.offset;
                 generator.bpf_insn_template();
                 generator.terminal = false;
                 x64asm!(generator
-                    ; movzx Rq(REG_TEMP), WORD [ Rq(REG_INSN) ]
-                    ; shl Rq(REG_TEMP), InterpreterGenerator::STEP_SIZE_LOG2 as i8
-                    ; lea Rq(REG_TEMP), [ DWORD base_addr + Rq(REG_TEMP) ]
-                    ; add Rq(REG_INSN), 8
-                    ; jmp Rq(REG_TEMP)
+                    ; movzx RTEMP, WORD [ RINSN ]
+                    ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
+                    ; lea RTEMP, [ DWORD base_addr + RTEMP ]
+                    ; add RINSN, 8
+                    ; jmp RTEMP
+                );
+                assert!(
+                    generator.offset - step_start <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
+                    "step for {:#x} is too long",
+                    bpf_op
                 );
                 x64asm!(generator; .align 1 << InterpreterGenerator::STEP_SIZE_LOG2);
             }
@@ -1120,23 +1249,19 @@ pub extern "sysv64" fn enter(bpf: &[u8], start_addr: usize, meter: &mut u64) -> 
         "mov [rbp - 40], r13",
         "mov [rbp - 48], r14",
         "mov [rbp - 56], r15",
-
         // the "longjmp" destination address for signals
         "lea    rax, [rip+0f]",
         "mov    qword ptr [rbp - 8], rax",
-
         // Initialize "internal" registers.
-        // REG_METER: number of the BPF instruction past which the execution of a basic block must
+        // `meter`: number of the BPF instruction past which the execution of a basic block must
         // fail.
         "mov rax, rdx",
         "mov rcx, [rcx]",
         "lea rcx, [rdi + rcx * 8]",
         "mov rdx, rcx",
         "mov rcx, rax",
-
-        // REG_INSN: address of the instruction following the first one.
+        // `insn`: address of the instruction following the first one.
         "lea rax, [rdi + 8]",
-
         // TODO: populate initial register values from VM
         "xor esi, esi",
         "xor edi, edi",
@@ -1151,11 +1276,9 @@ pub extern "sysv64" fn enter(bpf: &[u8], start_addr: usize, meter: &mut u64) -> 
         "xor r15, r15",
         "call 1f",
         "0:",
-
         // Exit code
         "movsx rax, cl",
-
-        // REG_METER holds the remaining budget in bytes of BPF instructions, negative if exceeded.
+        // `meter` holds the remaining budget in bytes of BPF instructions, negative if exceeded.
         // Compute back into the number of CUs.
         "sar rdx, 3",
         "xor ecx, ecx",
@@ -1163,7 +1286,6 @@ pub extern "sysv64" fn enter(bpf: &[u8], start_addr: usize, meter: &mut u64) -> 
         "cmovs rdx, rcx",
         "mov rcx, [rbp - 16]",
         "mov [rcx], rdx",
-
         "mov rbx,  [rbp - 24]",
         "mov r12,  [rbp - 32]",
         "mov r13,  [rbp - 40]",
