@@ -401,34 +401,22 @@ trait X64Generator {
             }
             ebpf::JA => self.bpf_taken_branch(),
 
-            // SBPFv3 internal call: target is `next + imm`.
-            ebpf::CALL_IMM if src == GPREG_MAP[1] => {
-                self.bpf_validate_meter();
-                // Save r6-r9 and the frame pointer (r10), then allocate a new frame.
-                x64asm!(self
-                    ; push R6
-                    ; push R7
-                    ; push R8
-                    ; push R9
-                    ; push R10
-                    ; add R10, STACK_FRAME_SIZE
-                    ; push RINSN
-                );
-                self.bpf_internal_call();
-                x64asm!(self
-                    ; pop RINSN
-                    // `EXIT` leaves the remaining budget in `meter`, convert it back into the
-                    // limit relative to the instruction following this call.
-                    ; lea RTEMP, REL32_NEXT_INSN
-                    ; add RMETER, RTEMP
-                    ; pop R10
-                    ; pop R9
-                    ; pop R8
-                    ; pop R7
-                    ; pop R6
-                );
+            ebpf::CALL_IMM => {
+                if src == GPREG_MAP[1] {
+                    // Callee is `next + imm`. r6-r10 spils, frame pointer handling, and dispatching
+                    // to the target is handled by a shared trampoline (see `bpf_internal_call`.)
+                    self.bpf_validate_meter();
+                    self.bpf_internal_call();
+                    x64asm!(self
+                        // `EXIT` leaves the remaining budget in `meter`, convert back to the
+                        // instruction limit.
+                        ; add RMETER, REL32_NEXT_INSN
+                    );
+                } else {
+                    x64asm!(self; int3) // TODO
+                }
             }
-            ebpf::CALL_IMM | ebpf::CALL_REG => x64asm!(self; int3),
+            ebpf::CALL_REG => x64asm!(self; int3),
             ebpf::EXIT => {
                 self.bpf_validate_meter();
                 x64asm!(self
@@ -503,10 +491,18 @@ trait X64Generator {
     // Generate code to handle branch taken case.
     fn bpf_taken_branch(&mut self);
 
-    /// Adjust the instruction meter for, and call, the target of an internal call.
-    ///
-    /// The callee returns here when it executes `EXIT`.
+    /// Set up for, and call, the shared trampoline (see `bpf_call_trampoline`) to dispatch to the
+    /// target of an internal call (`next + imm`.)
     fn bpf_internal_call(&mut self);
+
+    fn invoke_support(&mut self, support_addr: *const u8) {
+        let support_dword = u32::try_from(support_addr as usize).unwrap() as i32;
+        x64asm!(self
+            ; push DWORD support_dword
+            ; call QWORD [rsp]
+            ; add rsp, BYTE 8
+        );
+    }
 
     /// Terminate execution with the specified code.
     ///
@@ -572,6 +568,10 @@ impl LabelRelocs {
     fn global_reloc(&mut self, at: usize, name: &'static str, patch: PatchFields) {
         self.relocs
             .add_static(StaticLabel::global(name), patch.at(at));
+    }
+
+    fn global_label(&mut self, name: &'static str, at: usize) {
+        self.labels.define_global(name, AssemblyOffset(at)).unwrap();
     }
 
     fn dynamic_reloc(&mut self, at: usize, id: DynamicLabel, patch: PatchFields) {
@@ -704,6 +704,7 @@ struct JITGenerator {
     /// Template can have further relocations after finalization, however those relocations may only
     /// be specific to the eBPF instruction being instantiated.
     relocs: LabelRelocs,
+    supports: &'static SupportingCode,
 }
 
 impl JITGenerator {
@@ -714,6 +715,7 @@ impl JITGenerator {
             dst: 0,
             src: 0,
             relocs: LabelRelocs::new(),
+            supports: &INTERPRETER_AND_SUPPORTS.1,
         }
     }
 
@@ -833,10 +835,11 @@ impl X64Generator for JITGenerator {
 
     fn bpf_internal_call(&mut self) {
         x64asm!(self
+            ; lea RTEMP, [ ->template_internal_call ]
             ; add RMETER, DWORD 0
             ;; self.template_reloc(TemplateRelocationKind::InternalCallMeterAdjustment, 0, 4, 0)
-            ; call ->template_internal_call
         );
+        self.invoke_support(self.supports.internal_call);
     }
 }
 
@@ -873,7 +876,6 @@ pub fn jit(bpf: &[u8]) -> Vec<u8> {
         pc_section.push(position);
         position += template.offset();
     }
-
     let mut text_section = Vec::<u8>::with_capacity(position);
     // 2nd scan
     for (pc, insn) in program.iter().enumerate() {
@@ -935,8 +937,9 @@ impl Drop for Interpreter {
 
 /// Generate an interpreter...
 struct InterpreterGenerator {
-    interpreter: Interpreter,
+    buffer: *mut u8,
     relocs: LabelRelocs,
+    supports: SupportingCode,
     offset: usize,
     op: u8,
     dst: u8,
@@ -949,7 +952,8 @@ struct InterpreterGenerator {
 
 impl InterpreterGenerator {
     const STEP_SIZE_LOG2: u8 = 7; // 128 bytes
-    const STEPS_SIZE: usize = 0x1_0000 * (1 << Self::STEP_SIZE_LOG2);
+    const STEP_TABLE_SIZE: usize = 0x1_0000 * (1 << Self::STEP_SIZE_LOG2);
+    const STEPS_SIZE: usize = Self::STEP_TABLE_SIZE + SupportingCode::LEN;
 
     pub fn new() -> Self {
         unsafe {
@@ -973,17 +977,23 @@ impl InterpreterGenerator {
             if buffer == libc::MAP_FAILED {
                 panic!("libc::mmap failed to allocate executable memory for the interpreter");
             }
-            let this = Self {
-                interpreter: Interpreter {
-                    buffer: buffer.cast(),
-                },
+
+            let mut this = Self {
+                buffer: buffer.cast(),
                 relocs: LabelRelocs::new(),
                 offset: 0,
                 op: 0,
                 dst: 0,
                 src: 0,
                 terminal: false,
+                supports: SupportingCode {
+                    internal_call: std::ptr::null(),
+                },
             };
+            this.offset = Self::STEP_TABLE_SIZE;
+            let supporting_code = SupportingCode::generate_into(&mut this);
+            this.offset = 0;
+            this.supports = supporting_code;
             this
         }
     }
@@ -1001,7 +1011,7 @@ impl X64Generator for InterpreterGenerator {
         unsafe {
             std::ptr::copy_nonoverlapping(
                 buffer.as_ptr(),
-                self.interpreter.buffer.add(self.offset),
+                self.buffer.add(self.offset),
                 buffer.len(),
             );
             self.offset += buffer.len();
@@ -1022,10 +1032,7 @@ impl X64Generator for InterpreterGenerator {
             InterpreterGenerator::STEPS_SIZE
         );
         unsafe {
-            self.interpreter
-                .buffer
-                .add(self.offset)
-                .write_bytes(with, len);
+            self.buffer.add(self.offset).write_bytes(with, len);
             self.offset += len;
         }
     }
@@ -1099,133 +1106,170 @@ impl X64Generator for InterpreterGenerator {
     }
 
     fn bpf_internal_call(&mut self) {
-        let base_addr = i32::try_from(self.interpreter.buffer as usize).unwrap();
+        let base_addr = i32::try_from(self.buffer as usize).expect("interpreter in first 2GB");
         x64asm!(self
+            ; push RINSN
             ; movsxd RTEMP, DWORD REL32_IMM
             ; lea RMETER, [ RMETER + RTEMP*8 ]
             ; lea RINSN, [ RINSN + RTEMP*8 ]
-            ; movzx WTEMP, WORD [ RINSN ]
-            ; shl WTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
-            ; add WTEMP, DWORD base_addr
+            // FIXME: maybe some code reuse here is possible with the epilogue?
+            ; movzx RTEMP, WORD [ RINSN ]
+            ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
+            ; lea RTEMP, [ DWORD base_addr + RTEMP ]
             ; add RINSN, 8
-            ; call RTEMP
         );
+        self.invoke_support(self.supports.internal_call);
+        x64asm!(self; pop RINSN);
     }
 }
 
-pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
-    let mut generator = InterpreterGenerator::new();
-    let base_addr =
-        i32::try_from(generator.interpreter.buffer as usize).expect("interpreter in first 2GB");
-
-    for bpf_src in 0..16 {
-        generator.src = GPREG_MAP.get(bpf_src).copied().unwrap_or(u8::MAX);
-        for bpf_dst in 0..16 {
-            generator.dst = GPREG_MAP.get(bpf_dst).copied().unwrap_or(u8::MAX);
-            for bpf_op in 0..=u8::MAX {
-                generator.op = bpf_op;
-                let step_start = generator.offset;
-                generator.bpf_insn_template();
-                generator.terminal = false;
-                x64asm!(generator
-                    ; movzx RTEMP, WORD [ RINSN ]
-                    ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
-                    ; lea RTEMP, [ DWORD base_addr + RTEMP ]
-                    ; add RINSN, 8
-                    ; jmp RTEMP
-                );
-                assert!(
-                    generator.offset - step_start <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
-                    "step for {:#x} is too long",
-                    bpf_op
-                );
-                x64asm!(generator; .align 1 << InterpreterGenerator::STEP_SIZE_LOG2);
+pub(super) static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCode)> =
+    LazyLock::new(|| {
+        let mut generator = InterpreterGenerator::new();
+        let base_addr = i32::try_from(generator.buffer as usize).expect("interpreter in first 2GB");
+        for bpf_src in 0..16 {
+            generator.src = GPREG_MAP.get(bpf_src).copied().unwrap_or(u8::MAX);
+            for bpf_dst in 0..16 {
+                generator.dst = GPREG_MAP.get(bpf_dst).copied().unwrap_or(u8::MAX);
+                for bpf_op in 0..=u8::MAX {
+                    generator.op = bpf_op;
+                    let step_start = generator.offset;
+                    generator.bpf_insn_template();
+                    generator.terminal = false;
+                    x64asm!(generator
+                        ; movzx RTEMP, WORD [ RINSN ]
+                        ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
+                        ; lea RTEMP, [ DWORD base_addr + RTEMP ]
+                        ; add RINSN, 8
+                        ; jmp RTEMP
+                    );
+                    assert!(
+                        generator.offset - step_start <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
+                        "step for {:#x} is too long",
+                        bpf_op
+                    );
+                    x64asm!(generator; .align 1 << InterpreterGenerator::STEP_SIZE_LOG2);
+                }
             }
         }
-    }
 
-    let buffer = unsafe {
-        std::slice::from_raw_parts_mut(
-            generator.interpreter.buffer,
-            InterpreterGenerator::STEPS_SIZE,
-        )
-    };
-    generator.relocs.resolve(buffer, Some(base_addr as usize));
-
-    unsafe {
-        let ptr = generator.interpreter.buffer;
-        let len = InterpreterGenerator::STEPS_SIZE;
-        let pid = std::process::id();
-        let tid = libc::syscall(libc::SYS_gettid) as u32;
-        let now = || {
-            let mut ts = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
-            libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
-            (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
+        let buffer = unsafe {
+            std::slice::from_raw_parts_mut(generator.buffer, InterpreterGenerator::STEPS_SIZE)
         };
+        generator.relocs.resolve(buffer, Some(base_addr as usize));
 
-        let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
-        // 1. JIT Header (40 bytes)
-        f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
-        f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
-        f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
-        f.write_all(&62u32.to_le_bytes()).unwrap(); // ELF Machine: EM_X86_64
-        f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
-        f.write_all(&pid.to_le_bytes()).unwrap();
-        f.write_all(&now().to_le_bytes()).unwrap();
-        f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
+        unsafe {
+            let ptr = generator.buffer;
+            let len = InterpreterGenerator::STEPS_SIZE;
+            let pid = std::process::id();
+            let tid = libc::syscall(libc::SYS_gettid) as u32;
+            let now = || {
+                let mut ts = libc::timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                };
+                libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+                (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
+            };
 
-        // Triggers perf record's MMAP detection
-        let m = libc::mmap(
-            std::ptr::null_mut(),
-            4096,
-            libc::PROT_READ | libc::PROT_EXEC,
-            libc::MAP_PRIVATE,
-            f.as_raw_fd(),
-            0,
-        );
-        if m != libc::MAP_FAILED {
-            libc::munmap(m, 4096);
+            let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
+            // 1. JIT Header (40 bytes)
+            f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
+            f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
+            f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
+            f.write_all(&62u32.to_le_bytes()).unwrap(); // ELF Machine: EM_X86_64
+            f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
+            f.write_all(&pid.to_le_bytes()).unwrap();
+            f.write_all(&now().to_le_bytes()).unwrap();
+            f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
+
+            // Triggers perf record's MMAP detection
+            let m = libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE,
+                f.as_raw_fd(),
+                0,
+            );
+            if m != libc::MAP_FAILED {
+                libc::munmap(m, 4096);
+            }
+
+            // 2. JIT_CODE_LOAD Record Header (60 bytes = 56 byte record + 4 byte name)
+            let rec_size = (60 + len) as u32;
+            f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
+            f.write_all(&rec_size.to_le_bytes()).unwrap();
+            f.write_all(&now().to_le_bytes()).unwrap();
+            f.write_all(&pid.to_le_bytes()).unwrap();
+            f.write_all(&tid.to_le_bytes()).unwrap();
+            f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // VMA
+            f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // Code Address
+            f.write_all(&(len as u64).to_le_bytes()).unwrap(); // Code Size
+            f.write_all(&1u64.to_le_bytes()).unwrap(); // Index
+            f.write_all(b"jit\0").unwrap(); // Symbol Name
+
+            // 3. Raw Code Bytes
+            f.write_all(std::slice::from_raw_parts(ptr, len)).unwrap();
+
+            libc::mprotect(
+                generator.buffer.cast(),
+                InterpreterGenerator::STEPS_SIZE,
+                libc::PROT_READ | libc::PROT_EXEC,
+            );
         }
-
-        // 2. JIT_CODE_LOAD Record Header (60 bytes = 56 byte record + 4 byte name)
-        let rec_size = (60 + len) as u32;
-        f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
-        f.write_all(&rec_size.to_le_bytes()).unwrap();
-        f.write_all(&now().to_le_bytes()).unwrap();
-        f.write_all(&pid.to_le_bytes()).unwrap();
-        f.write_all(&tid.to_le_bytes()).unwrap();
-        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // VMA
-        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // Code Address
-        f.write_all(&(len as u64).to_le_bytes()).unwrap(); // Code Size
-        f.write_all(&1u64.to_le_bytes()).unwrap(); // Index
-        f.write_all(b"jit\0").unwrap(); // Symbol Name
-
-        // 3. Raw Code Bytes
-        f.write_all(std::slice::from_raw_parts(ptr, len)).unwrap();
-
-        libc::mprotect(
-            generator.interpreter.buffer.cast(),
-            InterpreterGenerator::STEPS_SIZE,
-            libc::PROT_READ | libc::PROT_EXEC,
-        );
-    }
-    generator.interpreter
-});
+        (
+            Interpreter {
+                buffer: generator.buffer,
+            },
+            generator.supports,
+        )
+    });
 
 /// Interpret the bpf buffer.
 pub fn interpret(bpf: &[u8], meter: &mut u64) {
     let first_opcode = u16::from_le_bytes(<[u8; 2]>::try_from(&bpf[0..2]).unwrap()) as usize;
     let address = unsafe {
-        INTERPRETER
+        INTERPRETER_AND_SUPPORTS
+            .0
             .buffer
             .add(first_opcode << InterpreterGenerator::STEP_SIZE_LOG2)
     };
     let retcode = enter(bpf, address as usize, meter);
     if retcode == SIG_EXCEEDED_MAX_INSTRUCTIONS as i64 {
         *meter = 0;
+    }
+}
+
+struct SupportingCode {
+    internal_call: *const u8,
+}
+
+unsafe impl Send for SupportingCode {}
+unsafe impl Sync for SupportingCode {}
+
+impl SupportingCode {
+    /// Buffer space needed to generate this supporting code.
+    const LEN: usize = 1024;
+
+    pub fn generate_into(dst: &mut InterpreterGenerator) -> SupportingCode {
+        let internal_call = unsafe { dst.buffer.add(dst.offset()) };
+        x64asm!(dst
+            ; push R6
+            ; push R7
+            ; push R8
+            ; push R9
+            ; push R10
+            ; add R10, STACK_FRAME_SIZE
+            ; call RTEMP
+            ; pop R10
+            ; pop R9
+            ; pop R8
+            ; pop R7
+            ; pop R6
+            ; ret
+        );
+        Self { internal_call }
     }
 }
 
