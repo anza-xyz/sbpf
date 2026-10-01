@@ -2983,6 +2983,67 @@ fn test_nested_calls_return() {
 }
 
 #[test]
+fn test_entrypoint_not_first() {
+    test_interpreter_and_jit_asm!(
+        "
+        function_foo:
+        mov64 r0, 3
+        exit
+        entrypoint:
+        call function_foo
+        add64 r0, 4
+        exit",
+        NO_INPUT,
+        TestContextObject::new(5),
+        ProgramResult::Ok(7),
+    );
+}
+
+#[test]
+fn test_nested_calls_return() {
+    // Calls return to the right place and leave the meter and the call depth as they were.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r6, 30
+        loop:
+        call function_foo
+        sub64 r6, 1
+        jne r6, 0, loop
+        mov64 r0, 7
+        exit
+        function_foo:
+        call function_bar
+        exit
+        function_bar:
+        exit",
+        NO_INPUT,
+        TestContextObject::new(183),
+        ProgramResult::Ok(7),
+    );
+}
+
+#[test]
+fn test_err_call_depth_exceeded() {
+    let max_call_depth = Config::default().max_call_depth as u64;
+    for (budget, expected) in [
+        (3 * max_call_depth - 1, EbpfError::ExceededMaxInstructions),
+        (3 * max_call_depth, EbpfError::CallDepthExceeded),
+    ] {
+        test_interpreter_and_jit_asm!(
+            "
+            entrypoint:
+            add64 r10, 0
+            mov64 r3, 0x41414141
+            call entrypoint
+            exit",
+            NO_INPUT,
+            TestContextObject::new(budget),
+            ProgramResult::Err(expected),
+        );
+    }
+}
+
+#[test]
 fn test_tight_infinite_recursion_callx() {
     test_interpreter_and_jit_asm!(
         "
