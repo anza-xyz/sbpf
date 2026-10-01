@@ -220,6 +220,7 @@ impl PartialEq for JitProgram {
 
 // Used to define subroutines and then call them
 // See JitCompiler::set_anchor() and JitCompiler::relative_to_anchor()
+#[cfg(feature = "tracer")]
 const ANCHOR_TRACE: usize = 0;
 const ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS: usize = 1;
 const ANCHOR_EPILOGUE: usize = 2;
