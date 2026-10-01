@@ -1033,6 +1033,7 @@ std::arch::global_asm!(concat!(
     "exceeded_max_instructions:\n",
     "mov ", util!("slot_in_vm", "{vm_slot_program_result} + 0x00"), ", {program_result_err}\n",
     "mov ", util!("slot_in_vm", "{vm_slot_program_result} + 0x08"), ", {exceeded_max_instructions}\n",
+    "mov ", register_map!("insn_ptr", 64), ", ", register_map!("insn_limit", 64), "\n",
     "error_handler_epilog:\n",
     "mov rsp, ", util!("slot_in_vm", "{vm_slot_host_stack_pointer}"), "\n",
     "sub ", register_map!("insn_limit", 64), ", ", register_map!("insn_ptr", 64), "\n",
