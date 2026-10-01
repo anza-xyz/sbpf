@@ -17,6 +17,7 @@ macro_rules! all_opcodes {
         // ADD32_IMM
         util!("decode_imm", register_map!("scratch", 64)),
         "add ", $dst32, ", ", register_map!("scratch", 32), "\n",
+        "movsxd ", $dst64, ",", $dst32, "\n",
         util!("epilog"),
 
         // JA
@@ -38,6 +39,7 @@ macro_rules! all_opcodes {
 
         // ADD32_REG
         "add ", $dst32, ", ", $src32, "\n",
+        "movsxd ", $dst64, ",", $dst32, "\n",
         util!("epilog"),
 
         util!("1_opcode_invalid"),
@@ -53,6 +55,7 @@ macro_rules! all_opcodes {
         // SUB32_IMM
         util!("decode_imm", register_map!("scratch", 64)),
         "sub ", $dst32, ",", register_map!("scratch", 32), "\n",
+        "movsxd ", $dst64, ",", $dst32, "\n",
         util!("epilog"),
 
         // JEQ64_IMM
@@ -87,6 +90,7 @@ macro_rules! all_opcodes {
 
         // SUB32_REG
         "sub ", $dst32, ", ", $src32, "\n",
+        "movsxd ", $dst64, ",", $dst32, "\n",
         util!("epilog"),
 
         // JEQ64_REG
