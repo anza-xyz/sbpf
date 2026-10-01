@@ -430,6 +430,53 @@ macro_rules! test_interpreter_and_jit {
                 }
             }
         }
+        // dynasm variants
+        {
+            use solana_sbpf::memory_region::HostBuffer;
+            let mut dynasm_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
+            for (mode_name, mode) in [
+                ("dynasm jit", $crate::solana_sbpf::vm::ExecutionMode::DynasmJit),
+                ("dynasm interpreted", $crate::solana_sbpf::vm::ExecutionMode::DynasmInterpreted),
+            ] {
+                context_object.remaining = original_budget;
+                let mem = match host_buffer {
+                    HostBuffer::Immutable(_) => {
+                        HostBuffer::Immutable(&raw const dynasm_input_mem[..])
+                    }
+                    HostBuffer::Mutable(_) => HostBuffer::Mutable(&raw mut dynasm_input_mem[..]),
+                };
+                let mem_region = MemoryRegion::new(mem, ebpf::MM_INPUT_START);
+                create_vm!(
+                    vm,
+                    &$executable,
+                    &mut context_object,
+                    stack,
+                    heap,
+                    vec![mem_region],
+                    None
+                );
+                vm.registers[1] = jit_input_start;
+                let mut mode = mode;
+                let (instruction_count_dynasm, result_dynasm) =
+                    vm.execute_program(&$executable, &mut mode, &mut []);
+                let mut diverged = false;
+                if format!("{:?}", result_interpreter) != format!("{:?}", result_dynasm) {
+                    println!(
+                        "[{mode_name}] Result of interpreter ({:?}) and dynasm ({:?}) diverged",
+                        result_interpreter, result_dynasm,
+                    );
+                    diverged = true;
+                }
+                if instruction_count_interpreter != instruction_count_dynasm {
+                    println!(
+                        "[{mode_name}] Instruction meter of interpreter ({:?}) and dynasm ({:?}) diverged",
+                        instruction_count_interpreter, instruction_count_dynasm,
+                    );
+                    diverged = true;
+                }
+                assert!(!diverged, "[{}] diverged from the interpreter", mode_name);
+            }
+        }
         if $executable.get_config().enable_instruction_meter {
             assert_eq!(
                 instruction_count_interpreter, expected_instruction_count,

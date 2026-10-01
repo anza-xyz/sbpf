@@ -14,7 +14,9 @@ fn main() {
     for i in 0..iters {
             let start = std::time::Instant::now();
             let mut meter = BUDGET;
-            std::hint::black_box(solana_sbpf::codegen::x64::interpret(&bpf, &mut meter));
+            let mut registers = [0u64; 11];
+            let vm_ptr = registers.as_mut_ptr().cast::<u8>();
+            std::hint::black_box(solana_sbpf::codegen::x64::interpret(&bpf, &mut meter, vm_ptr, 0));
             remaining = meter;
             duration += start.elapsed();
     }

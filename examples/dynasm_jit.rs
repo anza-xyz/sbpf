@@ -27,7 +27,9 @@ fn main() {
     for _ in 0..iters {
         let start = std::time::Instant::now();
         let mut meter = BUDGET;
-        let ret = std::hint::black_box(solana_sbpf::codegen::x64::enter(&bpf, entrypoint, &mut meter));
+        let mut registers = [0u64; 11];
+        let vm_ptr = registers.as_mut_ptr().cast::<u8>();
+        let ret = std::hint::black_box(solana_sbpf::codegen::x64::enter(&bpf, entrypoint, &mut meter, vm_ptr, 0));
         remaining = meter;
         duration += start.elapsed();
         assert_eq!(ret, 0);

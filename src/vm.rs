@@ -107,6 +107,13 @@ pub enum ExecutionMode {
     Jit,
     /// Allow JIT execution, if compiled. Otherwise fallback to interpreted.
     PreferJit,
+    /// Execute the program through the prototype unified JIT+interpreter in `codegen::x64`.
+    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+    DynasmJit,
+    /// Execute the program through the prototype unified JIT+interpreter's interpreter, in
+    /// `codegen::x64`.
+    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+    DynasmInterpreted,
 }
 
 /// VM configuration settings
@@ -463,6 +470,23 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                     target_arch = "x86_64"
                 )))]
                 ExecutionMode::Jit => return (0, ProgramResult::Err(EbpfError::JitNotCompiled)),
+
+                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                ExecutionMode::DynasmJit => {
+                    let (_, text) = executable.get_text_bytes();
+                    let code = crate::codegen::x64::jit_and_run(text, self);
+                    self.program_result =
+                        crate::codegen::x64::result_from_exit_code(code, self.registers[0]);
+                    break 'execute;
+                }
+                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                ExecutionMode::DynasmInterpreted => {
+                    let (_, text) = executable.get_text_bytes();
+                    let code = crate::codegen::x64::interpret_and_run(text, self);
+                    self.program_result =
+                        crate::codegen::x64::result_from_exit_code(code, self.registers[0]);
+                    break 'execute;
+                }
             }
 
             *mode = ExecutionMode::Interpreted;
