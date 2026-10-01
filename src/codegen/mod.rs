@@ -28,6 +28,18 @@ impl<const SIZE: usize, R: Copy> Template<SIZE, R> {
         }
     }
 
+    pub const fn buffer_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            std::slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.bytes)
+        }
+    }
+
+    pub const fn relocations(&self) -> &[R] {
+        unsafe {
+            std::slice::from_raw_parts(self.relocations.as_ptr().cast::<R>(), self.num_relocations)
+        }
+    }
+
     pub const fn add_relocation(&mut self, relocation: R) {
         self.relocations[self.num_relocations].write(relocation);
         self.num_relocations += 1;
@@ -53,7 +65,7 @@ impl<const SIZE: usize, R: Copy> Template<SIZE, R> {
     }
 
     pub const fn align(&mut self, alignment: usize, with: u8) {
-        let mut to_add = self.bytes - (self.bytes % alignment);
+        let mut to_add = (alignment - self.bytes % alignment) % alignment;
         while to_add != 0 {
             self.buffer[self.bytes] = with;
             self.bytes += 1;
