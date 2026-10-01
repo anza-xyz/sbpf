@@ -1,3 +1,7 @@
+use solana_sbpf::{program::{BuiltinProgram, SBPFVersion}, vm::EbpfVm};
+use std::sync::Arc;
+use test_utils::TestContextObject;
+
 const BUDGET: u64 = 10_000_000;
 
 fn main() {
@@ -24,13 +28,14 @@ fn main() {
     let mut duration = std::time::Duration::new(0, 0);
     let iters = 500;
     let mut remaining = 0;
+    let loader = Arc::new(BuiltinProgram::new_mock());
     for _ in 0..iters {
+        let mut context = TestContextObject::new(BUDGET);
+        let mut vm = EbpfVm::new(loader.clone(), SBPFVersion::V3, &mut context, 0);
+        vm.previous_instruction_meter = BUDGET;
         let start = std::time::Instant::now();
-        let mut meter = BUDGET;
-        let mut registers = [0u64; 11];
-        let vm_ptr = registers.as_mut_ptr().cast::<u8>();
-        let ret = std::hint::black_box(solana_sbpf::codegen::x64::enter(&bpf, entrypoint, &mut meter, vm_ptr, 0));
-        remaining = meter;
+        let ret = std::hint::black_box(solana_sbpf::codegen::x64::enter(&bpf, entrypoint, &mut vm));
+        remaining = BUDGET - vm.due_insn_count;
         duration += start.elapsed();
         assert_eq!(ret, 0);
     }

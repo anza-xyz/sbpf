@@ -4,8 +4,8 @@ use dynasmrt::{AssemblyOffset, DynamicLabel};
 
 use crate::codegen::Template;
 use crate::ebpf;
-use std::arch::naked_asm;
-use std::convert::{TryFrom, TryInto};
+use crate::vm::RuntimeEnvironmentSlot;
+use std::convert::TryFrom;
 use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
 use std::sync::LazyLock;
@@ -909,7 +909,11 @@ pub fn jit(bpf: &[u8]) -> Vec<u8> {
 }
 
 /// Compile `bpf` and execute.
-pub fn jit_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::EbpfVm<C>) -> i64 {
+pub fn jit_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::EbpfVm<C>) -> i8 {
+    // FIXME:
+    if vm.registers[11] != 0 {
+        return SIG_INVALID_INSN;
+    }
     let code = jit(bpf);
     let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len())
         .expect("failed to allocate executable memory for the JIT output");
@@ -918,51 +922,34 @@ pub fn jit_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::
     let buffer = buffer
         .make_exec()
         .expect("failed to make the JIT output executable");
-    run(bpf, buffer.as_ptr() as usize, vm)
+    enter(bpf, buffer.as_ptr() as usize, vm)
 }
 
 /// Interpret `bpf`.
 pub fn interpret_and_run<C: crate::vm::ContextObject>(
     bpf: &[u8],
     vm: &mut crate::vm::EbpfVm<C>,
-) -> i64 {
-    let first_opcode = u16::from_le_bytes(<[u8; 2]>::try_from(&bpf[0..2]).unwrap()) as usize;
+) -> i8 {
+    let pc = vm.registers[11] as usize;
+    let insn = &bpf[pc * ebpf::INSN_SIZE..][..2];
+    let opcode = u16::from_le_bytes(<[u8; 2]>::try_from(insn).unwrap()) as usize;
     let address = unsafe {
         INTERPRETER_AND_SUPPORTS
             .0
             .buffer
-            .add(first_opcode << InterpreterGenerator::STEP_SIZE_LOG2)
+            .add(opcode << InterpreterGenerator::STEP_SIZE_LOG2)
     };
-    run(bpf, address as usize, vm)
-}
-
-fn run<C: crate::vm::ContextObject>(
-    bpf: &[u8],
-    start_addr: usize,
-    vm: &mut crate::vm::EbpfVm<C>,
-) -> i64 {
-    let mut meter = vm.context().get_remaining();
-    let vm_ptr = std::ptr::from_mut(vm).cast::<u8>();
-    let registers_offset = std::mem::offset_of!(crate::vm::EbpfVm<C>, registers);
-    let code = enter(bpf, start_addr, &mut meter, vm_ptr, registers_offset);
-    if code == SIG_EXCEEDED_MAX_INSTRUCTIONS as i64 {
-        // `enter` leaves the remaining budget undefined when the budget was exceeded (see
-        // `exit`'s doc comment); treat it as fully consumed, like `interpret` does.
-        meter = 0;
-    }
-    let consumed = vm.context().get_remaining().saturating_sub(meter);
-    vm.context().consume(consumed);
-    code
+    enter(bpf, address as usize, vm)
 }
 
 /// Turn an exit code into a `ProgramResult`
-pub fn result_from_exit_code(code: i64, r0: u64) -> crate::error::ProgramResult {
+pub fn result_from_exit_code(code: i8, r0: u64) -> crate::error::ProgramResult {
     use crate::error::{EbpfError, ProgramResult};
-    match code as i8 {
+    match code {
         0 => ProgramResult::Ok(r0),
         SIG_EXCEEDED_MAX_INSTRUCTIONS => ProgramResult::Err(EbpfError::ExceededMaxInstructions),
         SIG_INVALID_INSN => ProgramResult::Err(EbpfError::UnsupportedInstruction),
-        _ => panic!("unexpected exit code {code}"),
+        _ => panic!("unexpected exit code {}", code),
     }
 }
 
@@ -1034,6 +1021,7 @@ impl InterpreterGenerator {
                 terminal: false,
                 supports: SupportingCode {
                     internal_call: std::ptr::null(),
+                    entry_point: std::ptr::null(),
                 },
             };
             this.offset = Self::STEP_TABLE_SIZE;
@@ -1051,9 +1039,12 @@ impl X64Generator for InterpreterGenerator {
     fn extend(&mut self, buffer: &[u8]) {
         assert!(!self.terminal);
         assert!(self.offset.saturating_add(buffer.len()) < InterpreterGenerator::STEPS_SIZE);
-        let step_capacity = 1 << Self::STEP_SIZE_LOG2;
-        let remaining_capacity = step_capacity - self.offset % step_capacity;
-        assert!(buffer.len() <= remaining_capacity, "step is too long!");
+        // `SupportingCode` lives past the dispatch table and isn't split into steps.
+        if self.offset < Self::STEP_TABLE_SIZE {
+            let step_capacity = 1 << Self::STEP_SIZE_LOG2;
+            let remaining_capacity = step_capacity - self.offset % step_capacity;
+            assert!(buffer.len() <= remaining_capacity, "step is too long!");
+        }
         unsafe {
             std::ptr::copy_nonoverlapping(
                 buffer.as_ptr(),
@@ -1272,24 +1263,9 @@ pub(super) static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCod
         )
     });
 
-/// Interpret the bpf buffer. Returns the exit code (see `X64Generator::exit`).
-pub fn interpret(bpf: &[u8], meter: &mut u64, vm_ptr: *mut u8, registers_offset: usize) -> i64 {
-    let first_opcode = u16::from_le_bytes(<[u8; 2]>::try_from(&bpf[0..2]).unwrap()) as usize;
-    let address = unsafe {
-        INTERPRETER_AND_SUPPORTS
-            .0
-            .buffer
-            .add(first_opcode << InterpreterGenerator::STEP_SIZE_LOG2)
-    };
-    let retcode = enter(bpf, address as usize, meter, vm_ptr, registers_offset);
-    if retcode == SIG_EXCEEDED_MAX_INSTRUCTIONS as i64 {
-        *meter = 0;
-    }
-    retcode
-}
-
 struct SupportingCode {
     internal_call: *const u8,
+    entry_point: *const u8,
 }
 
 unsafe impl Send for SupportingCode {}
@@ -1316,109 +1292,90 @@ impl SupportingCode {
             ; pop R6
             ; ret
         );
-        Self { internal_call }
+
+        // Expects `%gs` to point at the `EbpfVm`, `RINSN`, `RMETER` to be initialized and `RTEMP`
+        // to be initialized to the address of the machine code to start executing at.
+        let entry_point = unsafe { dst.buffer.add(dst.offset()) };
+        let after_dispatch = dst.new_dynamic_label();
+        x64asm!(dst
+            ; push rbp
+            ; mov rbp, rsp
+            // `exit` jumps to `[rbp - 8]` from whatever depth of internal calls it's at.
+            ; lea rsi, [ => after_dispatch ]
+            ; push rsi
+        );
+        for (i, &reg) in GPREG_MAP.iter().enumerate() {
+            x64asm!(dst; gs mov Rq(reg), [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ]);
+        }
+        x64asm!(dst; call RTEMP);
+        dst.dynamic_label(after_dispatch);
+        for (i, &reg) in GPREG_MAP.iter().enumerate() {
+            x64asm!(dst; gs mov [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ], Rq(reg));
+        }
+        x64asm!(dst
+            ; mov rsp, rbp
+            ; pop rbp
+            ; ret
+        );
+
+        Self {
+            internal_call,
+            entry_point,
+        }
     }
 }
 
-#[unsafe(naked)]
-// FIXME: pass bpf as a pointer instead
-///
-/// `meter` holds the instruction budget, the remaining budget is written back to it once the
-/// execution terminates.
-pub extern "sysv64" fn enter(
+/// Run the code at `start_addr` (machine code), with `vm.previous_instruction_meter` as the budget.
+/// Returns the exit code (see `X64Generator::exit`) and sets `vm.due_insn_count` with the number of
+/// CUs used.
+pub fn enter<C: crate::vm::ContextObject>(
     bpf: &[u8],
     start_addr: usize,
-    meter: &mut u64,
-    vm_ptr: *mut u8,
-    registers_offset: usize,
-) -> i64 {
-    // This function is meant to only do the bare minimum setup for the runtime to operate.
-    // e.g. it will setup the VM pointer, stash the registers and setup rbp, but it won't e.g. deal
-    // with writing the return value into the VM.
-    naked_asm!(
-        // TODO: only really need to save callee saved registers.
-        "push rbp",
-        "mov rbp, rsp",
-        "sub rsp, 72",
-        "mov [rbp - 16], rcx", // `meter` out-param.
-
-        "rdgsbase rax",
-        "mov [rbp - 64], rax",
-        "wrgsbase r8",
-        "lea rax, [r8 + r9]",
-        "mov [rbp - 72], rax",
-
-        "mov [rbp - 24], rbx",
-        "mov [rbp - 32], r12",
-        "mov [rbp - 40], r13",
-        "mov [rbp - 48], r14",
-        "mov [rbp - 56], r15",
-        // the "longjmp" destination address for signals
-        "lea    rax, [rip+0f]",
-        "mov    qword ptr [rbp - 8], rax",
-        // Initialize "internal" registers.
-        // `meter`: number of the BPF instruction past which the execution of a basic block must
-        // fail.
-        "mov rax, rdx",
-        "mov rcx, [rcx]",
-        "lea rcx, [rdi + rcx * 8]",
-        "mov rdx, rcx",
-        "mov rcx, rax",
-        // `insn`: address of the instruction following the first one.
-        "lea rax, [rdi + 8]",
-
-        "mov r15, [rbp - 72]",
-        "mov rsi, [r15]",
-        "mov rdi, [r15 + 8]",
-        "mov r8,  [r15 + 16]",
-        "mov r9,  [r15 + 24]",
-        "mov r10, [r15 + 32]",
-        "mov r11, [r15 + 40]",
-        "mov r12, [r15 + 48]",
-        "mov r13, [r15 + 56]",
-        "mov r14, [r15 + 64]",
-        "mov rbx, [r15 + 80]",
-        "mov r15, [r15 + 72]",
-        "call 1f",
-        "0:",
-        // Exit code
-        "movsx rax, cl",
-
-        "mov rcx, [rbp - 72]",
-        "mov [rcx], rsi",
-        "mov [rcx + 8], rdi",
-        "mov [rcx + 16], r8",
-        "mov [rcx + 24], r9",
-        "mov [rcx + 32], r10",
-        "mov [rcx + 40], r11",
-        "mov [rcx + 48], r12",
-        "mov [rcx + 56], r13",
-        "mov [rcx + 64], r14",
-        "mov [rcx + 72], r15",
-        "mov [rcx + 80], rbx",
-
-        // `meter` holds the remaining budget in bytes of BPF instructions, negative if exceeded.
-        // Compute back into the number of CUs.
-        "sar rdx, 3",
-        "xor ecx, ecx",
-        "test rdx, rdx",
-        "cmovs rdx, rcx",
-        "mov rcx, [rbp - 16]",
-        "mov [rcx], rdx",
-        "mov rbx,  [rbp - 24]",
-        "mov r12,  [rbp - 32]",
-        "mov r13,  [rbp - 40]",
-        "mov r14,  [rbp - 48]",
-        "mov r15,  [rbp - 56]",
-
-        // Restore the caller's `%gs` base.
-        "mov rcx, [rbp - 64]",
-        "wrgsbase rcx",
-        // Done, return to the caller.
-        "mov rsp, rbp",
-        "pop rbp",
-        "ret",
-        "1:",
-        "jmp rcx",
-    )
+    vm: &mut crate::vm::EbpfVm<C>,
+) -> i8 {
+    let entry_point = INTERPRETER_AND_SUPPORTS.1.entry_point;
+    let pc = vm.registers[11];
+    let budget = vm.previous_instruction_meter;
+    let insn = bpf
+        .as_ptr()
+        .wrapping_add((pc as usize + 1) * ebpf::INSN_SIZE);
+    let exec_limit = (bpf.as_ptr() as u64)
+        .wrapping_add(pc.wrapping_add(budget).wrapping_mul(ebpf::INSN_SIZE as u64));
+    let code: u64;
+    let remaining: u64;
+    unsafe {
+        std::arch::asm!(
+            "push rbx",
+            "rdgsbase rbx",
+            "push rbx",
+            "wrgsbase {vm}",
+            "call {entry_point}",
+            "pop rbx",
+            "wrgsbase rbx",
+            "pop rbx",
+            vm = in(reg) std::ptr::from_mut(vm),
+            entry_point = in(reg) entry_point,
+            inout("rax") insn => _,
+            inout("rcx") start_addr => code,
+            inout("rdx") exec_limit => remaining,
+            lateout("rdi") _,
+            lateout("rsi") _,
+            lateout("r8") _,
+            lateout("r9") _,
+            lateout("r10") _,
+            lateout("r11") _,
+            lateout("r12") _,
+            lateout("r13") _,
+            lateout("r14") _,
+            lateout("r15") _,
+        );
+    }
+    let code = code as i8;
+    let remaining = if code == SIG_EXCEEDED_MAX_INSTRUCTIONS || (remaining as i64) < 0 {
+        0
+    } else {
+        remaining / 8
+    };
+    vm.due_insn_count = budget.saturating_sub(remaining);
+    code
 }
