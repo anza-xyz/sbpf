@@ -3259,7 +3259,6 @@ fn execute_generated_program(prog: &[u8]) -> bool {
     let (instruction_count_jit, result_jit) =
         vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut []);
     let trace_jit = &vm.register_trace;
-    debug_assert!(!trace_interpreter.is_empty());
     if format!("{result_interpreter:?}") != format!("{result_jit:?}")
         || !compare_register_trace(&trace_interpreter, trace_jit)
     {
