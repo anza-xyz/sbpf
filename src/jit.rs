@@ -220,6 +220,7 @@ impl PartialEq for JitProgram {
 
 // Used to define subroutines and then call them
 // See JitCompiler::set_anchor() and JitCompiler::relative_to_anchor()
+#[cfg(feature = "tracer")]
 const ANCHOR_TRACE: usize = 0;
 const ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS: usize = 1;
 const ANCHOR_EPILOGUE: usize = 2;
@@ -453,7 +454,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_validate_instruction_count(Some(self.pc));
             }
 
-            if self.config.enable_register_tracing {
+            #[cfg(feature = "tracer")]
+            {
                 self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, self.pc as i64));
                 self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_TRACE, 5)));
                 self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, 0));
@@ -1467,7 +1469,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     fn emit_subroutines(&mut self) {
         // Routine for instruction tracing
-        if self.config.enable_register_tracing {
+        #[cfg(feature = "tracer")]
+        {
             self.set_anchor(ANCHOR_TRACE);
             // Save registers on stack
             self.emit_ins(X86Instruction::push(REGISTER_SCRATCH, None));
@@ -1568,9 +1571,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
         // Handler for EbpfError::UnsupportedInstruction
         self.set_anchor(ANCHOR_CALL_UNSUPPORTED_INSTRUCTION);
-        if self.config.enable_register_tracing {
-            self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_TRACE, 5)));
-        }
+        #[cfg(feature = "tracer")]
+        self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_TRACE, 5)));
         self.emit_set_exception_kind(EbpfError::UnsupportedInstruction);
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 5)));
 
