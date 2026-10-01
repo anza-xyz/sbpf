@@ -1,4 +1,7 @@
-use solana_sbpf::{program::{BuiltinProgram, SBPFVersion}, vm::EbpfVm};
+use solana_sbpf::{
+    program::{BuiltinProgram, SBPFVersion},
+    vm::EbpfVm,
+};
 use std::sync::Arc;
 use test_utils::TestContextObject;
 
@@ -6,14 +9,13 @@ const BUDGET: u64 = 10_000_000;
 
 fn main() {
     let bpf = Vec::from([
-        191, 33, 0, 0, 0, 0, 0, 0,
-        87, 1, 0, 0, 255, 3, 0, 0,
-        7, 2, 0, 0, 1, 0, 0, 0,
-        165, 2, 252, 255, 0x00, 0x00, 0x20, 0x00,
-        149, 0, 0, 0, 0, 0, 0, 0,
+        191, 33, 0, 0, 0, 0, 0, 0, 87, 1, 0, 0, 255, 3, 0, 0, 7, 2, 0, 0, 1, 0, 0, 0, 165, 2, 252,
+        255, 0x00, 0x00, 0x20, 0x00, 149, 0, 0, 0, 0, 0, 0, 0,
     ]);
 
-    let code = solana_sbpf::codegen::x64::jit(&bpf);
+    let code = solana_sbpf::codegen::x64::JIT_TEMPLATES
+        .compile(&bpf)
+        .text_section;
     for b in &code {
         print!("{:02X}", b);
     }
@@ -34,10 +36,18 @@ fn main() {
         let mut vm = EbpfVm::new(loader.clone(), SBPFVersion::V3, &mut context, 0);
         vm.previous_instruction_meter = BUDGET;
         let start = std::time::Instant::now();
-        let ret = std::hint::black_box(solana_sbpf::codegen::x64::enter(&bpf, entrypoint, &mut vm));
+        std::hint::black_box(solana_sbpf::codegen::x64::enter(
+            &bpf,
+            entrypoint,
+            bpf.as_ptr().wrapping_add(8),
+            &mut vm,
+        ));
         remaining = BUDGET - vm.due_insn_count;
         duration += start.elapsed();
-        assert_eq!(ret, 0);
+        assert!(matches!(
+            vm.program_result,
+            solana_sbpf::error::ProgramResult::Ok(_)
+        ));
     }
     println!("{:?}, remaining budget: {remaining}", duration / iters);
 

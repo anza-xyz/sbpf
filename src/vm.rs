@@ -474,17 +474,13 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
                 ExecutionMode::DynasmJit => {
                     let (_, text) = executable.get_text_bytes();
-                    let code = crate::codegen::x64::jit_and_run(text, self);
-                    self.program_result =
-                        crate::codegen::x64::result_from_exit_code(code, self.registers[0]);
+                    crate::codegen::x64::jit_and_run(text, self);
                     break 'execute;
                 }
                 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
                 ExecutionMode::DynasmInterpreted => {
                     let (_, text) = executable.get_text_bytes();
-                    let code = crate::codegen::x64::interpret_and_run(text, self);
-                    self.program_result =
-                        crate::codegen::x64::result_from_exit_code(code, self.registers[0]);
+                    crate::codegen::x64::interpret_and_run(text, self);
                     break 'execute;
                 }
             }

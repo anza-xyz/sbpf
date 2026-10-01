@@ -23,15 +23,11 @@ impl<const SIZE: usize, R: Copy> Template<SIZE, R> {
     }
 
     pub const fn buffer(&self) -> &[u8] {
-        unsafe {
-            std::slice::from_raw_parts(self.buffer.as_ptr(), self.bytes)
-        }
+        unsafe { std::slice::from_raw_parts(self.buffer.as_ptr(), self.bytes) }
     }
 
     pub const fn buffer_mut(&mut self) -> &mut [u8] {
-        unsafe {
-            std::slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.bytes)
-        }
+        unsafe { std::slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.bytes) }
     }
 
     pub const fn relocations(&self) -> &[R] {

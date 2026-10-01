@@ -6,12 +6,12 @@ use crate::codegen::Template;
 use crate::ebpf;
 use crate::vm::RuntimeEnvironmentSlot;
 use std::convert::TryFrom;
-use std::io::Write as _;
-use std::os::fd::AsRawFd as _;
 use std::sync::LazyLock;
 
+#[allow(unused)]
 const RAX: u8 = 0;
 const RCX: u8 = 1;
+#[allow(unused)]
 const RDX: u8 = 2;
 const RBX: u8 = 3;
 const RSI: u8 = 6;
@@ -37,9 +37,14 @@ const GPREG_MAP: [u8; 11] = [
 
 /// Size of the stack frame allocated for each internal call (fixed frames, as in SBPFv3.)
 const STACK_FRAME_SIZE: i32 = 4096;
+/// Maximum internal call depth (as in SBPFv3.)
+const MAX_CALL_DEPTH: i32 = 64;
 
 const SIG_INVALID_INSN: i8 = -1;
 const SIG_EXCEEDED_MAX_INSTRUCTIONS: i8 = -2;
+const SIG_CALL_DEPTH_EXCEEDED: i8 = -3;
+const SIG_DIVIDE_BY_ZERO: i8 = -4;
+const SIG_EXECUTION_OVERRUN: i8 = -5;
 
 /// Is the value in the provided register disposable/temporary?
 pub const fn disposable_reg(reg: u8) -> bool {
@@ -104,12 +109,6 @@ macro_rules! x64asm {
         ]} $($rest)*)
     };
 
-    (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_NEXT_INSN $($rest:tt)*) => {
-        x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [ DWORD 0i32 + RINSN ] ;; $output.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
-        ]} $($rest)*)
-    };
-
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} ; $($rest:tt)*) => {
         {
         // compile_error!(stringify!(semi x64asm!(@munch {$output; [$($acc)* ; $($curr)*] []} $($rest)*)));
@@ -167,6 +166,7 @@ trait X64Generator {
     fn op(&self) -> u8;
     fn dst(&self) -> u8;
     fn src(&self) -> u8;
+    fn supports(&self) -> &SupportingCode;
 
     /// Produce a template for a single (currently processed) instruction.
     fn bpf_insn_template(&mut self) {
@@ -258,26 +258,16 @@ trait X64Generator {
             ebpf::MOD64_IMM |
             ebpf::MOD64_REG => {
                 let is_div = (self.op() & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
-                let result_reg = if is_div { RAX } else { RDX };
-                assert!(dst != RAX && dst != RDX);
-                x64asm!(self
-                    ; movsxd RTEMP, ALU_SRC32
-                    ; movq xmm0, rax
-                    ; movq xmm1, rdx
-                    ; mov eax, Rd(dst)
-                    ; xor edx, edx
-                );
-                if is_alu64 { x64asm!(self
-                    ; div RTEMP
-                    ; mov Rq(dst), Rq(result_reg)
-                )} else { x64asm!(self
-                    ; div WTEMP
-                    ; mov Rd(dst), Rd(result_reg)
-                )}
-                x64asm!(self
-                    ; movq rax, xmm0
-                    ; movq rdx, xmm1
-                );
+                let is_reg = (self.op() & ebpf::BPF_X) == ebpf::BPF_X;
+                if let Some(helper) = self.supports().divide(is_div, is_alu64, is_reg, dst, src) {
+                    x64asm!(self
+                        ; lea RTEMP, [ DWORD 0i32 + RINSN ]
+                        ;; self.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
+                    );
+                    self.invoke_support(helper);
+                } else {
+                    self.exit(SIG_INVALID_INSN);
+                }
             }
             ebpf::LSH64_IMM | ebpf::LSH64_REG => x64asm!(self
                 // if failing, you can switch to shlx/shrx/sarx
@@ -396,18 +386,23 @@ trait X64Generator {
                 self.bpf_taken_branch();
                 self.dynamic_label(fallthrough);
             }
-            ebpf::JA => self.bpf_taken_branch(),
+            ebpf::JA => {
+                self.bpf_validate_meter();
+                self.bpf_taken_branch();
+            }
 
             ebpf::CALL_IMM => {
                 if src == GPREG_MAP[1] {
                     // Callee is `next + imm`. r6-r10 spils, frame pointer handling, and dispatching
                     // to the target is handled by a shared trampoline (see `bpf_internal_call`.)
                     self.bpf_validate_meter();
-                    self.bpf_internal_call();
                     x64asm!(self
+                        ; push RTEMP
+                        ;; self.bpf_internal_call()
+                        ; pop RTEMP
                         // `EXIT` leaves the remaining budget in `meter`, convert back to the
                         // instruction limit.
-                        ; add RMETER, REL32_NEXT_INSN
+                        ; lea RMETER, [RMETER + RTEMP]
                     );
                 } else {
                     // Syscall: not implemented yet.
@@ -489,8 +484,11 @@ trait X64Generator {
     // Generate code to handle branch taken case.
     fn bpf_taken_branch(&mut self);
 
-    /// Set up for, and call, the shared trampoline (see `bpf_call_trampoline`) to dispatch to the
-    /// target of an internal call (`next + imm`.)
+    /// Set up for, and call, the shared trampoline (see `SupportingCode::internal_call`) to
+    /// dispatch to the target of an internal call (`next + imm`.)
+    ///
+    /// The address of the instruction following the call is expected to be found on top of the
+    /// stack.
     fn bpf_internal_call(&mut self);
 
     fn invoke_support(&mut self, support_addr: *const u8) {
@@ -512,7 +510,8 @@ trait X64Generator {
             // check the return code and determine if they need to interpret the remainder without
             // cluttering every point in generated JIT code.
             x64asm!(self
-                ; lea RTEMP, REL32_NEXT_INSN
+                ; lea RTEMP, [ DWORD 0i32 + RINSN ]
+                ;; self.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
                 ; sub RMETER, RTEMP
             );
         }
@@ -528,7 +527,8 @@ trait X64Generator {
     fn bpf_validate_meter(&mut self) {
         let within_budget = self.new_dynamic_label();
         x64asm!(self
-            ; lea RTEMP, REL32_NEXT_INSN
+            ; lea RTEMP, [ DWORD 0i32 + RINSN ]
+            ;; self.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
             ; cmp RTEMP, RMETER
             ; jbe BYTE =>within_budget
             ;; self.exit(SIG_EXCEEDED_MAX_INSTRUCTIONS)
@@ -681,8 +681,10 @@ impl TemplateRelocation {
     }
 }
 
+const MAX_JIT_TEMPLATE_SIZE: usize = 64;
+
 struct JITGenerator {
-    template: super::Template<128, TemplateRelocation>,
+    template: super::Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation>,
     op: u8,
     dst: u8,
     src: u8,
@@ -709,7 +711,7 @@ impl JITGenerator {
 
     /// Resolve all the relocations that can be resolved without knowing the specific eBPF
     /// instruction and return the template. The generator is reset to generate the next template.
-    fn finalize(&mut self) -> Template<128, TemplateRelocation> {
+    fn finalize(&mut self) -> Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation> {
         let mut template = std::mem::replace(&mut self.template, Template::new());
         self.relocs.resolve(template.buffer_mut(), None);
         template
@@ -813,6 +815,10 @@ impl X64Generator for JITGenerator {
         self.src
     }
 
+    fn supports(&self) -> &SupportingCode {
+        self.supports
+    }
+
     fn bpf_taken_branch(&mut self) {
         x64asm!(self
             ; add RMETER, DWORD 0
@@ -833,103 +839,135 @@ impl X64Generator for JITGenerator {
 
 // TODO: when dynasm supports const codegen, we can make these be generated at compile time into an
 // array.
-pub(super) static JIT_TEMPLATES: LazyLock<Vec<super::Template<128, TemplateRelocation>>> =
-    LazyLock::new(|| {
-        let mut result = Vec::with_capacity(0x10000);
-        let mut generator = JITGenerator::new();
-        for bpf_src in 0..16 {
-            for bpf_dst in 0..16 {
-                for bpf_op in 0..=u8::MAX {
-                    generator.src = GPREG_MAP.get(bpf_src).copied().unwrap_or(u8::MAX);
-                    generator.dst = GPREG_MAP.get(bpf_dst).copied().unwrap_or(u8::MAX);
-                    generator.op = bpf_op;
-                    generator.bpf_insn_template();
-                    result.push(generator.finalize());
-                }
+/// Machine code templates the JIT output is assembled from.
+pub struct JitTemplates {
+    /// Indexed by the lower 16 bits of an instruction.
+    insns: Vec<Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation>>,
+    /// Appended after the last instruction, as if it was at `pc = program.len()`.
+    execution_overrun: Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation>,
+}
+
+/// JIT templates for SBPFv3.
+pub static JIT_TEMPLATES: LazyLock<JitTemplates> = LazyLock::new(|| {
+    let mut insns = Vec::with_capacity(0x10000);
+    let mut generator = JITGenerator::new();
+    for bpf_src in 0..16 {
+        for bpf_dst in 0..16 {
+            for bpf_op in 0..=u8::MAX {
+                generator.src = GPREG_MAP.get(bpf_src).copied().unwrap_or(u8::MAX);
+                generator.dst = GPREG_MAP.get(bpf_dst).copied().unwrap_or(u8::MAX);
+                generator.op = bpf_op;
+                generator.bpf_insn_template();
+                insns.push(generator.finalize());
             }
         }
-        result
-    });
-
-pub fn jit(bpf: &[u8]) -> Vec<u8> {
-    let templates = &*JIT_TEMPLATES;
-    assert!(bpf.as_ptr().cast::<u64>().is_aligned());
-    assert!(bpf.len() % ebpf::INSN_SIZE == 0);
-    let program: &[u64] = unsafe { bpf.align_to::<u64>().1 };
-    let mut pc_section = Vec::<usize>::with_capacity(program.len());
-    let mut position: usize = 0;
-    // first scan
-    for insn in program {
-        let template = &templates[*insn as u16 as usize];
-        pc_section.push(position);
-        position += template.offset();
     }
-    let mut text_section = Vec::<u8>::with_capacity(position);
-    // 2nd scan
-    for (pc, insn) in program.iter().enumerate() {
-        let template = &templates[*insn as u16 as usize];
-        let template_start = text_section.len();
-        text_section.extend_from_slice(template.buffer());
-        for relocation in template.relocations() {
-            let target = match relocation.kind {
-                TemplateRelocationKind::InsnOffset => pc * ebpf::INSN_SIZE,
-                TemplateRelocationKind::TakenBranchMeterAdjustment => {
-                    let off = (*insn >> 16) as i16;
-                    (off as isize * ebpf::INSN_SIZE as isize) as usize
-                }
-                TemplateRelocationKind::TakenBranch => {
-                    let off = (*insn >> 16) as i16;
-                    let target_pc = (pc as isize)
-                        .checked_add(1 + off as isize)
-                        .and_then(|target_pc| usize::try_from(target_pc).ok());
-                    // FIXME: the verifier should have rejected these.
-                    *target_pc
-                        .and_then(|target_pc| pc_section.get(target_pc))
-                        .expect("branch target out of bounds")
-                }
-                TemplateRelocationKind::InternalCallMeterAdjustment => {
-                    let imm = (*insn >> 32) as i32;
-                    (imm as isize * ebpf::INSN_SIZE as isize) as usize
-                }
-                TemplateRelocationKind::InternalCall => {
-                    let imm = (*insn >> 32) as i32;
-                    let target_pc = (pc as isize)
-                        .checked_add(1 + imm as isize)
-                        .and_then(|target_pc| usize::try_from(target_pc).ok());
-                    // FIXME: the verifier should have rejected these.
-                    *target_pc
-                        .and_then(|target_pc| pc_section.get(target_pc))
-                        .expect("call target out of bounds")
-                }
-            };
-            relocation.apply(&mut text_section, template_start, target);
+    generator.exit(SIG_EXECUTION_OVERRUN);
+    let execution_overrun = generator.finalize();
+    JitTemplates {
+        insns,
+        execution_overrun,
+    }
+});
+
+/// The JIT output for a program.
+pub struct JitProgram {
+    /// Offset in `text_section` for each BPF instruction.
+    pub pc_section: Vec<u32>,
+    /// The machine code.
+    pub text_section: Vec<u8>,
+}
+
+impl JitTemplates {
+    /// Compile `bpf` into machine code.
+    pub fn compile(&self, bpf: &[u8]) -> JitProgram {
+        let templates = self;
+        assert!(bpf.as_ptr().cast::<u64>().is_aligned());
+        assert!(bpf.len() % ebpf::INSN_SIZE == 0);
+        let program: &[u64] = unsafe { bpf.align_to::<u64>().1 };
+        let mut pc_section = Vec::<u32>::with_capacity(program.len());
+        let mut position: usize = 0;
+        // first scan
+        for insn in program {
+            let template = &templates.insns[*insn as u16 as usize];
+            pc_section.push(u32::try_from(position).expect("JIT output too large"));
+            position += template.offset();
+        }
+        let mut text_section =
+            Vec::<u8>::with_capacity(position + templates.execution_overrun.offset());
+        let all_templates = program
+            .iter()
+            .map(|insn| (&templates.insns[*insn as u16 as usize], insn))
+            .chain(std::iter::once((&templates.execution_overrun, &0)));
+        // 2nd scan
+        for (pc, (template, insn)) in all_templates.enumerate() {
+            let template_start = text_section.len();
+            text_section.extend_from_slice(template.buffer());
+            for relocation in template.relocations() {
+                let target = match relocation.kind {
+                    TemplateRelocationKind::InsnOffset => pc * ebpf::INSN_SIZE,
+                    TemplateRelocationKind::TakenBranchMeterAdjustment => {
+                        let off = (*insn >> 16) as i16;
+                        (off as isize * ebpf::INSN_SIZE as isize) as usize
+                    }
+                    TemplateRelocationKind::TakenBranch => {
+                        let off = (*insn >> 16) as i16;
+                        let target_pc = (pc as isize)
+                            .checked_add(1 + off as isize)
+                            .and_then(|target_pc| usize::try_from(target_pc).ok());
+                        // FIXME: the verifier should have rejected these.
+                        *target_pc
+                            .and_then(|target_pc| pc_section.get(target_pc))
+                            .expect("branch target out of bounds") as usize
+                    }
+                    TemplateRelocationKind::InternalCallMeterAdjustment => {
+                        let imm = (*insn >> 32) as i32;
+                        (imm as isize * ebpf::INSN_SIZE as isize) as usize
+                    }
+                    TemplateRelocationKind::InternalCall => {
+                        let imm = (*insn >> 32) as i32;
+                        let target_pc = (pc as isize)
+                            .checked_add(1 + imm as isize)
+                            .and_then(|target_pc| usize::try_from(target_pc).ok());
+                        // FIXME: the verifier should have rejected these.
+                        *target_pc
+                            .and_then(|target_pc| pc_section.get(target_pc))
+                            .expect("call target out of bounds") as usize
+                    }
+                };
+                relocation.apply(&mut text_section, template_start, target);
+            }
+        }
+        JitProgram {
+            pc_section,
+            text_section,
         }
     }
-    text_section
 }
 
 /// Compile `bpf` and execute.
-pub fn jit_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::EbpfVm<C>) -> i8 {
-    // FIXME:
-    if vm.registers[11] != 0 {
-        return SIG_INVALID_INSN;
-    }
-    let code = jit(bpf);
+pub fn jit_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::EbpfVm<C>) {
+    let program = JIT_TEMPLATES.compile(bpf);
+    let code = &program.text_section;
     let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len())
         .expect("failed to allocate executable memory for the JIT output");
     buffer.set_len(code.len());
-    buffer.copy_from_slice(&code);
+    buffer.copy_from_slice(code);
     let buffer = buffer
         .make_exec()
         .expect("failed to make the JIT output executable");
-    enter(bpf, buffer.as_ptr() as usize, vm)
+    let start_addr =
+        buffer.as_ptr() as usize + program.pc_section[vm.registers[11] as usize] as usize;
+    enter(
+        bpf,
+        start_addr,
+        bpf.as_ptr().wrapping_add(ebpf::INSN_SIZE),
+        vm,
+    )
 }
 
 /// Interpret `bpf`.
-pub fn interpret_and_run<C: crate::vm::ContextObject>(
-    bpf: &[u8],
-    vm: &mut crate::vm::EbpfVm<C>,
-) -> i8 {
+pub fn interpret_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::EbpfVm<C>) {
     let pc = vm.registers[11] as usize;
     let insn = &bpf[pc * ebpf::INSN_SIZE..][..2];
     let opcode = u16::from_le_bytes(<[u8; 2]>::try_from(insn).unwrap()) as usize;
@@ -939,18 +977,8 @@ pub fn interpret_and_run<C: crate::vm::ContextObject>(
             .buffer
             .add(opcode << InterpreterGenerator::STEP_SIZE_LOG2)
     };
-    enter(bpf, address as usize, vm)
-}
-
-/// Turn an exit code into a `ProgramResult`
-pub fn result_from_exit_code(code: i8, r0: u64) -> crate::error::ProgramResult {
-    use crate::error::{EbpfError, ProgramResult};
-    match code {
-        0 => ProgramResult::Ok(r0),
-        SIG_EXCEEDED_MAX_INSTRUCTIONS => ProgramResult::Err(EbpfError::ExceededMaxInstructions),
-        SIG_INVALID_INSN => ProgramResult::Err(EbpfError::UnsupportedInstruction),
-        _ => panic!("unexpected exit code {}", code),
-    }
+    let insn = bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE);
+    enter(bpf, address as usize, insn, vm)
 }
 
 pub struct Interpreter {
@@ -990,21 +1018,29 @@ impl InterpreterGenerator {
 
     pub fn new() -> Self {
         unsafe {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open("interpreter.bin")
-                .unwrap();
-            file.set_len(Self::STEPS_SIZE as u64).unwrap();
+            #[cfg(sbpf_dump_interpreter)]
+            let file = {
+                let file = std::fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open("interpreter.bin")
+                    .unwrap();
+                file.set_len(Self::STEPS_SIZE as u64).unwrap();
+                file
+            };
+            #[cfg(sbpf_dump_interpreter)]
+            let (flags, fd) = (libc::MAP_SHARED, std::os::fd::AsRawFd::as_raw_fd(&file));
+            #[cfg(not(sbpf_dump_interpreter))]
+            let (flags, fd) = (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1);
 
             let buffer = libc::mmap(
                 std::ptr::null_mut(),
                 Self::STEPS_SIZE,
                 libc::PROT_READ | libc::PROT_WRITE,
-                libc::MAP_SHARED | libc::MAP_32BIT,
-                file.as_raw_fd(),
+                flags | libc::MAP_32BIT,
+                fd,
                 0,
             );
             if buffer == libc::MAP_FAILED {
@@ -1022,6 +1058,7 @@ impl InterpreterGenerator {
                 supports: SupportingCode {
                     internal_call: std::ptr::null(),
                     entry_point: std::ptr::null(),
+                    divide: Vec::new(),
                 },
             };
             this.offset = Self::STEP_TABLE_SIZE;
@@ -1133,6 +1170,10 @@ impl X64Generator for InterpreterGenerator {
         self.src
     }
 
+    fn supports(&self) -> &SupportingCode {
+        &self.supports
+    }
+
     fn bpf_taken_branch(&mut self) {
         x64asm!(self
             ; movsx RTEMP, WORD REL32_OFF
@@ -1145,7 +1186,6 @@ impl X64Generator for InterpreterGenerator {
     fn bpf_internal_call(&mut self) {
         let base_addr = i32::try_from(self.buffer as usize).expect("interpreter in first 2GB");
         x64asm!(self
-            ; push RINSN
             ; movsxd RTEMP, DWORD REL32_IMM
             ; lea RMETER, [ RMETER + RTEMP*8 ]
             ; lea RINSN, [ RINSN + RTEMP*8 ]
@@ -1156,7 +1196,66 @@ impl X64Generator for InterpreterGenerator {
             ; add RINSN, 8
         );
         self.invoke_support(self.supports.internal_call);
-        x64asm!(self; pop RINSN);
+        x64asm!(self; mov RINSN, [rsp]);
+    }
+}
+
+/// Emit a perf jitdump (`/tmp/jit-<pid>.dump`) describing the interpreter buffer.
+#[cfg(sbpf_dump_interpreter)]
+fn write_perf_jitdump(ptr: *const u8, len: usize) {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+    unsafe {
+        let pid = std::process::id();
+        let tid = libc::syscall(libc::SYS_gettid) as u32;
+        let now = || {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+            (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
+        };
+
+        let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
+        // 1. JIT Header (40 bytes)
+        f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
+        f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
+        f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
+        f.write_all(&62u32.to_le_bytes()).unwrap(); // ELF Machine: EM_X86_64
+        f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
+        f.write_all(&pid.to_le_bytes()).unwrap();
+        f.write_all(&now().to_le_bytes()).unwrap();
+        f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
+
+        // Triggers perf record's MMAP detection
+        let m = libc::mmap(
+            std::ptr::null_mut(),
+            4096,
+            libc::PROT_READ | libc::PROT_EXEC,
+            libc::MAP_PRIVATE,
+            f.as_raw_fd(),
+            0,
+        );
+        if m != libc::MAP_FAILED {
+            libc::munmap(m, 4096);
+        }
+
+        // 2. JIT_CODE_LOAD Record Header (60 bytes = 56 byte record + 4 byte name)
+        let rec_size = (60 + len) as u32;
+        f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
+        f.write_all(&rec_size.to_le_bytes()).unwrap();
+        f.write_all(&now().to_le_bytes()).unwrap();
+        f.write_all(&pid.to_le_bytes()).unwrap();
+        f.write_all(&tid.to_le_bytes()).unwrap();
+        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // VMA
+        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // Code Address
+        f.write_all(&(len as u64).to_le_bytes()).unwrap(); // Code Size
+        f.write_all(&1u64.to_le_bytes()).unwrap(); // Index
+        f.write_all(b"jit\0").unwrap(); // Symbol Name
+
+        // 3. Raw Code Bytes
+        f.write_all(std::slice::from_raw_parts(ptr, len)).unwrap();
     }
 }
 
@@ -1195,60 +1294,9 @@ pub(super) static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCod
         };
         generator.relocs.resolve(buffer, Some(base_addr as usize));
 
+        #[cfg(sbpf_dump_interpreter)]
+        write_perf_jitdump(generator.buffer, InterpreterGenerator::STEPS_SIZE);
         unsafe {
-            let ptr = generator.buffer;
-            let len = InterpreterGenerator::STEPS_SIZE;
-            let pid = std::process::id();
-            let tid = libc::syscall(libc::SYS_gettid) as u32;
-            let now = || {
-                let mut ts = libc::timespec {
-                    tv_sec: 0,
-                    tv_nsec: 0,
-                };
-                libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
-                (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
-            };
-
-            let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
-            // 1. JIT Header (40 bytes)
-            f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
-            f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
-            f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
-            f.write_all(&62u32.to_le_bytes()).unwrap(); // ELF Machine: EM_X86_64
-            f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
-            f.write_all(&pid.to_le_bytes()).unwrap();
-            f.write_all(&now().to_le_bytes()).unwrap();
-            f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
-
-            // Triggers perf record's MMAP detection
-            let m = libc::mmap(
-                std::ptr::null_mut(),
-                4096,
-                libc::PROT_READ | libc::PROT_EXEC,
-                libc::MAP_PRIVATE,
-                f.as_raw_fd(),
-                0,
-            );
-            if m != libc::MAP_FAILED {
-                libc::munmap(m, 4096);
-            }
-
-            // 2. JIT_CODE_LOAD Record Header (60 bytes = 56 byte record + 4 byte name)
-            let rec_size = (60 + len) as u32;
-            f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
-            f.write_all(&rec_size.to_le_bytes()).unwrap();
-            f.write_all(&now().to_le_bytes()).unwrap();
-            f.write_all(&pid.to_le_bytes()).unwrap();
-            f.write_all(&tid.to_le_bytes()).unwrap();
-            f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // VMA
-            f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // Code Address
-            f.write_all(&(len as u64).to_le_bytes()).unwrap(); // Code Size
-            f.write_all(&1u64.to_le_bytes()).unwrap(); // Index
-            f.write_all(b"jit\0").unwrap(); // Symbol Name
-
-            // 3. Raw Code Bytes
-            f.write_all(std::slice::from_raw_parts(ptr, len)).unwrap();
-
             libc::mprotect(
                 generator.buffer.cast(),
                 InterpreterGenerator::STEPS_SIZE,
@@ -1266,6 +1314,8 @@ pub(super) static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCod
 struct SupportingCode {
     internal_call: *const u8,
     entry_point: *const u8,
+    /// See `SupportingCode::divide`.
+    divide: Vec<*const u8>,
 }
 
 unsafe impl Send for SupportingCode {}
@@ -1273,46 +1323,137 @@ unsafe impl Sync for SupportingCode {}
 
 impl SupportingCode {
     /// Buffer space needed to generate this supporting code.
-    const LEN: usize = 1024;
+    const LEN: usize = 64 * 1024;
 
-    pub fn generate_into(dst: &mut InterpreterGenerator) -> SupportingCode {
-        let internal_call = unsafe { dst.buffer.add(dst.offset()) };
-        x64asm!(dst
+    /// `dst` and `src` are physical registers. `None` if either isn't a BPF register.
+    fn divide_index(is_div: bool, is_64: bool, is_reg: bool, dst: u8, src: u8) -> Option<usize> {
+        let bpf_reg = |reg| GPREG_MAP.iter().position(|&r| r == reg);
+        let kind = is_div as usize | (is_64 as usize) << 1 | (is_reg as usize) << 2;
+        let src = if is_reg { bpf_reg(src)? } else { 0 };
+        Some((kind * GPREG_MAP.len() + bpf_reg(dst)?) * GPREG_MAP.len() + src)
+    }
+
+    /// Helper performing the division in place on the physical registers `dst` and `src` (or the
+    /// immediate.) Expects the address of the instruction following the division in `temp`.
+    fn divide(
+        &self,
+        is_div: bool,
+        is_64: bool,
+        is_reg: bool,
+        dst: u8,
+        src: u8,
+    ) -> Option<*const u8> {
+        let helper = self.divide[Self::divide_index(is_div, is_64, is_reg, dst, src)?];
+        assert!(!helper.is_null());
+        Some(helper)
+    }
+
+    pub fn generate_into(out: &mut InterpreterGenerator) -> SupportingCode {
+        let internal_call = unsafe { out.buffer.add(out.offset()) };
+        let call_depth = RuntimeEnvironmentSlot::CallDepth as i32;
+        let depth_exceeded = out.new_dynamic_label();
+        x64asm!(out
             ; push R6
             ; push R7
             ; push R8
             ; push R9
             ; push R10
+            ; gs mov R6, [ call_depth ]
+            ; add R6, 1
+            ; gs mov [ call_depth ], R6
+            ; cmp R6, MAX_CALL_DEPTH
+            ; jae =>depth_exceeded
+            ; mov R6, [rsp + 32]
             ; add R10, STACK_FRAME_SIZE
             ; call RTEMP
+            ; gs sub QWORD [ call_depth ], 1
             ; pop R10
             ; pop R9
             ; pop R8
             ; pop R7
             ; pop R6
             ; ret
+            ; =>depth_exceeded
+            // `meter` has already been adjusted by `imm * 8` and the JIT's `insn` doesn't track the
+            // pc, so undo the adjustment using the address pushed by the call site.
+            ; mov RTEMP, [rsp + 56]
+            ; sub RMETER, RTEMP
+            ; movsxd RTEMP, DWORD [RTEMP - 4]
+            ; shl RTEMP, 3
+            ; sub RMETER, RTEMP
+            ; mov BTEMP, SIG_CALL_DEPTH_EXCEEDED
+            ; jmp QWORD [rbp - 8]
         );
+
+        // Exits with `DivideByZero` for the instruction preceding the address in `temp`.
+        let divide_by_zero = out.new_dynamic_label();
+        let within_budget = out.new_dynamic_label();
+        x64asm!(out
+            ; =>divide_by_zero
+            // The division might not have been reached within the budget.
+            ; cmp RTEMP, RMETER
+            ; jbe =>within_budget
+            ; mov BTEMP, SIG_EXCEEDED_MAX_INSTRUCTIONS
+            ; jmp QWORD [rbp - 8]
+            ; =>within_budget
+            ; sub RMETER, RTEMP
+            ; mov BTEMP, SIG_DIVIDE_BY_ZERO
+            ; jmp QWORD [rbp - 8]
+        );
+        let last_reg = *GPREG_MAP.last().unwrap();
+        let mut divide = vec![
+            std::ptr::null();
+            Self::divide_index(true, true, true, last_reg, last_reg).unwrap() + 1
+        ];
+        for is_div in [false, true] {
+            for is_64 in [false, true] {
+                for is_reg in [false, true] {
+                    for &dst_reg in &GPREG_MAP {
+                        let src_regs = if is_reg {
+                            &GPREG_MAP[..]
+                        } else {
+                            &GPREG_MAP[..1]
+                        };
+                        for &src_reg in src_regs {
+                            let index = Self::divide_index(is_div, is_64, is_reg, dst_reg, src_reg)
+                                .unwrap();
+                            divide[index] = unsafe { out.buffer.add(out.offset()) };
+                            Self::generate_div_mod_support(
+                                out,
+                                divide_by_zero,
+                                is_div,
+                                is_64,
+                                is_reg,
+                                dst_reg,
+                                src_reg,
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         // Expects `%gs` to point at the `EbpfVm`, `RINSN`, `RMETER` to be initialized and `RTEMP`
         // to be initialized to the address of the machine code to start executing at.
-        let entry_point = unsafe { dst.buffer.add(dst.offset()) };
-        let after_dispatch = dst.new_dynamic_label();
-        x64asm!(dst
+        let entry_point = unsafe { out.buffer.add(out.offset()) };
+        let after_dispatch = out.new_dynamic_label();
+        x64asm!(out
             ; push rbp
             ; mov rbp, rsp
+            ; sub rsp, 16
             // `exit` jumps to `[rbp - 8]` from whatever depth of internal calls it's at.
             ; lea rsi, [ => after_dispatch ]
-            ; push rsi
+            ; mov [rbp - 8], rsi
         );
         for (i, &reg) in GPREG_MAP.iter().enumerate() {
-            x64asm!(dst; gs mov Rq(reg), [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ]);
+            x64asm!(out; gs mov Rq(reg), [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ]);
         }
-        x64asm!(dst; call RTEMP);
-        dst.dynamic_label(after_dispatch);
+        x64asm!(out; call RTEMP);
+        out.dynamic_label(after_dispatch);
         for (i, &reg) in GPREG_MAP.iter().enumerate() {
-            x64asm!(dst; gs mov [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ], Rq(reg));
+            x64asm!(out; gs mov [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ], Rq(reg));
         }
-        x64asm!(dst
+        x64asm!(out
             ; mov rsp, rbp
             ; pop rbp
             ; ret
@@ -1321,24 +1462,82 @@ impl SupportingCode {
         Self {
             internal_call,
             entry_point,
+            divide,
         }
+    }
+
+    fn generate_div_mod_support(
+        out: &mut InterpreterGenerator,
+        divide_by_zero: DynamicLabel,
+        is_div: bool,
+        is_64: bool,
+        is_reg: bool,
+        dst: u8,
+        src: u8,
+    ) {
+        if is_reg {
+            if is_64 {
+                x64asm!(out; test Rq(src), Rq(src));
+            } else {
+                x64asm!(out; test Rd(src), Rd(src));
+            }
+            x64asm!(out
+                ; jz =>divide_by_zero
+                ; mov RTEMP, Rq(src)
+            );
+        } else {
+            // The verifier rejects zero immediates, so there's no need to
+            // check those.
+            x64asm!(out; movsxd RTEMP, DWORD [RTEMP - 4]);
+        }
+        x64asm!(out
+            ; push rax
+            ; push rdx
+            ; xor edx, edx
+        );
+        match (is_64, is_div) {
+            (true, true) => x64asm!(out
+                ; mov rax, Rq(dst)
+                ; div RTEMP
+                ; mov Rq(dst), rax
+            ),
+            (true, false) => x64asm!(out
+                ; mov rax, Rq(dst)
+                ; div RTEMP
+                ; mov Rq(dst), rdx
+            ),
+            (false, true) => x64asm!(out
+                ; mov eax, Rd(dst)
+                ; div WTEMP
+                ; mov Rd(dst), eax
+            ),
+            (false, false) => x64asm!(out
+                ; mov eax, Rd(dst)
+                ; div WTEMP
+                ; mov Rd(dst), edx
+            ),
+        }
+        x64asm!(out
+            ; pop rdx
+            ; pop rax
+            ; ret
+        );
     }
 }
 
-/// Run the code at `start_addr` (machine code), with `vm.previous_instruction_meter` as the budget.
-/// Returns the exit code (see `X64Generator::exit`) and sets `vm.due_insn_count` with the number of
-/// CUs used.
+/// Run the code at `start_addr` (machine code), with `vm.previous_instruction_meter` as the budget
+/// and `insn` as the initial value of `RINSN`.
 pub fn enter<C: crate::vm::ContextObject>(
     bpf: &[u8],
     start_addr: usize,
+    insn: *const u8,
     vm: &mut crate::vm::EbpfVm<C>,
-) -> i8 {
+) {
+    use crate::error::{EbpfError, ProgramResult};
     let entry_point = INTERPRETER_AND_SUPPORTS.1.entry_point;
+    vm.call_depth = 0;
     let pc = vm.registers[11];
     let budget = vm.previous_instruction_meter;
-    let insn = bpf
-        .as_ptr()
-        .wrapping_add((pc as usize + 1) * ebpf::INSN_SIZE);
     let exec_limit = (bpf.as_ptr() as u64)
         .wrapping_add(pc.wrapping_add(budget).wrapping_mul(ebpf::INSN_SIZE as u64));
     let code: u64;
@@ -1348,19 +1547,18 @@ pub fn enter<C: crate::vm::ContextObject>(
             "push rbx",
             "rdgsbase rbx",
             "push rbx",
-            "wrgsbase {vm}",
-            "call {entry_point}",
+            "wrgsbase rsi",
+            "call r8",
             "pop rbx",
             "wrgsbase rbx",
             "pop rbx",
-            vm = in(reg) std::ptr::from_mut(vm),
-            entry_point = in(reg) entry_point,
+            // Explicit registers throughout: a `reg` operand could be allocated to `rbx`.
+            inout("rsi") std::ptr::from_mut(vm) => _,
+            inout("r8") entry_point => _,
             inout("rax") insn => _,
             inout("rcx") start_addr => code,
             inout("rdx") exec_limit => remaining,
             lateout("rdi") _,
-            lateout("rsi") _,
-            lateout("r8") _,
             lateout("r9") _,
             lateout("r10") _,
             lateout("r11") _,
@@ -1377,5 +1575,13 @@ pub fn enter<C: crate::vm::ContextObject>(
         remaining / 8
     };
     vm.due_insn_count = budget.saturating_sub(remaining);
-    code
+    vm.program_result = match code {
+        0 => ProgramResult::Ok(vm.registers[0]),
+        SIG_EXCEEDED_MAX_INSTRUCTIONS => ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+        SIG_INVALID_INSN => ProgramResult::Err(EbpfError::UnsupportedInstruction),
+        SIG_CALL_DEPTH_EXCEEDED => ProgramResult::Err(EbpfError::CallDepthExceeded),
+        SIG_DIVIDE_BY_ZERO => ProgramResult::Err(EbpfError::DivideByZero),
+        SIG_EXECUTION_OVERRUN => ProgramResult::Err(EbpfError::ExecutionOverrun),
+        _ => unreachable!("unexpected exit code {}", code),
+    };
 }

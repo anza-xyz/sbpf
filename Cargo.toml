@@ -73,3 +73,6 @@ harness = false
 [[bench]]
 name = "vm_execution"
 harness = false
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(sbpf_dump_interpreter)"] }
