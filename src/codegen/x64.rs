@@ -161,7 +161,6 @@ trait X64Generator {
     /// Produce a template for a single (currently processed) instruction.
     fn bpf_insn_template(&mut self) {
         let is_alu64 = (self.op() & ebpf::BPF_CLS_MASK) == ebpf::BPF_ALU64_STORE;
-        let op = self.op() & ebpf::BPF_ALU_OP_MASK;
         let dst = self.dst();
         let src = self.src();
 
@@ -248,7 +247,7 @@ trait X64Generator {
             ebpf::DIV64_REG |
             ebpf::MOD64_IMM |
             ebpf::MOD64_REG => {
-                let is_div = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
+                let is_div = (self.op() & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
                 let result_reg = if is_div { RAX } else { RDX };
                 const { assert!(disposable_reg(RDX) && !disposable_reg(RAX)); }
                 assert!(dst != RAX);
@@ -356,8 +355,8 @@ trait X64Generator {
             | ebpf::JSGE64_REG
             | ebpf::JSLT64_REG
             | ebpf::JSLE64_REG => {
-                let is_64 = (op & ebpf::BPF_CLS_MASK) == ebpf::BPF_JMP64;
-                let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
+                let is_64 = (self.op() & ebpf::BPF_CLS_MASK) == ebpf::BPF_JMP64;
+                let is_imm = (self.op() & ebpf::BPF_X) != ebpf::BPF_X;
                 match (is_64, is_imm) {
                     (true, true) => x64asm!(self
                         ; movsxd Rq(REG_TEMP), DWORD REL32_IMM
@@ -368,7 +367,7 @@ trait X64Generator {
                     (false, false) => x64asm!(self; cmp Rd(dst), Rd(src)),
                 }
                 let fallthrough = self.new_dynamic_label();
-                match op & ebpf::BPF_ALU_OP_MASK {
+                match self.op() & ebpf::BPF_ALU_OP_MASK {
                     ebpf::BPF_JEQ => x64asm!(self; jne BYTE =>fallthrough),
                     ebpf::BPF_JGT => x64asm!(self; jbe BYTE =>fallthrough),
                     ebpf::BPF_JGE => x64asm!(self; jb BYTE =>fallthrough),
@@ -767,20 +766,6 @@ impl InterpreterGenerator {
             this
         }
     }
-
-    pub fn generate_helpers(&mut self) {
-        // let old_offset = std::mem::replace(&mut self.offset, Self::STEPS_SIZE);
-        // self.interpreter.entrypoint = self.offset;
-        // self.entrypoint_helper();
-
-        // self.offset = old_offset;
-    }
-
-    pub fn entrypoint_helper(&mut self) {
-        // x64asm!(self
-        //     ; int3
-        // );
-    }
 }
 
 impl X64Generator for InterpreterGenerator {
@@ -1051,10 +1036,11 @@ pub extern "sysv64" fn interpret(bpf: &[u8]) {
             .buffer
             .add(first_opcode << InterpreterGenerator::STEP_SIZE_LOG2)
     };
-    enter(bpf, address as usize)
+    enter(&bpf[8..], address as usize)
 }
 
 #[unsafe(naked)]
+// FIXME: pass bpf as a pointer instead
 pub extern "sysv64" fn enter(bpf: &[u8], start_addr: usize) {
     // This function is meant to only do the bare minimum setup for the runtime to operate.
     // e.g. it will setup the VM pointer, stash the registers and setup rbp, but it won't e.g. deal
