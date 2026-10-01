@@ -1,8 +1,8 @@
 use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry, StaticLabel};
-use dynasmrt::relocations::{Relocation, SimpleRelocation};
-use dynasmrt::DynamicLabel;
+use dynasmrt::relocations::{Relocation, RelocationKind, SimpleRelocation};
+use dynasmrt::{AssemblyOffset, DynamicLabel};
 
-use crate::codegen::{x64, Template};
+use crate::codegen::Template;
 use crate::ebpf;
 use std::arch::naked_asm;
 use std::convert::TryFrom;
@@ -70,13 +70,13 @@ macro_rules! x64asm {
 
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_IMM $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [ DWORD -4i32 + Rq(REG_INSN)] ;; $output.reloc_add_insn_off32()
+            $($curr)* [ DWORD -4i32 + Rq(REG_INSN) ] ;; $output.global_reloc("template_insn_offset", -4, 4, 0, 0xC2)
         ]} $($rest)*)
     };
 
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_OFF $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [DWORD -6i32 + Rq(REG_INSN)] ;; $output.reloc_add_insn_off32()
+            $($curr)* [ DWORD -6i32 + Rq(REG_INSN) ] ;; $output.global_reloc("template_insn_offset", -6, 4, 0, 0xC2)
         ]} $($rest)*)
     };
 
@@ -103,14 +103,6 @@ trait X64Generator {
     fn push_i8(&mut self, value: i8);
     fn push_i32(&mut self, value: i32);
     fn align(&mut self, alignment: usize, with: u8);
-    fn forward_reloc(
-        &mut self,
-        name: &'static str,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
-    );
     fn global_reloc(
         &mut self,
         name: &'static str,
@@ -138,25 +130,6 @@ trait X64Generator {
     ///
     /// This will discard the guest code stack and return the exit code in REG_TEMP.
     fn exit(&mut self, code: i32);
-
-    /// Introduce a relocation that, to the previous 4 bytes emitted, adds an offset to the
-    /// beginning of the “current” eBPF instruction.
-    ///
-    /// This relocation type is intended to be used to augment memory operand displacements and
-    /// exists because dynasm does not currently support this functionality natively. A
-    /// straightforward example that adds the current instruction's immediate value to `rcx` is:
-    ///
-    /// ```
-    /// dynasm!(output
-    ///     ; add ecx, [ DWORD 4 + Rq(REG_INSN) ] ;; self.reloc_add_insn_off32()
-    /// );
-    /// ```
-    ///
-    /// This relocation type's implementation depends on how the generator uses the `REG_INSN`
-    /// register. For interpreters which always maintain a pointer to the "current" instruction,
-    /// this relocation type is a no-op. Meanwhile for JIT implementations that hold the pointer to
-    /// the base of eBPF code, this should, effectively, produce a full offset.
-    fn reloc_add_insn_off32(&mut self);
 
     /// Produce a template for a single (currently processed) instruction.
     fn bpf_insn_template(&mut self) {
@@ -460,27 +433,142 @@ trait X64Generator {
     fn bpf_taken_branch(&mut self);
 }
 
+/// Relocations against labels defined within the code being generated (local, global and dynamic
+/// labels.)
+///
+/// These are resolved as soon as the code generation completes: for JIT that's when the template
+/// is finalized, for the interpreter that's once all the steps have been generated.
+struct LabelRelocs {
+    labels: LabelRegistry,
+    relocs: RelocRegistry<SimpleRelocation>,
+}
+
+impl LabelRelocs {
+    fn new() -> Self {
+        Self {
+            labels: LabelRegistry::new(),
+            relocs: RelocRegistry::new(),
+        }
+    }
+
+    fn new_dynamic_label(&mut self) -> DynamicLabel {
+        self.labels.new_dynamic_label()
+    }
+
+    fn dynamic_label(&mut self, id: DynamicLabel, at: usize) {
+        self.labels.define_dynamic(id, AssemblyOffset(at)).unwrap()
+    }
+
+    fn global_reloc(&mut self, at: usize, name: &'static str, patch: PatchFields) {
+        self.relocs
+            .add_static(StaticLabel::global(name), patch.at(at));
+    }
+
+    fn dynamic_reloc(&mut self, at: usize, id: DynamicLabel, patch: PatchFields) {
+        self.relocs.add_dynamic(id, patch.at(at));
+    }
+
+    /// Patch all the recorded relocations into `buffer` and reset the label state.
+    ///
+    /// `buf_addr` is the address at which `buffer` will reside during execution. `None` means
+    /// that the code is position independent and will get copied elsewhere, in which case only the
+    /// relative relocations are supported.
+    fn resolve(&mut self, buffer: &mut [u8], buf_addr: Option<usize>) {
+        let patch = |loc: PatchLoc<SimpleRelocation>, target: AssemblyOffset, buffer: &mut [u8]| {
+            if buf_addr.is_none() {
+                assert!(
+                    matches!(loc.relocation.kind(), RelocationKind::Relative),
+                    "position independent code may only contain relative label references"
+                );
+            }
+            let range = loc.range(0);
+            loc.patch(&mut buffer[range], buf_addr.unwrap_or(0), target.0)
+                .expect("impossible relocation");
+        };
+        for (loc, label) in self.relocs.take_statics() {
+            let target = self.labels.resolve_static(&label).unwrap();
+            patch(loc, target, buffer);
+        }
+        for (loc, id) in self.relocs.take_dynamics() {
+            let target = self.labels.resolve_dynamic(id).unwrap();
+            patch(loc, target, buffer);
+        }
+        self.labels.clear();
+    }
+}
+
+/// Relocation parameters as produced by `dynasm`, sans the location.
 #[derive(Clone, Copy)]
-enum RelocationKind {
-    // template_taken_branch relocation.
-    //
-    // When BPF instruction represents a branch, and the branch is taken, the control flow has to
-    // transfer to the machine code representing the target BPF instruction's code. Offset to this
-    // machine code is what this relocation must overwrite based on the BPF instruction being
-    // templated.
+struct PatchFields {
+    target_offset: isize,
+    field_offset: u8,
+    ref_offset: u8,
+    relocation: SimpleRelocation,
+}
+
+impl PatchFields {
+    fn new(target_offset: isize, field_offset: u8, ref_offset: u8, kind: u8) -> Self {
+        Self {
+            target_offset,
+            field_offset,
+            ref_offset,
+            relocation: SimpleRelocation::from_encoding(kind),
+        }
+    }
+
+    /// `at` is the offset right past the instruction containing the field to patch (i.e. the
+    /// offset at the time `dynasm` reports the relocation.)
+    fn at(self, at: usize) -> PatchLoc<SimpleRelocation> {
+        PatchLoc::new(
+            AssemblyOffset(at),
+            self.target_offset,
+            self.field_offset,
+            self.ref_offset,
+            self.relocation,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemplateRelocationKind {
+    /// `reloc_add_insn_off32` relocation.
+    ///
+    /// The JIT holds a pointer to the beginning of the eBPF program in `REG_INSN`, whereas the
+    /// templates default to addressing where `REG_INSN` is updated to point to right after the
+    /// current instruction. This relocation adds the offset of that following instruction to the
+    /// field.
+    InsnOffset,
+    /// `template_taken_branch` relocation.
+    ///
+    /// When BPF instruction represents a branch, and the branch is taken, the control flow has to
+    /// transfer to the machine code representing the target BPF instruction's code. Offset to this
+    /// machine code is what this relocation must overwrite based on the BPF instruction being
+    /// templated.
     TakenBranch,
 }
 
+/// A relocation that can only be resolved once the template is instantiated for a specific eBPF
+/// instruction at a specific location.
 #[derive(Clone, Copy)]
 struct TemplateRelocation {
-    offset: usize,
-
-    kind: RelocationKind,
+    /// Offset within the template right past the instruction containing the field to patch.
+    location: usize,
+    patch: PatchFields,
+    kind: TemplateRelocationKind,
 }
 
-#[derive(Clone, Copy)]
-struct JITLabel {
-    id: usize,
+impl TemplateRelocation {
+    /// Patch the relocation into the instantiated template.
+    ///
+    /// `text` must be the buffer into which the template was copied, starting at `template_start`.
+    /// `target` is an offset into `text` for relative relocations or the value to write for
+    /// absolute ones.
+    fn apply(&self, text: &mut [u8], template_start: usize, target: usize) {
+        let loc = self.patch.at(template_start + self.location);
+        let range = loc.range(0);
+        loc.patch(&mut text[range], 0, target)
+            .expect("impossible relocation");
+    }
 }
 
 struct JITGenerator {
@@ -488,42 +576,36 @@ struct JITGenerator {
     op: u8,
     dst: u8,
     src: u8,
-    labels: [usize; 4], // offset to code where the label lies
-    num_labels: usize,
-    // Relocations in which we have to place the offset to the current instruction
-    insn_offset_relocs: [usize; 16],
-    num_insn_offset_relocs: usize,
-
-    // FIXME: these have to be resolved as the template is finalized.
-    dynamic_relocs: [usize; 16],
-    num_dynamic_relocs: usize,
+    /// Temporary relocations within the code that will be resolved before the template is
+    /// finalized.
+    ///
+    /// Template can have further relocations after finalization, however those relocations may only
+    /// be specific to the eBPF instruction being instantiated.
+    relocs: LabelRelocs,
 }
 
 impl JITGenerator {
-    pub const fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             template: super::Template::new(),
             op: 0,
             dst: 0,
             src: 0,
-            labels: [0; _],
-            num_labels: 0,
-            insn_offset_relocs: [0; _],
-            num_insn_offset_relocs: 0,
-            dynamic_relocs: [0; _],
-            num_dynamic_relocs: 0,
+            relocs: LabelRelocs::new(),
         }
     }
 
+    /// Resolve all the relocations that can be resolved without knowing the specific eBPF
+    /// instruction and return the template. The generator is reset to generate the next template.
     fn finalize(&mut self) -> Template<64, TemplateRelocation> {
-        // TODO: fixup dynamic relocs...
-        // the only ones to remain may be the insn_offset_relocs.
-        self.template
+        let mut template = std::mem::replace(&mut self.template, Template::new());
+        self.relocs.resolve(template.buffer_mut(), None);
+        template
     }
 }
 
 impl X64Generator for JITGenerator {
-    type DynamicLabel = JITLabel;
+    type DynamicLabel = DynamicLabel;
 
     #[track_caller]
     fn extend(&mut self, buffer: &[u8]) {
@@ -546,11 +628,11 @@ impl X64Generator for JITGenerator {
         self.template.push_i8(value);
     }
 
-    fn align(&mut self, alignment: usize, with: u8) {
+    fn align(&mut self, _alignment: usize, _with: u8) {
         // Ignore alignment requests; we're generating templates.
     }
 
-    fn forward_reloc(
+    fn global_reloc(
         &mut self,
         name: &'static str,
         target_offset: isize,
@@ -558,20 +640,37 @@ impl X64Generator for JITGenerator {
         ref_offset: u8,
         kind: u8,
     ) {
-        todo!()
-    }
-
-    fn new_dynamic_label(&mut self) -> JITLabel {
-        assert!(self.num_labels < self.labels.len());
-        let label = JITLabel {
-            id: self.num_labels,
+        let patch = PatchFields::new(target_offset, field_offset, ref_offset, kind);
+        let kind = match name {
+            "template_taken_branch" => TemplateRelocationKind::TakenBranch,
+            "template_insn_offset" => TemplateRelocationKind::InsnOffset,
+            _ => panic!("global reference to an unknown symbol {}", name),
         };
-        self.num_labels += 1;
-        label
+        self.template.add_relocation(TemplateRelocation {
+            location: self.offset(),
+            patch,
+            kind,
+        });
     }
 
-    fn dynamic_label(&mut self, id: JITLabel) {
-        self.labels[id.id] = self.offset();
+    fn dynamic_reloc(
+        &mut self,
+        id: DynamicLabel,
+        target_offset: isize,
+        field_offset: u8,
+        ref_offset: u8,
+        kind: u8,
+    ) {
+        let patch = PatchFields::new(target_offset, field_offset, ref_offset, kind);
+        self.relocs.dynamic_reloc(self.offset(), id, patch);
+    }
+
+    fn new_dynamic_label(&mut self) -> DynamicLabel {
+        self.relocs.new_dynamic_label()
+    }
+
+    fn dynamic_label(&mut self, id: DynamicLabel) {
+        self.relocs.dynamic_label(id, self.offset());
     }
 
     fn op(&self) -> u8 {
@@ -593,56 +692,10 @@ impl X64Generator for JITGenerator {
         );
     }
 
-    fn reloc_add_insn_off32(&mut self) {
-        let add_to = self.offset().checked_sub(4).unwrap();
-        self.insn_offset_relocs[self.num_insn_offset_relocs] = add_to;
-        self.num_insn_offset_relocs += 1;
-    }
-
     fn bpf_taken_branch(&mut self) {
         x64asm!(self
             ; jmp ->template_taken_branch
         );
-    }
-
-    fn global_reloc(
-        &mut self,
-        name: &'static str,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
-    ) {
-        let ref_kind = kind >> 6;
-        let ref_size = kind & 0x3F;
-        match name {
-            "template_taken_branch" => {
-                assert!(target_offset == 0);
-                assert!(ref_offset == 0);
-                assert!(ref_kind == 0); // relative
-                assert!(ref_size == 2); // dword
-                self.template.add_relocation(TemplateRelocation {
-                    offset: self.offset() + field_offset as usize,
-                    kind: RelocationKind::TakenBranch,
-                });
-            }
-            _ => panic!("unknown global reloc: {}", name),
-        }
-    }
-
-    fn dynamic_reloc(
-        &mut self,
-        id: Self::DynamicLabel,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
-    ) {
-        assert!(target_offset == 0);
-        // assert!(field_offset == 0);
-        assert!(ref_offset == 0);
-        assert!(kind == 0);
-        self.dynamic_relocs[id.id] = self.offset() + field_offset as usize;
     }
 }
 
@@ -651,10 +704,10 @@ impl X64Generator for JITGenerator {
 pub(super) static JIT_TEMPLATES: LazyLock<Vec<super::Template<64, TemplateRelocation>>> =
     LazyLock::new(|| {
         let mut result = Vec::with_capacity(0x10000);
+        let mut generator = JITGenerator::new();
         for bpf_src in 0..16 {
             for bpf_dst in 0..16 {
                 for bpf_op in 0..=u8::MAX {
-                    let mut generator = JITGenerator::new();
                     generator.src = GPREG_MAP.get(bpf_src).copied().unwrap_or(u8::MAX);
                     generator.dst = GPREG_MAP.get(bpf_dst).copied().unwrap_or(u8::MAX);
                     generator.op = bpf_op;
@@ -669,30 +722,45 @@ pub(super) static JIT_TEMPLATES: LazyLock<Vec<super::Template<64, TemplateReloca
 pub fn jit(bpf: &[u8]) -> Vec<u8> {
     let templates = &*JIT_TEMPLATES;
     assert!(bpf.as_ptr().cast::<u64>().is_aligned());
-    assert!(bpf.len() % 8 == 0);
+    assert!(bpf.len() % ebpf::INSN_SIZE == 0);
     let program: &[u64] = unsafe { bpf.align_to::<u64>().1 };
-    let mut pc_section = Vec::<u32>::with_capacity(program.len());
-    let mut position: u32 = 0;
+    let mut pc_section = Vec::<usize>::with_capacity(program.len());
+    let mut position: usize = 0;
     // first scan
-    for op in program {
-        let template = templates[*op as u16 as usize];
+    for insn in program {
+        let template = &templates[*insn as u16 as usize];
         pc_section.push(position);
-        position += template.offset() as u32;
+        position += template.offset();
     }
 
-    let mut text_section = Vec::<u8>::with_capacity(position as usize);
+    let mut text_section = Vec::<u8>::with_capacity(position);
     // 2nd scan
-    for op in program {
-        let template = templates[*op as u16 as usize];
-        // TODO: apply relocations.
-        text_section.extend(template.buffer());
+    for (pc, insn) in program.iter().enumerate() {
+        let template = &templates[*insn as u16 as usize];
+        let template_start = text_section.len();
+        text_section.extend_from_slice(template.buffer());
+        for relocation in template.relocations() {
+            let target = match relocation.kind {
+                TemplateRelocationKind::InsnOffset => (pc + 1) * ebpf::INSN_SIZE,
+                TemplateRelocationKind::TakenBranch => {
+                    let off = (*insn >> 16) as i16;
+                    let target_pc = (pc as isize)
+                        .checked_add(1 + off as isize)
+                        .and_then(|target_pc| usize::try_from(target_pc).ok());
+                    // FIXME: the verifier should have rejected these.
+                    *target_pc
+                        .and_then(|target_pc| pc_section.get(target_pc))
+                        .expect("branch target out of bounds")
+                }
+            };
+            relocation.apply(&mut text_section, template_start, target);
+        }
     }
     text_section
 }
 
 pub struct Interpreter {
     buffer: *mut u8,
-    entrypoint: usize,
 }
 
 unsafe impl Send for Interpreter {}
@@ -709,8 +777,7 @@ impl Drop for Interpreter {
 /// Generate an interpreter...
 struct InterpreterGenerator {
     interpreter: Interpreter,
-    labels: dynasmrt::components::LabelRegistry,
-    relocs: dynasmrt::components::RelocRegistry<SimpleRelocation>,
+    relocs: LabelRelocs,
     offset: usize,
     op: u8,
     dst: u8,
@@ -748,13 +815,11 @@ impl InterpreterGenerator {
             if buffer == libc::MAP_FAILED {
                 panic!("libc::mmap failed to allocate executable memory for the interpreter");
             }
-            let mut this = Self {
+            let this = Self {
                 interpreter: Interpreter {
                     buffer: buffer.cast(),
-                    entrypoint: 0,
                 },
-                labels: LabelRegistry::new(),
-                relocs: RelocRegistry::new(),
+                relocs: LabelRelocs::new(),
                 offset: 0,
                 op: 0,
                 dst: 0,
@@ -762,7 +827,6 @@ impl InterpreterGenerator {
                 generate_epilogue: true,
                 terminal: false,
             };
-            this.generate_helpers();
             this
         }
     }
@@ -821,38 +885,21 @@ impl X64Generator for InterpreterGenerator {
         self.extend(&value.to_le_bytes());
     }
 
-    fn forward_reloc(
-        &mut self,
-        name: &'static str,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
-    ) {
-        let location = dynasmrt::AssemblyOffset(self.offset);
-        let label = match self.labels.place_local_reference(name) {
-            Some(label) => label.next(),
-            None => StaticLabel::first(name),
-        };
-        let reloc = SimpleRelocation::from_encoding(kind);
-        let patchloc = PatchLoc::new(location, target_offset, field_offset, ref_offset, reloc);
-        self.relocs.add_static(label, patchloc);
-    }
-
     fn global_reloc(
         &mut self,
         name: &'static str,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
+        _target_offset: isize,
+        _field_offset: u8,
+        _ref_offset: u8,
+        _kind: u8,
     ) {
-        let location = dynasmrt::AssemblyOffset(self.offset);
-        let label = StaticLabel::global(name);
-        let reloc = SimpleRelocation::from_encoding(kind);
-        let patchloc = PatchLoc::new(location, target_offset, field_offset, ref_offset, reloc);
-        self.relocs.add_static(label, patchloc);
+        match name {
+            "template_taken_branch" => TemplateRelocationKind::TakenBranch,
+            "template_insn_offset" => TemplateRelocationKind::InsnOffset,
+            _ => panic!("global reference to an unknown symbol {}", name),
+        };
     }
+
     fn dynamic_reloc(
         &mut self,
         id: DynamicLabel,
@@ -861,20 +908,16 @@ impl X64Generator for InterpreterGenerator {
         ref_offset: u8,
         kind: u8,
     ) {
-        let location = dynasmrt::AssemblyOffset(self.offset);
-        let reloc = SimpleRelocation::from_encoding(kind);
-        let patchloc = PatchLoc::new(location, target_offset, field_offset, ref_offset, reloc);
-        self.relocs.add_dynamic(id, patchloc);
+        let patch = PatchFields::new(target_offset, field_offset, ref_offset, kind);
+        self.relocs.dynamic_reloc(self.offset, id, patch);
     }
 
     fn new_dynamic_label(&mut self) -> DynamicLabel {
-        self.labels.new_dynamic_label()
+        self.relocs.new_dynamic_label()
     }
 
     fn dynamic_label(&mut self, id: DynamicLabel) {
-        self.labels
-            .define_dynamic(id, dynasmrt::AssemblyOffset(self.offset))
-            .unwrap()
+        self.relocs.dynamic_label(id, self.offset);
     }
 
     fn op(&self) -> u8 {
@@ -896,10 +939,6 @@ impl X64Generator for InterpreterGenerator {
         );
         self.generate_epilogue = false;
         self.terminal = true;
-    }
-
-    fn reloc_add_insn_off32(&mut self) {
-        // Intentionally empty: interpreter maintains current register's location in `INSN_REG`.
     }
 
     fn bpf_taken_branch(&mut self) {
@@ -939,31 +978,13 @@ pub(super) static INTERPRETER: LazyLock<Interpreter> = LazyLock::new(|| {
         }
     }
 
-    for (loc, label) in generator.relocs.take_statics() {
-        let target = generator.labels.resolve_static(&label).unwrap();
-        let buf = unsafe {
-            std::slice::from_raw_parts_mut(
-                generator.interpreter.buffer.add(loc.range(0).start),
-                loc.range(0).len(),
-            )
-        };
-        if loc.patch(buf, base_addr as usize, target.0).is_err() {
-            panic!("impossible relocation");
-        }
-    }
-
-    for (loc, id) in generator.relocs.take_dynamics() {
-        let target = generator.labels.resolve_dynamic(id).unwrap();
-        let buf = unsafe {
-            std::slice::from_raw_parts_mut(
-                generator.interpreter.buffer.add(loc.range(0).start),
-                loc.range(0).len(),
-            )
-        };
-        if loc.patch(buf, base_addr as usize, target.0).is_err() {
-            panic!("impossible relocation");
-        }
-    }
+    let buffer = unsafe {
+        std::slice::from_raw_parts_mut(
+            generator.interpreter.buffer,
+            InterpreterGenerator::STEPS_SIZE,
+        )
+    };
+    generator.relocs.resolve(buffer, Some(base_addr as usize));
 
     unsafe {
         let ptr = generator.interpreter.buffer;
