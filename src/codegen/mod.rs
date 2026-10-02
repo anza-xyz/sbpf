@@ -112,12 +112,11 @@ pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm
         .expect("failed to make the JIT output executable");
     let start_addr =
         buffer.as_ptr() as usize + program.pc_section[vm.registers[11] as usize] as usize;
-    vm.set_text_section(bpf, bpf_vm_addr);
-    vm.jit_pc_section = program.pc_section.as_ptr();
-    vm.jit_text_section = buffer.as_ptr();
     // The JIT output addresses the instructions relative to the second one.
     x64::enter(
         bpf,
+        bpf_vm_addr,
+        Some((&program.pc_section, buffer.as_ptr())),
         start_addr,
         bpf.as_ptr().wrapping_add(ebpf::INSN_SIZE),
         vm,
@@ -131,12 +130,9 @@ pub fn interpret_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut 
     let pc = vm.registers[11] as usize;
     let insn = &bpf[pc * ebpf::INSN_SIZE..][..2];
     let step = x64::interpreter_step(u16::from_le_bytes(<[u8; 2]>::try_from(insn).unwrap()));
-    vm.set_text_section(bpf, bpf_vm_addr);
-    vm.jit_pc_section = std::ptr::null();
-    vm.jit_text_section = std::ptr::null();
     // The interpreter steps expect `insn` to point past the instruction being executed.
     let insn = bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE);
-    x64::enter(bpf, step as usize, insn, vm)
+    x64::enter(bpf, bpf_vm_addr, None, step as usize, insn, vm)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

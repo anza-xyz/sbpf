@@ -449,7 +449,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
                 x64asm!(out
                     ; push RTEMP
                     ; mov RTEMP, Rq(dst)
-                    ; gs sub RTEMP, [ RuntimeEnvironmentSlot::TextSectionHostToVm as i32 ]
+                    ; sub RTEMP, rbp => Frame[BYTE -1].text_section_host_to_vm
                     ;; invoke_support(out, call_internal)
                     ; pop RTEMP
                 );
@@ -604,7 +604,7 @@ fn terminate<G: X64Generator + ?Sized>(out: &mut G, code: i8) {
     }
     x64asm!(out
         ; mov BTEMP, code
-        ; jmp QWORD [rbp - 8]
+        ; jmp QWORD rbp => Frame[BYTE -1].exit
     );
 }
 
@@ -1071,35 +1071,74 @@ static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCode)> = LazyL
     )
 });
 
+/// The state of an execution. `SupportingCode::entry_point` copies it right below its frame
+/// pointer, where the generated code finds it as `rbp => Frame[BYTE -1].field`.
+#[repr(C, align(16))]
+struct Frame {
+    /// The `EbpfVm` being executed.
+    vm: *mut u8,
+    /// Where `terminate` jumps to. Set up by `SupportingCode::entry_point`.
+    exit: *const u8,
+    /// The machine code to start executing at.
+    start: usize,
+    text_section: *const u8,
+    /// Length of `text_section` in bytes.
+    text_section_len: u64,
+    /// Translates host addresses within `text_section` to VM addresses.
+    text_section_host_to_vm: u64,
+    /// For the JIT output: offset in `jit_text_section` of the machine code for each instruction
+    /// of `text_section`. Null for the interpreter.
+    jit_pc_section: *const u32,
+    /// For the JIT output: the machine code being executed.
+    jit_text_section: *const u8,
+    /// See `supporting_code::syscall_dispatcher`.
+    syscall_dispatcher: *const u8,
+    /// Depth of the internal calls.
+    call_depth: u64,
+}
+
 /// Run the code at `start_addr` (machine code), with `vm.previous_instruction_meter` as the budget
 /// and `insn` as the initial value of `RINSN`.
+///
+/// `bpf` is the text section at `bpf_vm_addr`, and `jit` is the `pc_section` and the machine code
+/// of the JIT output (`None` for the interpreter.)
 pub fn enter<C: crate::vm::ContextObject>(
     bpf: &[u8],
+    bpf_vm_addr: u64,
+    jit: Option<(&[u32], *const u8)>,
     start_addr: usize,
     insn: *const u8,
     vm: &mut crate::vm::EbpfVm<C>,
 ) {
     let entry_point = INTERPRETER_AND_SUPPORTS.1.entry_point;
-    vm.call_depth = 0;
-    vm.syscall_dispatcher = supporting_code::syscall_dispatcher::<C>();
     let meter = initial_meter(bpf, vm);
+    let (jit_pc_section, jit_text_section) = match jit {
+        Some((pc_section, text_section)) => (pc_section.as_ptr(), text_section),
+        None => (std::ptr::null(), std::ptr::null()),
+    };
+    let mut frame = Frame {
+        vm: std::ptr::from_mut(vm).cast(),
+        exit: std::ptr::null(),
+        start: start_addr,
+        text_section: bpf.as_ptr(),
+        text_section_len: bpf.len() as u64,
+        text_section_host_to_vm: bpf_vm_addr.wrapping_sub(bpf.as_ptr() as u64),
+        jit_pc_section,
+        jit_text_section,
+        syscall_dispatcher: supporting_code::syscall_dispatcher::<C>(),
+        call_depth: 0,
+    };
     let code: u64;
     let remaining: u64;
     unsafe {
         std::arch::asm!(
             "push rbx",
-            "rdgsbase rbx",
-            "push rbx",
-            "wrgsbase rsi",
             "call r8",
             "pop rbx",
-            "wrgsbase rbx",
-            "pop rbx",
-            // Explicit registers throughout: a `reg` operand could be allocated to `rbx`.
-            inout("rsi") std::ptr::from_mut(vm) => _,
+            inout("rsi") &raw mut frame => _,
             inout("r8") entry_point => _,
             inout("rax") insn => _,
-            inout("rcx") start_addr => code,
+            lateout("rcx") code,
             inout("rdx") meter => remaining,
             lateout("rdi") _,
             lateout("r9") _,

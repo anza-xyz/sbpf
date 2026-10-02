@@ -59,14 +59,14 @@ impl SupportingCode {
             ; push RTEMP
             ; mov RTEMP, [rsp + 24]
             ;; bpf_validate_meter(out)
-            ; gs add QWORD [ RuntimeEnvironmentSlot::CallDepth as i32 ], 1
-            ; gs cmp QWORD [ RuntimeEnvironmentSlot::CallDepth as i32 ], MAX_CALL_DEPTH
+            ; add QWORD rbp => Frame[BYTE -1].call_depth, 1
+            ; cmp QWORD rbp => Frame[BYTE -1].call_depth, MAX_CALL_DEPTH
             ; jb =>within_depth
             ;; terminate(out, SIG_CALL_DEPTH_EXCEEDED)
             ; =>within_depth
             ; mov RTEMP, [rsp]
-            ; gs sub RTEMP, [ RuntimeEnvironmentSlot::TextSection as i32 ]
-            ; gs cmp RTEMP, [ RuntimeEnvironmentSlot::TextSectionLen as i32 ]
+            ; sub RTEMP, rbp => Frame[BYTE -1].text_section
+            ; cmp RTEMP, rbp => Frame[BYTE -1].text_section_len
             ; jb =>in_bounds
             ; mov RTEMP, [rsp + 24]
             ;; terminate(out, SIG_CALL_OUTSIDE_TEXT_SEGMENT)
@@ -83,16 +83,16 @@ impl SupportingCode {
             // `insn` is restored after the call: the JIT's never changes, and the interpreter's
             // is the instruction following the call.
             ; push RINSN
-            ; gs add RTEMP, [ RuntimeEnvironmentSlot::TextSection as i32 ]
+            ; add RTEMP, rbp => Frame[BYTE -1].text_section
             ; mov [rsp + 8], RTEMP
-            ; gs cmp QWORD [ RuntimeEnvironmentSlot::JitPcSection as i32 ], 0
+            ; cmp QWORD rbp => Frame[BYTE -1].jit_pc_section, 0
             ; je =>interpreted
             // JIT specific: translate the jump address to a machine code address
-            ; gs sub RTEMP, [ RuntimeEnvironmentSlot::TextSection as i32 ]
+            ; sub RTEMP, rbp => Frame[BYTE -1].text_section
             ; shr RTEMP, 1
-            ; gs add RTEMP, [ RuntimeEnvironmentSlot::JitPcSection as i32 ]
+            ; add RTEMP, rbp => Frame[BYTE -1].jit_pc_section
             ; mov WTEMP, [RTEMP]
-            ; gs add RTEMP, [ RuntimeEnvironmentSlot::JitTextSection as i32 ]
+            ; add RTEMP, rbp => Frame[BYTE -1].jit_text_section
             ; jmp =>resolved
             ; =>interpreted
             ; lea RINSN, [RTEMP + 8]
@@ -129,7 +129,7 @@ impl SupportingCode {
             ; add rsp, 8
             // `EXIT` leaves the remaining budget in `meter`, convert back to the instruction limit.
             ; add RMETER, [rsp + 16]
-            ; gs sub QWORD [ RuntimeEnvironmentSlot::CallDepth as i32 ], 1
+            ; sub QWORD rbp => Frame[BYTE -1].call_depth, 1
             ; ret
         );
 
@@ -172,25 +172,37 @@ impl SupportingCode {
             }
         }
 
-        // Expects `%gs` to point at the `EbpfVm`, `RINSN`, `RMETER` to be initialized and `RTEMP`
-        // to be initialized to the address of the machine code to start executing at.
+        // Expects `rsi` to point at the `Frame`, and `RINSN` and `RMETER` to be initialized to
+        // their namesakes.
         let entry_point = unsafe { out.buffer.add(out.offset()) };
         let after_dispatch = out.new_dynamic_label();
+        let frame_size = std::mem::size_of::<Frame>();
         x64asm!(out
             ; push rbp
             ; mov rbp, rsp
-            ; sub rsp, 16
-            // `exit` jumps to `[rbp - 8]` from whatever depth of internal calls it's at.
-            ; lea rsi, [ => after_dispatch ]
-            ; mov [rbp - 8], rsi
+            ; sub rsp, frame_size as i32
+            ; lea rdi, rbp => Frame[BYTE -1]
+            ; mov ecx, (frame_size / 8) as i32
+            ; rep movsq // SYSV ABI: The direction flag is clear on function entry.
+            // `exit` jumps to `after_dispatch` from whatever depth of internal calls it's at.
+            ; lea rdi, [ => after_dispatch ]
+            ; mov rbp => Frame[BYTE -1].exit, rdi
+            ; mov rsi, rbp => Frame[BYTE -1].vm
+        );
+        // `rsi` is one of the BPF registers, but temporarily holds the `EbpfVm` right now, so it is
+        // overwritten last.
+        const { assert!(GPREG_MAP[0] == RSI) };
+        for (i, &reg) in GPREG_MAP.iter().enumerate().rev() {
+            x64asm!(out; mov Rq(reg), [rsi + RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8]);
+        }
+
+        x64asm!(out
+            ; call QWORD rbp => Frame[BYTE -1].start
+            ;=>after_dispatch
+            ; mov rax, rbp => Frame[BYTE -1].vm
         );
         for (i, &reg) in GPREG_MAP.iter().enumerate() {
-            x64asm!(out; gs mov Rq(reg), [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ]);
-        }
-        x64asm!(out; call RTEMP);
-        out.dynamic_label(after_dispatch);
-        for (i, &reg) in GPREG_MAP.iter().enumerate() {
-            x64asm!(out; gs mov [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ], Rq(reg));
+            x64asm!(out; mov [rax + RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8], Rq(reg));
         }
         x64asm!(out
             ; mov rsp, rbp
@@ -216,7 +228,7 @@ impl SupportingCode {
         // Also the return address and `invoke_support`'s target.
         let needs_stack_alignment = sysv64_call_needs_stack_alignment(pushed + 16);
         x64asm!(out
-            ; rdgsbase rdi
+            ; mov rdi, rax
             ; mov esi, [RTEMP - 4]
             // `rdx` is `meter`.
             ; sub rdx, RTEMP
@@ -226,7 +238,7 @@ impl SupportingCode {
             x64asm!(out; sub rsp, 8);
         }
         debug_assert_sysv64_call_stack_alignment(out);
-        x64asm!(out; gs call QWORD [ RuntimeEnvironmentSlot::SyscallDispatcher as i32 ]);
+        x64asm!(out; call QWORD rbp => Frame[BYTE -1].syscall_dispatcher);
         if needs_stack_alignment {
             x64asm!(out; add rsp, 8);
         }
@@ -288,8 +300,7 @@ impl SupportingCode {
         x64asm!(out
             ; movsx rsi, WORD [RTEMP - 6]
             ; add rsi, [ BYTE base + rsp ]
-            ; gs mov rdi, [ RuntimeEnvironmentSlot::MemoryMapping as i32 ]
-            ; rdgsbase rax
+            ; mov rdi, [rax + RuntimeEnvironmentSlot::MemoryMapping as i32]
             ; add rax, RuntimeEnvironmentSlot::ProgramResult as i32
         );
         match kind {
@@ -401,30 +412,32 @@ const SYSV64_CLOBBERED: u16 = reg_mask(&[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R
 /// The registers `clobber_for_sysv64_call` pushes, rather than spills into `vm.registers`.
 const SYSV64_PUSHED: u16 = SYSV64_CLOBBERED & !reg_mask(&GPREG_MAP);
 
-/// Save the registers that a `sysv64` host function call would clobber: the BPF registers are
-/// spilled into `vm.registers`, the rest are pushed in the order of their register numbers (for
-/// the internal registers that is `insn`, `temp`, `meter`.)
+/// Save the registers that a `sysv64` host function call would clobber: the rest are pushed in
+/// the order of their register numbers (for the internal registers that is `insn`, `temp`,
+/// `meter`), the BPF registers are spilled into `vm.registers`. Leaves the `EbpfVm` in `rax`.
 ///
 /// Returns the number of bytes pushed. The stack is not aligned for the call, see
 /// `sysv64_call_needs_stack_alignment`. Does not touch the flags.
 fn clobber_for_sysv64_call(out: &mut InterpreterGenerator) -> i32 {
-    for (i, &reg) in GPREG_MAP.iter().enumerate() {
-        if SYSV64_CLOBBERED & 1 << reg != 0 {
-            x64asm!(out; gs mov [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ], Rq(reg));
-        }
-    }
     for reg in 0..16 {
         if SYSV64_PUSHED & 1 << reg != 0 {
             x64asm!(out; push Rq(reg));
+        }
+    }
+    const { assert!(SYSV64_PUSHED & 1 << RAX != 0) };
+    x64asm!(out; mov rax, rbp => Frame[BYTE -1].vm);
+    for (i, &reg) in GPREG_MAP.iter().enumerate() {
+        if SYSV64_CLOBBERED & 1 << reg != 0 {
+            x64asm!(out; mov [rax + RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8], Rq(reg));
         }
     }
     SYSV64_PUSHED.count_ones() as i32 * 8
 }
 
 /// Does `rsp` need to be adjusted by 8 bytes for a host function call, given the number of bytes
-/// pushed since the BPF code? `rsp` is always `8 mod 16` in the BPF code.
+/// pushed since the BPF code? The stack is always aligned in the BPF code.
 const fn sysv64_call_needs_stack_alignment(pushed: i32) -> bool {
-    pushed % 16 == 0
+    pushed % 16 != 0
 }
 
 /// Trap if the stack is not aligned for a host function call.
@@ -445,14 +458,15 @@ fn debug_assert_sysv64_call_stack_alignment(out: &mut InterpreterGenerator) {
 
 /// Restore the registers saved by `clobber_for_sysv64_call`. Does not touch the flags.
 fn restore_from_sysv64_call(out: &mut InterpreterGenerator) {
+    x64asm!(out; mov rax, rbp => Frame[BYTE -1].vm);
+    for (i, &reg) in GPREG_MAP.iter().enumerate() {
+        if SYSV64_CLOBBERED & 1 << reg != 0 {
+            x64asm!(out; mov Rq(reg), [rax + RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8]);
+        }
+    }
     for reg in (0..16).rev() {
         if SYSV64_PUSHED & 1 << reg != 0 {
             x64asm!(out; pop Rq(reg));
-        }
-    }
-    for (i, &reg) in GPREG_MAP.iter().enumerate() {
-        if SYSV64_CLOBBERED & 1 << reg != 0 {
-            x64asm!(out; gs mov Rq(reg), [ RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8 ]);
         }
     }
 }
@@ -507,7 +521,7 @@ extern "sysv64" fn store<T: crate::aligned_memory::Pod>(
 }
 
 /// `remaining` is the budget left after the `CALL_IMM` instruction itself.
-/// The address of the function to store into `vm.syscall_dispatcher`.
+/// The address of the function to store into `Frame::syscall_dispatcher`.
 pub(super) fn syscall_dispatcher<C: crate::vm::ContextObject>() -> *const u8 {
     dispatch_syscall::<C> as *const u8
 }

@@ -38,6 +38,8 @@ fn main() {
         let start = std::time::Instant::now();
         std::hint::black_box(solana_sbpf::codegen::x64::enter(
             &bpf,
+            solana_sbpf::ebpf::MM_BYTECODE_START,
+            Some((&program.pc_section, buffer.as_ptr())),
             entrypoint,
             bpf.as_ptr().wrapping_add(8),
             &mut vm,
