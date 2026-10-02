@@ -1241,6 +1241,70 @@ fn test_memory_access_preserves_registers() {
 }
 
 #[test]
+fn test_err_ldxdw_nomem_capped() {
+    // The access violation would only be detected after running out of budget.
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0x0
+        ldxdw r0, [r1+6]
+        exit",
+        NO_INPUT,
+        TestContextObject::new(1),
+        ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+    );
+}
+
+#[test]
+fn test_memory_access_preserves_registers() {
+    test_interpreter_and_jit_asm!(
+        "
+        mov64 r0, 0x1
+        mov64 r1, 0x2
+        mov64 r2, 0x4
+        mov64 r3, 0x8
+        mov64 r4, 0x10
+        mov64 r5, 0x20
+        mov64 r6, 0x40
+        mov64 r7, 0x80
+        mov64 r8, 0x100
+        mov64 r9, 0x200
+        stxdw [r10-8], r9
+        stdw [r10-16], 0x400
+        ldxdw r9, [r10-8]
+        ldxdw r9, [r10-16]
+        add64 r0, r1
+        add64 r0, r2
+        add64 r0, r3
+        add64 r0, r4
+        add64 r0, r5
+        add64 r0, r6
+        add64 r0, r7
+        add64 r0, r8
+        add64 r0, r9
+        exit",
+        NO_INPUT,
+        TestContextObject::new(24),
+        ProgramResult::Ok(0x5ff),
+    );
+}
+
+#[test]
+fn test_store_imm_truncation() {
+    test_interpreter_and_jit_asm!(
+        "
+        stdw [r10-8], -1
+        stw [r10-8], 0x12345678
+        sth [r10-8], -2
+        stb [r10-8], 0x7f
+        ldxdw r0, [r10-8]
+        exit",
+        NO_INPUT,
+        TestContextObject::new(6),
+        ProgramResult::Ok(0xffffffff1234ff7f),
+    );
+}
+
+#[test]
 fn test_ldxb_all() {
     let input = [
         0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, //

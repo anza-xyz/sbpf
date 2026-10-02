@@ -531,6 +531,8 @@ pub const EXIT: u8 = BPF_JMP64 | BPF_EXIT;
 pub const BPF_CLS_MASK: u8 = 0x07;
 /// Mask to extract the arithmetic operation code from an instruction operation code.
 pub const BPF_ALU_OP_MASK: u8 = 0xf0;
+/// Mask to extract the access size from a load or store operation code.
+pub const BPF_SIZE_MASK: u8 = 0x18;
 
 /// An eBPF instruction.
 ///

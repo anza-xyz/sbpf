@@ -289,6 +289,8 @@ pub enum RuntimeEnvironmentSlot {
     JitPcSection = offset_of!(EbpfVm<DummyContextObject>, jit_pc_section) as isize,
     /// [EbpfVm::jit_text_section]
     JitTextSection = offset_of!(EbpfVm<DummyContextObject>, jit_text_section) as isize,
+    /// [EbpfVm::syscall_dispatcher]
+    SyscallDispatcher = offset_of!(EbpfVm<DummyContextObject>, syscall_dispatcher) as isize,
 }
 
 /// A virtual machine to run eBPF programs.
@@ -391,6 +393,8 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub jit_pc_section: *const u32,
     /// For `ExecutionMode::DynasmJit`: the machine code being executed.
     pub jit_text_section: *const u8,
+    /// For `ExecutionMode::Dynasm*`: resolves and invokes syscalls on behalf of the generated code.
+    pub syscall_dispatcher: *const u8,
     /// TCP port for the debugger interface
     #[cfg(feature = "debugger")]
     pub debug_port: Option<u16>,
@@ -443,6 +447,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             text_section_host_to_vm: 0,
             jit_pc_section: ptr::null(),
             jit_text_section: ptr::null(),
+            syscall_dispatcher: ptr::null(),
         }
     }
 

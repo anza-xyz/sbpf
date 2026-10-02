@@ -50,6 +50,8 @@ tracer = []
 debugger = ["dep:gdbstub"]
 shuttle-test = ["dep:shuttle"]
 conf-stack-frame-size = []
+# Dump the generated interpreter and emit additional runtime checks into the generated code.
+codegen_debug = []
 
 [dev-dependencies]
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
@@ -73,6 +75,3 @@ harness = false
 [[bench]]
 name = "vm_execution"
 harness = false
-
-[lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ["cfg(sbpf_dump_interpreter)"] }

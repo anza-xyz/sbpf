@@ -314,6 +314,7 @@ macro_rules! test_interpreter_and_jit {
         $executable.verify::<RequisiteVerifier>().unwrap();
         let host_buffer = solana_sbpf::memory_region::HostMemoryObject::host($mem);
         let mut jit_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
+        let original_input_mem = jit_input_mem.clone();
         let address_translation = $executable.get_config().enable_address_translation;
         let (interp_input_start, jit_input_start) = if !address_translation {
             (host_buffer.ptr().addr() as u64, jit_input_mem.as_ptr().addr() as u64)
@@ -433,12 +434,12 @@ macro_rules! test_interpreter_and_jit {
         // dynasm variants
         {
             use solana_sbpf::memory_region::HostBuffer;
-            let mut dynasm_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
             for (mode_name, mode) in [
                 ("dynasm jit", $crate::solana_sbpf::vm::ExecutionMode::DynasmJit),
                 ("dynasm interpreted", $crate::solana_sbpf::vm::ExecutionMode::DynasmInterpreted),
             ] {
                 context_object.remaining = original_budget;
+                let mut dynasm_input_mem = original_input_mem.clone();
                 let mem = match host_buffer {
                     HostBuffer::Immutable(_) => {
                         HostBuffer::Immutable(&raw const dynasm_input_mem[..])
@@ -455,7 +456,11 @@ macro_rules! test_interpreter_and_jit {
                     vec![mem_region],
                     None
                 );
-                vm.registers[1] = jit_input_start;
+                vm.registers[1] = if address_translation {
+                    ebpf::MM_INPUT_START
+                } else {
+                    dynasm_input_mem.as_ptr().addr() as u64
+                };
                 let mut mode = mode;
                 let (instruction_count_dynasm, result_dynasm) =
                     vm.execute_program(&$executable, &mut mode, &mut []);
@@ -471,6 +476,14 @@ macro_rules! test_interpreter_and_jit {
                     println!(
                         "[{mode_name}] Instruction meter of interpreter ({:?}) and dynasm ({:?}) diverged",
                         instruction_count_interpreter, instruction_count_dynasm,
+                    );
+                    diverged = true;
+                }
+                let input_after_interp = unsafe { host_buffer.ptr().as_ref().unwrap() };
+                if input_after_interp != dynasm_input_mem {
+                    println!(
+                        "[{mode_name}] input memory buffer is different: interp({:x?}), dynasm({:x?})",
+                        input_after_interp, dynasm_input_mem,
                     );
                     diverged = true;
                 }
