@@ -208,7 +208,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::OR32_IMM |
         ebpf::OR32_REG => x64asm!(out; or Rd(dst), ALU_SRC32),
         ebpf::OR64_IMM => x64asm!(out
-            ; mov WTEMP, ALU_SRC32
+            ; movsxd RTEMP, DWORD REL32_IMM
             ; or Rq(dst), RTEMP
         ),
         #[rustfmt::skip]
@@ -225,7 +225,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::AND32_REG => x64asm!(out; and Rd(dst), ALU_SRC32),
         #[rustfmt::skip]
         ebpf::AND64_IMM => x64asm!(out
-            ; mov WTEMP, ALU_SRC32
+            ; movsxd RTEMP, DWORD REL32_IMM
             ; and Rq(dst), RTEMP
         ),
         #[rustfmt::skip]
@@ -236,7 +236,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::XOR32_IMM |
         ebpf::XOR32_REG => x64asm!(out; xor Rd(dst), ALU_SRC32),
         ebpf::XOR64_IMM => x64asm!(out
-            ; mov WTEMP, ALU_SRC32
+            ; movsxd RTEMP, DWORD REL32_IMM
             ; xor Rq(dst), RTEMP
         ),
         ebpf::XOR64_REG => x64asm!(out; xor Rq(dst), Rq(src)),
@@ -386,14 +386,22 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
             bpf_validate_meter(out);
             let is_64 = (out.op() & ebpf::BPF_CLS_MASK) == ebpf::BPF_JMP64;
             let is_imm = (out.op() & ebpf::BPF_X) != ebpf::BPF_X;
-            match (is_64, is_imm) {
-                (true, true) => x64asm!(out
+            let is_jset = (out.op() & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
+            match (is_64, is_imm, is_jset) {
+                (true, true, false) => x64asm!(out
                     ; movsxd RTEMP, DWORD REL32_IMM
                     ; cmp Rq(dst), RTEMP
                 ),
-                (true, false) => x64asm!(out; cmp Rq(dst), Rq(src)),
-                (false, true) => x64asm!(out; cmp Rd(dst), DWORD REL32_IMM),
-                (false, false) => x64asm!(out; cmp Rd(dst), Rd(src)),
+                (true, true, true) => x64asm!(out
+                    ; movsxd RTEMP, DWORD REL32_IMM
+                    ; test Rq(dst), RTEMP
+                ),
+                (true, false, false) => x64asm!(out; cmp Rq(dst), Rq(src)),
+                (true, false, true) => x64asm!(out; test Rq(dst), Rq(src)),
+                (false, true, false) => x64asm!(out; cmp Rd(dst), DWORD REL32_IMM),
+                (false, true, true) => x64asm!(out; test Rd(dst), DWORD REL32_IMM),
+                (false, false, false) => x64asm!(out; cmp Rd(dst), Rd(src)),
+                (false, false, true) => x64asm!(out; test Rd(dst), Rd(src)),
             }
             let fallthrough = out.new_dynamic_label();
             match out.op() & ebpf::BPF_ALU_OP_MASK {
@@ -528,19 +536,6 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
             }
         }
 
-        ebpf::LMUL32_IMM
-        | ebpf::LMUL32_REG
-        | ebpf::SREM32_IMM
-        | ebpf::SREM32_REG
-        | ebpf::LMUL64_IMM
-        | ebpf::LMUL64_REG
-        | ebpf::SREM64_IMM
-        | ebpf::SREM64_REG => {
-            // TODO
-            load_next_insn(out);
-            terminate(out, SIG_INVALID_INSN)
-        }
-
         0..=3
         | 6
         | 8..=11
@@ -560,10 +555,12 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         | 112
         | 120
         | 128..=131
+        | 134
         | 136..=140
-        | 143..=147
+        | 142..=147
+        | 150
         | 152..=155
-        | 157
+        | 157..=158
         | 160..=163
         | 168..=171
         | 176..=179
@@ -573,10 +570,9 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         | 208..=211
         | 215..=219
         | 223..=229
-        | 231..=237
-        | 239..=245
-        | 248..=253
-        | 255 => {
+        | 230..=237
+        | 238..=246
+        | 248..=255 => {
             load_next_insn(out);
             terminate(out, SIG_INVALID_INSN)
         }

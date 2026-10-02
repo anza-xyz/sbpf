@@ -483,6 +483,18 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
 
+        // `codegen::x64` is not going to implement these versions.
+        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+        if matches!(
+            executable.get_sbpf_version(),
+            SBPFVersion::V1 | SBPFVersion::V2
+        ) && matches!(
+            *mode,
+            ExecutionMode::DynasmJit | ExecutionMode::DynasmInterpreted
+        ) {
+            *mode = ExecutionMode::Jit;
+        }
+
         'execute: {
             match *mode {
                 ExecutionMode::Interpreted => {}
