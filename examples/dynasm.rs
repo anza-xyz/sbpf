@@ -1,5 +1,6 @@
 use solana_sbpf::{
-    program::{BuiltinProgram, SBPFVersion},
+    elf::Executable,
+    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
     vm::EbpfVm,
 };
 use std::sync::Arc;
@@ -16,12 +17,22 @@ fn main() {
     let iters = 500;
     let mut remaining = 0;
     let loader = Arc::new(BuiltinProgram::new_mock());
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        &bpf,
+        loader.clone(),
+        SBPFVersion::V3,
+        FunctionRegistry::default(),
+    )
+    .unwrap();
     for _ in 0..iters {
         let mut context = TestContextObject::new(BUDGET);
         let mut vm = EbpfVm::new(loader.clone(), SBPFVersion::V3, &mut context, 0);
         vm.previous_instruction_meter = BUDGET;
         let start = std::time::Instant::now();
-        std::hint::black_box(solana_sbpf::codegen::interpret_and_run(&bpf, 0, &mut vm));
+        std::hint::black_box(solana_sbpf::codegen::interpret_and_run(
+            &executable,
+            &mut vm,
+        ));
         remaining = BUDGET - vm.due_insn_count;
         duration += start.elapsed();
     }

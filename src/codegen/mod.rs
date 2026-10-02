@@ -1,11 +1,18 @@
+// Everything here is used by the architecture specific backends, of which there may be none.
+#![cfg_attr(not(target_arch = "x86_64"), allow(dead_code, unused_imports))]
+
+#[cfg(target_arch = "x86_64")]
 pub mod x64;
 
 use crate::ebpf;
+use crate::elf::Executable;
 use crate::error::{EbpfError, ProgramResult};
 use crate::vm::{ContextObject, EbpfVm};
 use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
 use dynasmrt::relocations::{Relocation, RelocationKind};
 use dynasmrt::{AssemblyOffset, DynamicLabel};
+use rand::rngs::SmallRng;
+use rand::{thread_rng, Rng, SeedableRng};
 use std::convert::TryFrom;
 
 /// Size of the stack frame allocated for each internal call (fixed frames, as in SBPFv3.)
@@ -88,9 +95,12 @@ fn template_insns() -> impl Iterator<Item = TemplateInsn> {
     })
 }
 
-/// Compile `bpf` and execute it, starting at `vm.registers[11]`.
-pub fn jit_and_run<C: ContextObject>(bpf: &[u8], bpf_vm_addr: u64, vm: &mut EbpfVm<C>) {
-    let program = x64::JIT_TEMPLATES.compile(bpf);
+#[cfg(target_arch = "x86_64")]
+/// Compile `executable` and execute it, starting at `vm.registers[11]`.
+pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
+    let (bpf_vm_addr, bpf) = executable.get_text_bytes();
+    let noop_instruction_rate = executable.get_config().noop_instruction_rate;
+    let program = x64::JIT_TEMPLATES.compile(bpf, noop_instruction_rate);
     let code = &program.text_section;
     let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len())
         .expect("failed to allocate executable memory for the JIT output");
@@ -113,8 +123,10 @@ pub fn jit_and_run<C: ContextObject>(bpf: &[u8], bpf_vm_addr: u64, vm: &mut Ebpf
     )
 }
 
-/// Interpret `bpf`, starting at `vm.registers[11]`.
-pub fn interpret_and_run<C: ContextObject>(bpf: &[u8], bpf_vm_addr: u64, vm: &mut EbpfVm<C>) {
+#[cfg(target_arch = "x86_64")]
+/// Interpret `executable`, starting at `vm.registers[11]`.
+pub fn interpret_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
+    let (bpf_vm_addr, bpf) = executable.get_text_bytes();
     let pc = vm.registers[11] as usize;
     let insn = &bpf[pc * ebpf::INSN_SIZE..][..2];
     let step = x64::interpreter_step(u16::from_le_bytes(<[u8; 2]>::try_from(insn).unwrap()));
@@ -334,7 +346,12 @@ pub struct JitTemplates<const SIZE: usize, R: Copy> {
     /// For `pc_section` entries that are not valid jump targets (e.g. the second
     /// halves of 16 byte instructions.)
     invalid_jump_target: Template<SIZE, TemplateRelocation<R>>,
+    /// Inserted between the other templates to diversify the output.
+    noop: Template<SIZE, TemplateRelocation<R>>,
 }
+
+/// Longest run of no-ops `JitTemplates::compile` may insert ahead of the code.
+const MAX_START_PADDING_LENGTH: usize = 256;
 
 /// The JIT output for a program.
 pub struct JitProgram {
@@ -351,19 +368,42 @@ impl<const SIZE: usize, R: Relocation + Copy> JitTemplates<SIZE, R> {
     /// The result is a two pass algorithm where the first pass determines ahead of time where
     /// each instruction's machine code will be, allowing for e.g. forward jump relocations to be
     /// resolved immediately during the emission.
-    pub fn compile(&self, bpf: &[u8]) -> JitProgram {
+    ///
+    /// See `Config::noop_instruction_rate` for `noop_instruction_rate`.
+    pub fn compile(&self, bpf: &[u8], noop_instruction_rate: u32) -> JitProgram {
         let (program, rest) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
         assert!(rest.is_empty());
         let mut text_section = Vec::<u8>::from(self.invalid_jump_target.buffer());
         let invalid_jump_target_loc = 0;
 
+        // The no-ops diversify the output like `JitCompiler` does, except that they can only go in
+        // between the templates, so the rate counts templates rather than host instructions. The
+        // second pass replays the decisions of the first one with a clone of the RNG.
+        let mut rng = (noop_instruction_rate != 0).then(|| {
+            SmallRng::from_rng(thread_rng()).expect("failed to seed the JIT diversification")
+        });
+        let start_padding = |rng: &mut Option<SmallRng>| {
+            rng.as_mut()
+                .map_or(0, |rng| rng.gen_range(0..MAX_START_PADDING_LENGTH))
+        };
+        let insert_noop = |rng: &mut Option<SmallRng>| {
+            rng.as_mut()
+                .is_some_and(|rng| rng.gen_ratio(1, noop_instruction_rate))
+        };
+        let noop = self.noop.buffer();
+
         let mut pc_section = Vec::with_capacity(program.len());
         let mut position = text_section.len();
+        let mut first_pass_rng = rng.clone();
+        position += start_padding(&mut first_pass_rng) * noop.len();
         let mut program_iter = program.iter();
         while let Some(insn) = program_iter.next() {
             let insn_size = insn_size(insn[0]);
             let insn = u64::from_le_bytes(*insn);
             let template = &self.insns[insn as u16 as usize];
+            if insert_noop(&mut first_pass_rng) {
+                position += noop.len();
+            }
             pc_section.push(u32::try_from(position).expect("JIT output too large"));
             position += template.offset();
             for _ in 1..(insn_size / 8) {
@@ -371,10 +411,19 @@ impl<const SIZE: usize, R: Relocation + Copy> JitTemplates<SIZE, R> {
                 pc_section.push(invalid_jump_target_loc);
             }
         }
+        if insert_noop(&mut first_pass_rng) {
+            position += noop.len();
+        }
         position += self.execution_overrun.offset();
 
         text_section.reserve(position - text_section.len());
+        for _ in 0..start_padding(&mut rng) {
+            text_section.extend_from_slice(noop);
+        }
         let mut emit = |pc, insn, template: &Template<SIZE, TemplateRelocation<R>>| {
+            if insert_noop(&mut rng) {
+                text_section.extend_from_slice(noop);
+            }
             let template_start = text_section.len();
             text_section.extend_from_slice(template.buffer());
             for relocation in template.relocations() {
@@ -407,6 +456,7 @@ impl<const SIZE: usize, R: Relocation + Copy> JitTemplates<SIZE, R> {
             emit(pc, insn, &self.insns[insn as u16 as usize]);
         }
         emit(program.len(), 0, &self.execution_overrun);
+        debug_assert_eq!(text_section.len(), position);
         JitProgram {
             pc_section,
             text_section,
@@ -414,7 +464,7 @@ impl<const SIZE: usize, R: Relocation + Copy> JitTemplates<SIZE, R> {
     }
 }
 
-#[cfg(feature = "codegen_debug")]
+#[cfg(all(feature = "codegen_debug", target_os = "linux"))]
 /// Emit a perf jitdump (`/tmp/jit-<pid>.dump`) describing the code in `ptr..ptr + len`.
 fn write_perf_jitdump(ptr: *const u8, len: usize, elf_machine: u32) {
     use std::io::Write as _;

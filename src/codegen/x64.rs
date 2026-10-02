@@ -779,10 +779,13 @@ pub static JIT_TEMPLATES: LazyLock<JitTemplates<MAX_JIT_TEMPLATE_SIZE, SimpleRel
         let execution_overrun = generator.finalize();
         terminate(&mut generator, SIG_INVALID_INSN);
         let invalid_jump_target = generator.finalize();
+        x64asm!(generator; nop);
+        let noop = generator.finalize();
         JitTemplates {
             insns,
             execution_overrun,
             invalid_jump_target,
+            noop,
         }
     });
 
@@ -801,9 +804,70 @@ unsafe impl Sync for Interpreter {}
 
 impl Drop for Interpreter {
     fn drop(&mut self) {
-        unsafe {
-            libc::munmap(self.buffer.cast(), InterpreterGenerator::STEPS_SIZE);
+        unsafe { maps::unmap(self.buffer, InterpreterGenerator::STEPS_SIZE) }
+    }
+}
+
+/// Memory for the interpreter, which is addressed with absolute 32-bit addresses, so it has to be
+/// within the first 2 GiB of the address space.
+#[cfg(target_os = "linux")]
+mod maps {
+    /// Read-write, until `make_exec`.
+    pub(super) unsafe fn map(len: usize) -> *mut u8 {
+        #[cfg(feature = "codegen_debug")]
+        let file = {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open("interpreter.bin")
+                .unwrap();
+            file.set_len(len as u64).unwrap();
+            file
+        };
+        #[cfg(feature = "codegen_debug")]
+        let (flags, fd) = (libc::MAP_SHARED, std::os::fd::AsRawFd::as_raw_fd(&file));
+        #[cfg(not(feature = "codegen_debug"))]
+        let (flags, fd) = (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1);
+        let buffer = unsafe {
+            libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ | libc::PROT_WRITE,
+                flags | libc::MAP_32BIT,
+                fd,
+                0,
+            )
+        };
+        if buffer == libc::MAP_FAILED {
+            panic!("libc::mmap failed to allocate executable memory for the interpreter");
         }
+        buffer.cast()
+    }
+
+    pub(super) unsafe fn make_exec(buffer: *mut u8, len: usize) {
+        unsafe { libc::mprotect(buffer.cast(), len, libc::PROT_READ | libc::PROT_EXEC) };
+    }
+
+    pub(super) unsafe fn unmap(buffer: *mut u8, len: usize) {
+        unsafe { libc::munmap(buffer.cast(), len) };
+    }
+}
+
+// TODO: e.g. `VirtualAlloc` with an address hint on Windows.
+#[cfg(not(target_os = "linux"))]
+mod maps {
+    pub(super) unsafe fn map(_len: usize) -> *mut u8 {
+        unimplemented!("allocating memory within the first 2 GiB on this OS")
+    }
+
+    pub(super) unsafe fn make_exec(_buffer: *mut u8, _len: usize) {
+        unreachable!()
+    }
+
+    pub(super) unsafe fn unmap(_buffer: *mut u8, _len: usize) {
+        unreachable!()
     }
 }
 
@@ -828,37 +892,9 @@ impl InterpreterGenerator {
 
     pub fn new() -> Self {
         unsafe {
-            #[cfg(feature = "codegen_debug")]
-            let file = {
-                let file = std::fs::OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(true)
-                    .open("interpreter.bin")
-                    .unwrap();
-                file.set_len(Self::STEPS_SIZE as u64).unwrap();
-                file
-            };
-            #[cfg(feature = "codegen_debug")]
-            let (flags, fd) = (libc::MAP_SHARED, std::os::fd::AsRawFd::as_raw_fd(&file));
-            #[cfg(not(feature = "codegen_debug"))]
-            let (flags, fd) = (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1);
-
-            let buffer = libc::mmap(
-                std::ptr::null_mut(),
-                Self::STEPS_SIZE,
-                libc::PROT_READ | libc::PROT_WRITE,
-                flags | libc::MAP_32BIT,
-                fd,
-                0,
-            );
-            if buffer == libc::MAP_FAILED {
-                panic!("libc::mmap failed to allocate executable memory for the interpreter");
-            }
-
+            let buffer = maps::map(Self::STEPS_SIZE);
             let mut this = Self {
-                buffer: buffer.cast(),
+                buffer,
                 relocs: LabelRelocs::new(),
                 offset: 0,
                 insn: TemplateInsn {
@@ -1030,16 +1066,10 @@ static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCode)> = LazyL
     };
     generator.relocs.resolve(buffer, Some(base_addr as usize));
 
-    #[cfg(feature = "codegen_debug")]
+    #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
     // EM_X86_64
     super::write_perf_jitdump(generator.buffer, InterpreterGenerator::STEPS_SIZE, 62);
-    unsafe {
-        libc::mprotect(
-            generator.buffer.cast(),
-            InterpreterGenerator::STEPS_SIZE,
-            libc::PROT_READ | libc::PROT_EXEC,
-        );
-    }
+    unsafe { maps::make_exec(generator.buffer, InterpreterGenerator::STEPS_SIZE) };
     (
         Interpreter {
             buffer: generator.buffer,

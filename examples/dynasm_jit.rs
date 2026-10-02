@@ -13,7 +13,8 @@ fn main() {
         255, 0x00, 0x00, 0x20, 0x00, 149, 0, 0, 0, 0, 0, 0, 0,
     ]);
 
-    let program = solana_sbpf::codegen::x64::JIT_TEMPLATES.compile(&bpf);
+    // No no-ops, so that the timings are reproducible.
+    let program = solana_sbpf::codegen::x64::JIT_TEMPLATES.compile(&bpf, 0);
     let code = &program.text_section;
     for b in code {
         print!("{:02X}", b);
@@ -49,13 +50,4 @@ fn main() {
         ));
     }
     println!("{:?}, remaining budget: {remaining}", duration / iters);
-
-    // let mut duration = std::time::Duration::new(0, 0);
-    // let iters = 500;
-    // for i in 0..iters {
-    //         let start = std::time::Instant::now();
-    //         std::hint::black_box(solana_sbpf::codegen::x64::interpret(&bpf));
-    //         duration += start.elapsed();
-    // }
-    // println!("{:?}", duration / iters);
 }
