@@ -624,7 +624,7 @@ fn bpf_validate_meter<G: X64Generator + ?Sized>(out: &mut G) {
 const MAX_JIT_TEMPLATE_SIZE: usize = 48;
 
 struct JITGenerator {
-    template: super::Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation<SimpleRelocation>>,
+    template: super::Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation>,
     /// With BPF register numbers.
     insn: TemplateInsn,
     /// Temporary relocations within the code that will be resolved before the template is
@@ -652,9 +652,7 @@ impl JITGenerator {
 
     /// Resolve all the relocations that can be resolved without knowing the specific eBPF
     /// instruction and return the template. The generator is reset to generate the next template.
-    fn finalize(
-        &mut self,
-    ) -> Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation<SimpleRelocation>> {
+    fn finalize(&mut self) -> Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation> {
         let mut template = std::mem::replace(&mut self.template, Template::new());
         self.relocs.resolve(template.buffer_mut(), None);
         template
@@ -697,16 +695,14 @@ impl X64Generator for JITGenerator {
         ref_offset: u8,
         kind: u8,
     ) {
-        let patch = PatchFields::new(target_offset, field_offset, ref_offset, kind);
+        let patch =
+            PatchFields::<SimpleRelocation>::new(target_offset, field_offset, ref_offset, kind);
         let kind = match name {
             "template_taken_branch" => TemplateRelocationKind::TakenBranch,
             _ => panic!("global reference to an unknown symbol {}", name),
         };
-        self.template.add_relocation(TemplateRelocation {
-            location: self.offset(),
-            patch,
-            kind,
-        });
+        self.template
+            .add_relocation(TemplateRelocation::new(kind, self.offset(), patch));
     }
 
     fn template_reloc(
@@ -717,12 +713,10 @@ impl X64Generator for JITGenerator {
         ref_offset: u8,
     ) {
         // kind = Absolute DWord
-        let patch = PatchFields::new(target_offset, field_offset, ref_offset, 0xC2);
-        self.template.add_relocation(TemplateRelocation {
-            location: self.offset(),
-            patch,
-            kind,
-        });
+        let patch =
+            PatchFields::<SimpleRelocation>::new(target_offset, field_offset, ref_offset, 0xC2);
+        self.template
+            .add_relocation(TemplateRelocation::new(kind, self.offset(), patch));
     }
 
     fn dynamic_reloc(
@@ -765,29 +759,28 @@ impl X64Generator for JITGenerator {
 // TODO: when dynasm supports const codegen, we can make these be generated at compile time into an
 // array.
 /// JIT templates for SBPFv3.
-pub static JIT_TEMPLATES: LazyLock<JitTemplates<MAX_JIT_TEMPLATE_SIZE, SimpleRelocation>> =
-    LazyLock::new(|| {
-        let mut insns = Vec::with_capacity(0x10000);
-        let mut generator = JITGenerator::new();
-        for insn in template_insns() {
-            generator.insn = insn;
-            bpf_insn_template(&mut generator);
-            insns.push(generator.finalize());
-        }
-        load_next_insn(&mut generator);
-        terminate(&mut generator, SIG_EXECUTION_OVERRUN);
-        let execution_overrun = generator.finalize();
-        terminate(&mut generator, SIG_INVALID_INSN);
-        let invalid_jump_target = generator.finalize();
-        x64asm!(generator; nop);
-        let noop = generator.finalize();
-        JitTemplates {
-            insns,
-            execution_overrun,
-            invalid_jump_target,
-            noop,
-        }
-    });
+pub static JIT_TEMPLATES: LazyLock<JitTemplates<MAX_JIT_TEMPLATE_SIZE>> = LazyLock::new(|| {
+    let mut insns = Vec::with_capacity(0x10000);
+    let mut generator = JITGenerator::new();
+    for insn in template_insns() {
+        generator.insn = insn;
+        bpf_insn_template(&mut generator);
+        insns.push(generator.finalize());
+    }
+    load_next_insn(&mut generator);
+    terminate(&mut generator, SIG_EXECUTION_OVERRUN);
+    let execution_overrun = generator.finalize();
+    terminate(&mut generator, SIG_INVALID_INSN);
+    let invalid_jump_target = generator.finalize();
+    x64asm!(generator; nop);
+    let noop = generator.finalize();
+    JitTemplates {
+        insns,
+        execution_overrun,
+        invalid_jump_target,
+        noop,
+    }
+});
 
 /// The interpreter step for the instruction with the lower 16 bits `insn`.
 pub(super) fn interpreter_step(insn: u16) -> *const u8 {

@@ -14,6 +14,7 @@ use dynasmrt::{AssemblyOffset, DynamicLabel};
 use rand::rngs::SmallRng;
 use rand::{thread_rng, Rng, SeedableRng};
 use std::convert::TryFrom;
+use std::mem::MaybeUninit;
 
 /// Size of the stack frame allocated for each internal call (fixed frames, as in SBPFv3.)
 const STACK_FRAME_SIZE: i32 = 4096;
@@ -167,10 +168,6 @@ impl<const SIZE: usize, R: Copy> Template<SIZE, R> {
         }
     }
 
-    pub const fn buffer(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.buffer.as_ptr(), self.bytes) }
-    }
-
     pub const fn buffer_mut(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.bytes) }
     }
@@ -314,40 +311,110 @@ enum TemplateRelocationKind {
 }
 
 /// A relocation that can only be resolved once the template is instantiated for a specific eBPF
-/// instruction at a specific location.
+/// instruction at a specific location: a 32-bit field in the template, set to the target of the
+/// relocation plus `addend`.
 #[derive(Clone, Copy)]
-struct TemplateRelocation<R> {
-    /// Offset within the template right past the instruction containing the field to patch.
-    location: usize,
-    patch: PatchFields<R>,
+struct TemplateRelocation {
+    /// Offset of the field within the template.
+    field: u8,
+    /// For relative relocations, this already accounts for where the field is in the template,
+    /// but not for where the template is in the output.
+    addend: i32,
     kind: TemplateRelocationKind,
 }
 
-impl<R: Relocation + Copy> TemplateRelocation<R> {
-    /// Patch the relocation into the instantiated template.
-    ///
-    /// `text` must be the buffer into which the template was copied, starting at `template_start`.
-    /// `target` is an offset into `text` for relative relocations or the value to write for
-    /// absolute ones.
-    fn apply(&self, text: &mut [u8], template_start: usize, target: usize) {
-        let loc = self.patch.at(template_start + self.location);
-        let range = loc.range(0);
-        loc.patch(&mut text[range], 0, target)
-            .expect("impossible relocation");
+impl TemplateRelocation {
+    /// `patch` is a relocation reported by `dynasm` at `location` within the template.
+    fn new<R: Relocation>(
+        kind: TemplateRelocationKind,
+        location: usize,
+        patch: PatchFields<R>,
+    ) -> Self {
+        let relative = match kind {
+            TemplateRelocationKind::TakenBranch => true,
+            TemplateRelocationKind::InsnOffset
+            | TemplateRelocationKind::TakenBranchMeterAdjustment => false,
+        };
+        assert!(
+            match patch.relocation.kind() {
+                RelocationKind::Relative => relative,
+                RelocationKind::Absolute => !relative,
+                RelocationKind::RelToAbs | RelocationKind::AbsToRel => false,
+            },
+            "unsupported template relocation"
+        );
+        assert_eq!(
+            patch.relocation.size(),
+            4,
+            "unsupported template relocation"
+        );
+        let reference = if relative {
+            location - usize::from(patch.ref_offset)
+        } else {
+            0
+        };
+        let field = location - usize::from(patch.field_offset);
+        // The template ends no earlier than `location`, so the field is within it. `apply` relies
+        // on this.
+        assert!(field + 4 <= location, "unsupported template relocation");
+        Self {
+            field: u8::try_from(field).unwrap(),
+            addend: i32::try_from(patch.target_offset - reference as isize).unwrap(),
+            kind,
+        }
+    }
+
+    /// Patch the relocation into `template`, instantiated for the instruction `insn` at `pc`, at
+    /// `template_start` in the output.
+    #[inline(always)]
+    fn apply<const SIZE: usize>(
+        &self,
+        template: &mut [MaybeUninit<u8>; SIZE],
+        template_start: usize,
+        pc: usize,
+        insn: u64,
+        pc_section: &[u32],
+    ) {
+        let off = (insn >> 16) as i16 as isize;
+        let target = match self.kind {
+            TemplateRelocationKind::InsnOffset => pc * ebpf::INSN_SIZE,
+            TemplateRelocationKind::TakenBranchMeterAdjustment => {
+                (off * ebpf::INSN_SIZE as isize) as usize
+            }
+            TemplateRelocationKind::TakenBranch => {
+                let target_pc = (pc as isize)
+                    .checked_add(1 + off)
+                    .and_then(|target_pc| usize::try_from(target_pc).ok());
+                // FIXME: the verifier should have rejected these.
+                let target = *target_pc
+                    .and_then(|target_pc| pc_section.get(target_pc))
+                    .expect("branch target out of bounds");
+                (target as usize).wrapping_sub(template_start)
+            }
+        };
+        let value = target.wrapping_add(self.addend as usize);
+        debug_assert!(
+            i32::try_from(value as isize).is_ok(),
+            "impossible relocation"
+        );
+        // Never clamps (see `new`), but lets the bounds checks go.
+        debug_assert!(usize::from(self.field) <= SIZE - 4);
+        let field = usize::from(self.field).min(SIZE - 4);
+        template[field..field + 4].write_copy_of_slice(&(value as u32).to_le_bytes());
     }
 }
 
 /// Machine code templates the JIT output is assembled from.
-pub struct JitTemplates<const SIZE: usize, R: Copy> {
+pub struct JitTemplates<const SIZE: usize> {
     /// Indexed by the lower 16 bits of an instruction.
-    insns: Vec<Template<SIZE, TemplateRelocation<R>>>,
+    insns: Vec<Template<SIZE, TemplateRelocation>>,
     /// Appended after the last instruction, as if it was at `pc = program.len()`.
-    execution_overrun: Template<SIZE, TemplateRelocation<R>>,
+    execution_overrun: Template<SIZE, TemplateRelocation>,
     /// For `pc_section` entries that are not valid jump targets (e.g. the second
     /// halves of 16 byte instructions.)
-    invalid_jump_target: Template<SIZE, TemplateRelocation<R>>,
+    invalid_jump_target: Template<SIZE, TemplateRelocation>,
     /// Inserted between the other templates to diversify the output.
-    noop: Template<SIZE, TemplateRelocation<R>>,
+    noop: Template<SIZE, TemplateRelocation>,
 }
 
 /// Longest run of no-ops `JitTemplates::compile` may insert ahead of the code.
@@ -361,7 +428,7 @@ pub struct JitProgram {
     pub text_section: Vec<u8>,
 }
 
-impl<const SIZE: usize, R: Relocation + Copy> JitTemplates<SIZE, R> {
+impl<const SIZE: usize> JitTemplates<SIZE> {
     /// Compile `bpf` into machine code.
     ///
     /// Due to the time sensitive nature of this code we try to do minimal amount of work here.
@@ -373,7 +440,6 @@ impl<const SIZE: usize, R: Relocation + Copy> JitTemplates<SIZE, R> {
     pub fn compile(&self, bpf: &[u8], noop_instruction_rate: u32) -> JitProgram {
         let (program, rest) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
         assert!(rest.is_empty());
-        let mut text_section = Vec::<u8>::from(self.invalid_jump_target.buffer());
         let invalid_jump_target_loc = 0;
 
         // The no-ops diversify the output like `JitCompiler` does, except that they can only go in
@@ -390,77 +456,90 @@ impl<const SIZE: usize, R: Relocation + Copy> JitTemplates<SIZE, R> {
             rng.as_mut()
                 .is_some_and(|rng| rng.gen_ratio(1, noop_instruction_rate))
         };
-        let noop = self.noop.buffer();
 
-        let mut pc_section = Vec::with_capacity(program.len());
-        let mut position = text_section.len();
+        let mut pc_sec = Vec::with_capacity(program.len());
+        let mut position = self.invalid_jump_target.offset();
         let mut first_pass_rng = rng.clone();
-        position += start_padding(&mut first_pass_rng) * noop.len();
+        position += start_padding(&mut first_pass_rng) * self.noop.offset();
         let mut program_iter = program.iter();
         while let Some(insn) = program_iter.next() {
             let insn_size = insn_size(insn[0]);
             let insn = u64::from_le_bytes(*insn);
             let template = &self.insns[insn as u16 as usize];
             if insert_noop(&mut first_pass_rng) {
-                position += noop.len();
+                position += self.noop.offset();
             }
-            pc_section.push(u32::try_from(position).expect("JIT output too large"));
+            pc_sec.push(u32::try_from(position).expect("JIT output too large"));
             position += template.offset();
             for _ in 1..(insn_size / 8) {
                 program_iter.next();
-                pc_section.push(invalid_jump_target_loc);
+                pc_sec.push(invalid_jump_target_loc);
             }
-        }
-        if insert_noop(&mut first_pass_rng) {
-            position += noop.len();
         }
         position += self.execution_overrun.offset();
 
-        text_section.reserve(position - text_section.len());
+        // Templates are always written out in large chunks to employ SIMD and avoid memcpy calls.
+        let mut text = Vec::with_capacity(position + SIZE);
+        Self::emit(&mut text, &pc_sec, 0, 0, &self.invalid_jump_target);
         for _ in 0..start_padding(&mut rng) {
-            text_section.extend_from_slice(noop);
+            Self::emit(&mut text, &pc_sec, 0, 0, &self.noop);
         }
-        let mut emit = |pc, insn, template: &Template<SIZE, TemplateRelocation<R>>| {
-            if insert_noop(&mut rng) {
-                text_section.extend_from_slice(noop);
-            }
-            let template_start = text_section.len();
-            text_section.extend_from_slice(template.buffer());
-            for relocation in template.relocations() {
-                let target = match relocation.kind {
-                    TemplateRelocationKind::InsnOffset => pc * ebpf::INSN_SIZE,
-                    TemplateRelocationKind::TakenBranchMeterAdjustment => {
-                        let off = (insn >> 16) as i16;
-                        (off as isize * ebpf::INSN_SIZE as isize) as usize
-                    }
-                    TemplateRelocationKind::TakenBranch => {
-                        let off = (insn >> 16) as i16;
-                        let target_pc = (pc as isize)
-                            .checked_add(1 + off as isize)
-                            .and_then(|target_pc| usize::try_from(target_pc).ok());
-                        // FIXME: the verifier should have rejected these.
-                        *target_pc
-                            .and_then(|target_pc| pc_section.get(target_pc))
-                            .expect("branch target out of bounds") as usize
-                    }
-                };
-                relocation.apply(&mut text_section, template_start, target);
-            }
-        };
         let mut program_iter = program.iter().enumerate();
         while let Some((pc, insn)) = program_iter.next() {
             let insn = u64::from_le_bytes(*insn);
             for _ in 1..(insn_size(insn as u8) / 8) {
                 program_iter.next();
             }
-            emit(pc, insn, &self.insns[insn as u16 as usize]);
+            if insert_noop(&mut rng) {
+                Self::emit(&mut text, &pc_sec, 0, 0, &self.noop);
+            }
+            let tpl = &self.insns[insn as u16 as usize];
+            Self::emit(&mut text, &pc_sec, pc, insn, tpl);
         }
-        emit(program.len(), 0, &self.execution_overrun);
-        debug_assert_eq!(text_section.len(), position);
+        Self::emit(
+            &mut text,
+            &pc_sec,
+            program.len(),
+            0,
+            &self.execution_overrun,
+        );
+        debug_assert_eq!(text.len(), position);
         JitProgram {
-            pc_section,
-            text_section,
+            pc_section: pc_sec,
+            text_section: text,
         }
+    }
+
+    /// Append `template` instantiated for the instruction `insn` at `pc` to `text`, which must
+    /// have at least `SIZE` bytes of spare capacity.
+    #[inline(always)]
+    fn emit(
+        text: &mut Vec<u8>,
+        pc_section: &[u32],
+        pc: usize,
+        insn: u64,
+        template: &Template<SIZE, TemplateRelocation>,
+    ) {
+        let start = text.len();
+        let out = text
+            .spare_capacity_mut()
+            .first_chunk_mut::<SIZE>()
+            .expect("JIT output size miscalculated!");
+        // Most of the templates are short, so they only get the first (fixed size) copy. The two
+        // copies are disjoint so that they do not get merged into a single variable size memcpy.
+        const SHORT: usize = 16;
+        const { assert!(SIZE >= SHORT) };
+        let (out_short, out_rest) = out.split_at_mut(SHORT);
+        let (short, rest) = template.buffer.split_at(SHORT);
+        out_short.write_copy_of_slice(short);
+        if template.offset() > SHORT {
+            out_rest.write_copy_of_slice(rest);
+        }
+        for relocation in template.relocations() {
+            relocation.apply(out, start, pc, insn, pc_section);
+        }
+        // SAFETY: just initialized at least the template's length past the end.
+        unsafe { text.set_len(start + template.offset()) };
     }
 }
 
