@@ -12,7 +12,7 @@ use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
 use dynasmrt::relocations::{Relocation, RelocationKind};
 use dynasmrt::{AssemblyOffset, DynamicLabel};
 use rand::rngs::SmallRng;
-use rand::{thread_rng, Rng, SeedableRng};
+use rand::{thread_rng, Rng, RngCore, SeedableRng};
 use std::convert::TryFrom;
 use std::mem::MaybeUninit;
 
@@ -146,7 +146,7 @@ enum MemoryAccessKind {
     StoreReg,
 }
 
-const MAX_RELOCATIONS: usize = 16;
+const MAX_RELOCATIONS: usize = 8;
 
 #[derive(Copy, Clone)]
 struct Template<const SIZE: usize, R: Copy> {
@@ -443,30 +443,29 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         let invalid_jump_target_loc = 0;
 
         // The no-ops diversify the output like `JitCompiler` does, except that they can only go in
-        // between the templates, so the rate counts templates rather than host instructions. The
-        // second pass replays the decisions of the first one with a clone of the RNG.
-        let mut rng = (noop_instruction_rate != 0).then(|| {
-            SmallRng::from_rng(thread_rng()).expect("failed to seed the JIT diversification")
-        });
-        let start_padding = |rng: &mut Option<SmallRng>| {
-            rng.as_mut()
-                .map_or(0, |rng| rng.gen_range(0..MAX_START_PADDING_LENGTH))
+        // between the templates, so the rate counts templates rather than host instructions. A
+        // no-op goes before a template with the probability of 1 / `noop_instruction_rate` (never
+        // for 0), decided by one `next_u32` each, so that the second pass can replay the decisions
+        // of the first one with a clone of the RNG.
+        let mut rng =
+            SmallRng::from_rng(thread_rng()).expect("failed to seed the JIT diversification");
+        let start_padding = if noop_instruction_rate == 0 {
+            0
+        } else {
+            rng.gen_range(0..MAX_START_PADDING_LENGTH)
         };
-        let insert_noop = |rng: &mut Option<SmallRng>| {
-            rng.as_mut()
-                .is_some_and(|rng| rng.gen_ratio(1, noop_instruction_rate))
-        };
+        let noop_threshold = u32::MAX.checked_div(noop_instruction_rate).unwrap_or(0);
 
         let mut pc_sec = Vec::with_capacity(program.len());
         let mut position = self.invalid_jump_target.offset();
         let mut first_pass_rng = rng.clone();
-        position += start_padding(&mut first_pass_rng) * self.noop.offset();
+        position += start_padding * self.noop.offset();
         let mut program_iter = program.iter();
         while let Some(insn) = program_iter.next() {
             let insn_size = insn_size(insn[0]);
             let insn = u64::from_le_bytes(*insn);
             let template = &self.insns[insn as u16 as usize];
-            if insert_noop(&mut first_pass_rng) {
+            if first_pass_rng.next_u32() < noop_threshold {
                 position += self.noop.offset();
             }
             pc_sec.push(u32::try_from(position).expect("JIT output too large"));
@@ -481,7 +480,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         // Templates are always written out in large chunks to employ SIMD and avoid memcpy calls.
         let mut text = Vec::with_capacity(position + SIZE);
         Self::emit(&mut text, &pc_sec, 0, 0, &self.invalid_jump_target);
-        for _ in 0..start_padding(&mut rng) {
+        for _ in 0..start_padding {
             Self::emit(&mut text, &pc_sec, 0, 0, &self.noop);
         }
         let mut program_iter = program.iter().enumerate();
@@ -490,7 +489,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             for _ in 1..(insn_size(insn as u8) / 8) {
                 program_iter.next();
             }
-            if insert_noop(&mut rng) {
+            if rng.next_u32() < noop_threshold {
                 Self::emit(&mut text, &pc_sec, 0, 0, &self.noop);
             }
             let tpl = &self.insns[insn as u16 as usize];
