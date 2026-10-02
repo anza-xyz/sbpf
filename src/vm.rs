@@ -531,13 +531,13 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
                 ExecutionMode::DynasmJit => {
                     let (text_vm_addr, text) = executable.get_text_bytes();
-                    crate::codegen::x64::jit_and_run(text, text_vm_addr, self);
+                    crate::codegen::jit_and_run(text, text_vm_addr, self);
                     break 'execute;
                 }
                 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
                 ExecutionMode::DynasmInterpreted => {
                     let (text_vm_addr, text) = executable.get_text_bytes();
-                    crate::codegen::x64::interpret_and_run(text, text_vm_addr, self);
+                    crate::codegen::interpret_and_run(text, text_vm_addr, self);
                     break 'execute;
                 }
             }

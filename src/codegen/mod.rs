@@ -3,7 +3,7 @@ pub mod x64;
 use crate::ebpf;
 use crate::error::{EbpfError, ProgramResult};
 use crate::vm::{ContextObject, EbpfVm};
-use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry, StaticLabel};
+use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
 use dynasmrt::relocations::{Relocation, RelocationKind};
 use dynasmrt::{AssemblyOffset, DynamicLabel};
 use std::convert::TryFrom;
@@ -68,14 +68,62 @@ fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) 
     }
 }
 
-/// The instruction a template is generated for: the opcode and the physical registers standing
-/// in for the source and destination BPF registers (`u8::MAX` if the instruction names a register
-/// that does not exist.)
+/// The instruction a template is generated for: the opcode and the destination and source
+/// registers.
 #[derive(Clone, Copy)]
 struct TemplateInsn {
     op: u8,
     dst: u8,
     src: u8,
+}
+
+/// Every instruction to generate a template for, with BPF register numbers, in the order of the
+/// lower 16 bits of the instruction (the opcode, then the `dst` and `src` register numbers), which
+/// is how the templates are looked up.
+fn template_insns() -> impl Iterator<Item = TemplateInsn> {
+    (0..=u16::MAX).map(|bits| TemplateInsn {
+        op: bits as u8,
+        dst: (bits >> 8 & 0xf) as u8,
+        src: (bits >> 12) as u8,
+    })
+}
+
+/// Compile `bpf` and execute it, starting at `vm.registers[11]`.
+pub fn jit_and_run<C: ContextObject>(bpf: &[u8], bpf_vm_addr: u64, vm: &mut EbpfVm<C>) {
+    let program = x64::JIT_TEMPLATES.compile(bpf);
+    let code = &program.text_section;
+    let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len())
+        .expect("failed to allocate executable memory for the JIT output");
+    buffer.set_len(code.len());
+    buffer.copy_from_slice(code);
+    let buffer = buffer
+        .make_exec()
+        .expect("failed to make the JIT output executable");
+    let start_addr =
+        buffer.as_ptr() as usize + program.pc_section[vm.registers[11] as usize] as usize;
+    vm.set_text_section(bpf, bpf_vm_addr);
+    vm.jit_pc_section = program.pc_section.as_ptr();
+    vm.jit_text_section = buffer.as_ptr();
+    // The JIT output addresses the instructions relative to the second one.
+    x64::enter(
+        bpf,
+        start_addr,
+        bpf.as_ptr().wrapping_add(ebpf::INSN_SIZE),
+        vm,
+    )
+}
+
+/// Interpret `bpf`, starting at `vm.registers[11]`.
+pub fn interpret_and_run<C: ContextObject>(bpf: &[u8], bpf_vm_addr: u64, vm: &mut EbpfVm<C>) {
+    let pc = vm.registers[11] as usize;
+    let insn = &bpf[pc * ebpf::INSN_SIZE..][..2];
+    let step = x64::interpreter_step(u16::from_le_bytes(<[u8; 2]>::try_from(insn).unwrap()));
+    vm.set_text_section(bpf, bpf_vm_addr);
+    vm.jit_pc_section = std::ptr::null();
+    vm.jit_text_section = std::ptr::null();
+    // The interpreter steps expect `insn` to point past the instruction being executed.
+    let insn = bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE);
+    x64::enter(bpf, step as usize, insn, vm)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -145,70 +193,16 @@ impl<const SIZE: usize, R: Copy> Template<SIZE, R> {
         self.bytes += 1;
     }
 
-    pub const fn align(&mut self, alignment: usize, with: u8) {
-        let mut to_add = (alignment - self.bytes % alignment) % alignment;
-        while to_add != 0 {
-            self.buffer[self.bytes] = with;
-            self.bytes += 1;
-            to_add -= 1;
-        }
-    }
-
     pub const fn push_i8(&mut self, value: i8) {
         self.push(value as u8);
-    }
-
-    pub const fn push_i16(&mut self, value: i16) {
-        self.extend(&i16::to_le_bytes(value));
     }
 
     pub const fn push_i32(&mut self, value: i32) {
         self.extend(&i32::to_le_bytes(value));
     }
-
-    pub const fn push_i64(&mut self, value: i64) {
-        self.extend(&i64::to_le_bytes(value));
-    }
-
-    pub const fn push_u16(&mut self, value: u16) {
-        self.extend(&u16::to_le_bytes(value));
-    }
-
-    pub const fn push_u32(&mut self, value: u32) {
-        self.extend(&u32::to_le_bytes(value));
-    }
-
-    pub const fn push_u64(&mut self, value: u64) {
-        self.extend(&u64::to_le_bytes(value));
-    }
-
-    pub const fn runtime_error(&self, msg: &'static str) {
-        panic!("{}", msg);
-    }
-
-    pub const fn local_label(&mut self, _name: &'static str) {}
-    pub const fn forward_reloc(
-        &mut self,
-        _name: &'static str,
-        _target_offset: isize,
-        _field_offset: u8,
-        _ref_offset: u8,
-        _kind: u8,
-    ) {
-    }
-    pub const fn backward_reloc(
-        &mut self,
-        _name: &'static str,
-        _target_offset: isize,
-        _field_offset: u8,
-        _ref_offset: u8,
-        _kind: u8,
-    ) {
-    }
 }
 
-/// Relocations against labels defined within the code being generated (local, global and dynamic
-/// labels.)
+/// Relocations against dynamic labels defined within the code being generated.
 ///
 /// These are resolved as soon as the code generation completes: for JIT that's when the template
 /// is finalized, for the interpreter that's once all the steps have been generated.
@@ -233,15 +227,6 @@ impl<R: Relocation + Copy> LabelRelocs<R> {
         self.labels.define_dynamic(id, AssemblyOffset(at)).unwrap()
     }
 
-    fn global_reloc(&mut self, at: usize, name: &'static str, patch: PatchFields<R>) {
-        self.relocs
-            .add_static(StaticLabel::global(name), patch.at(at));
-    }
-
-    fn global_label(&mut self, name: &'static str, at: usize) {
-        self.labels.define_global(name, AssemblyOffset(at)).unwrap();
-    }
-
     fn dynamic_reloc(&mut self, at: usize, id: DynamicLabel, patch: PatchFields<R>) {
         self.relocs.add_dynamic(id, patch.at(at));
     }
@@ -252,24 +237,17 @@ impl<R: Relocation + Copy> LabelRelocs<R> {
     /// that the code is position independent and will get copied elsewhere, in which case only the
     /// relative relocations are supported.
     fn resolve(&mut self, buffer: &mut [u8], buf_addr: Option<usize>) {
-        let patch = |loc: PatchLoc<R>, target: AssemblyOffset, buffer: &mut [u8]| {
+        for (loc, id) in self.relocs.take_dynamics() {
             if buf_addr.is_none() {
                 assert!(
                     matches!(loc.relocation.kind(), RelocationKind::Relative),
                     "position independent code may only contain relative label references"
                 );
             }
+            let target = self.labels.resolve_dynamic(id).unwrap();
             let range = loc.range(0);
             loc.patch(&mut buffer[range], buf_addr.unwrap_or(0), target.0)
                 .expect("impossible relocation");
-        };
-        for (loc, label) in self.relocs.take_statics() {
-            let target = self.labels.resolve_static(&label).unwrap();
-            patch(loc, target, buffer);
-        }
-        for (loc, id) in self.relocs.take_dynamics() {
-            let target = self.labels.resolve_dynamic(id).unwrap();
-            patch(loc, target, buffer);
         }
         self.labels.clear();
     }
