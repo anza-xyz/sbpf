@@ -24,7 +24,7 @@ fn main() {
     buffer.set_len(code.len());
     buffer.copy_from_slice(code);
     let buffer = buffer.make_exec().unwrap();
-    let entrypoint = buffer.as_ptr() as usize;
+    let entrypoint = buffer.as_ptr() as usize + program.pc_section[0] as usize;
 
     let mut duration = std::time::Duration::new(0, 0);
     let iters = 500;

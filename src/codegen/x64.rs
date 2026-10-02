@@ -40,6 +40,15 @@ const STACK_FRAME_SIZE: i32 = 4096;
 /// Maximum internal call depth (as in SBPFv3.)
 const MAX_CALL_DEPTH: i32 = 64;
 
+/// Size of the instruction with the opcode `op`, in bytes.
+const fn insn_size(op: u8) -> usize {
+    if op == ebpf::LD_DW_IMM {
+        2 * ebpf::INSN_SIZE
+    } else {
+        ebpf::INSN_SIZE
+    }
+}
+
 const SIG_INVALID_INSN: i8 = -1;
 const SIG_EXCEEDED_MAX_INSTRUCTIONS: i8 = -2;
 const SIG_CALL_DEPTH_EXCEEDED: i8 = -3;
@@ -402,14 +411,13 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::CALL_IMM => {
             load_next_insn(out);
             if src == GPREG_MAP[1] {
-                // Callee is `next + imm`.
-                let call = out.supports().call_internal;
+                let call_internal = out.supports().call_internal;
                 x64asm!(out
                     ; push RTEMP
                     ; movsxd RTEMP, DWORD REL32_IMM
                     ; lea RTEMP, [ DWORD 0i32 + RINSN + RTEMP * 8 ]
                     ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
-                    ;; invoke_support(out, call)
+                    ;; invoke_support(out, call_internal)
                     ; pop RTEMP
                 );
             } else {
@@ -422,12 +430,12 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
             if dst == u8::MAX {
                 terminate(out, SIG_INVALID_INSN)
             } else {
-                let call = out.supports().call_internal;
+                let call_internal = out.supports().call_internal;
                 x64asm!(out
                     ; push RTEMP
                     ; mov RTEMP, Rq(dst)
                     ; gs sub RTEMP, [ RuntimeEnvironmentSlot::TextSectionHostToVm as i32 ]
-                    ;; invoke_support(out, call)
+                    ;; invoke_support(out, call_internal)
                     ; pop RTEMP
                 );
             }
@@ -442,11 +450,21 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
             );
         }
 
+        // The second half is another instruction with the more significant half of the immediate.
+        ebpf::LD_DW_IMM => x64asm!(out
+            ; mov Rd(dst), DWORD REL32_IMM
+            ; mov WTEMP, DWORD [ DWORD 4i32 + RINSN ]
+            ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 4, 4, 0)
+            ; shl RTEMP, 32
+            ; or Rq(dst), RTEMP
+            // Counts as a single instruction.
+            ; add RMETER, ebpf::INSN_SIZE as i32
+        ),
+
         ebpf::LD_B_REG
         | ebpf::LD_H_REG
         | ebpf::LD_W_REG
         | ebpf::LD_DW_REG
-        | ebpf::LD_DW_IMM
         | ebpf::ST_B_IMM
         | ebpf::ST_H_IMM
         | ebpf::ST_W_IMM
@@ -859,6 +877,9 @@ pub struct JitTemplates {
     insns: Vec<Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation>>,
     /// Appended after the last instruction, as if it was at `pc = program.len()`.
     execution_overrun: Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation>,
+    /// For `pc_section` entries that are not valid jump targets (e.g. the second
+    /// halves of 16 byte instructions.)
+    invalid_jump_target: Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation>,
 }
 
 /// JIT templates for SBPFv3.
@@ -879,9 +900,12 @@ pub static JIT_TEMPLATES: LazyLock<JitTemplates> = LazyLock::new(|| {
     load_next_insn(&mut generator);
     terminate(&mut generator, SIG_EXECUTION_OVERRUN);
     let execution_overrun = generator.finalize();
+    terminate(&mut generator, SIG_INVALID_INSN);
+    let invalid_jump_target = generator.finalize();
     JitTemplates {
         insns,
         execution_overrun,
+        invalid_jump_target,
     }
 });
 
@@ -895,30 +919,35 @@ pub struct JitProgram {
 
 impl JitTemplates {
     /// Compile `bpf` into machine code.
+    ///
+    /// Due to the time sensitive nature of this code we try to do minimal amount of work here.
+    /// The result is a two pass algorithm where the first pass determines ahead of time where
+    /// each instruction's machine code will be, allowing for e.g. forward jump relocations to be
+    /// resolved immediately during the emission.
     pub fn compile(&self, bpf: &[u8]) -> JitProgram {
-        let templates = self;
         let (program, rest) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
         assert!(rest.is_empty());
-        let mut pc_section = Vec::<u32>::with_capacity(program.len());
-        let mut position: usize = 0;
-        // first scan
-        for insn in program {
+        let mut text_section = Vec::<u8>::from(self.invalid_jump_target.buffer());
+        let invalid_jump_target_loc = 0;
+
+        let mut pc_section = Vec::with_capacity(program.len());
+        let mut position = text_section.len();
+        let mut program_iter = program.iter();
+        while let Some(insn) = program_iter.next() {
+            let insn_size = insn_size(insn[0]);
             let insn = u64::from_le_bytes(*insn);
-            let template = &templates.insns[insn as u16 as usize];
+            let template = &self.insns[insn as u16 as usize];
             pc_section.push(u32::try_from(position).expect("JIT output too large"));
             position += template.offset();
+            for _ in 1..(insn_size / 8) {
+                program_iter.next();
+                pc_section.push(invalid_jump_target_loc);
+            }
         }
-        let mut text_section =
-            Vec::<u8>::with_capacity(position + templates.execution_overrun.offset());
-        let all_templates = program
-            .iter()
-            .map(|insn| {
-                let insn = u64::from_le_bytes(*insn);
-                (&templates.insns[insn as u16 as usize], insn)
-            })
-            .chain(std::iter::once((&templates.execution_overrun, 0)));
-        // 2nd scan
-        for (pc, (template, insn)) in all_templates.enumerate() {
+        position += self.execution_overrun.offset();
+
+        text_section.reserve(position - text_section.len());
+        let mut emit = |pc, insn, template: &Template<_, TemplateRelocation>| {
             let template_start = text_section.len();
             text_section.extend_from_slice(template.buffer());
             for relocation in template.relocations() {
@@ -941,7 +970,16 @@ impl JitTemplates {
                 };
                 relocation.apply(&mut text_section, template_start, target);
             }
+        };
+        let mut program_iter = program.iter().enumerate();
+        while let Some((pc, insn)) = program_iter.next() {
+            let insn = u64::from_le_bytes(*insn);
+            for _ in 1..(insn_size(insn as u8) / 8) {
+                program_iter.next();
+            }
+            emit(pc, insn, &self.insns[insn as u16 as usize]);
         }
+        emit(program.len(), 0, &self.execution_overrun);
         JitProgram {
             pc_section,
             text_section,
@@ -1274,13 +1312,25 @@ pub(super) static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCod
                     let step_start = generator.offset;
                     bpf_insn_template(&mut generator);
                     generator.terminal = false;
-                    x64asm!(generator
-                        ; movzx RTEMP, WORD [ RINSN ]
-                        ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
-                        ; lea RTEMP, [ DWORD base_addr + RTEMP ]
-                        ; add RINSN, 8
-                        ; jmp RTEMP
-                    );
+                    if insn_size(bpf_op) == ebpf::INSN_SIZE {
+                        x64asm!(generator
+                            ; movzx RTEMP, WORD [ RINSN ]
+                            ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
+                            ; lea RTEMP, [ DWORD base_addr + RTEMP ]
+                            ; add RINSN, 8
+                            ; jmp RTEMP
+                        );
+                    } else {
+                        let size = i8::try_from(insn_size(bpf_op)).unwrap();
+                        // `insn` points at the second half.
+                        x64asm!(generator
+                            ; movzx RTEMP, WORD [ BYTE (size - 8) + RINSN ]
+                            ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
+                            ; lea RTEMP, [ DWORD base_addr + RTEMP ]
+                            ; add RINSN, size as i32
+                            ; jmp RTEMP
+                        );
+                    }
                     assert!(
                         generator.offset - step_start <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
                         "step for {:#x} is too long",
@@ -1410,19 +1460,25 @@ impl SupportingCode {
             // Like a taken branch, from the instruction following the call to the target.
             ; add RMETER, [rsp + 8]
             ; sub RMETER, [rsp + 32]
-            ; mov [rsp + 8], RTEMP
+            ; push RTEMP
+            // The callee gets the address of the instruction following it in `temp`, as
+            // `load_next_insn` would produce it.
+            ; mov RTEMP, [rsp + 16]
+            ; add RTEMP, ebpf::INSN_SIZE as i32
             ; push R6
             ; push R7
             ; push R8
             ; push R9
             ; push R10
             ; add R10, STACK_FRAME_SIZE
-            ; call QWORD [rsp + 48]
+            ; call QWORD [rsp + 40]
             ; pop R10
             ; pop R9
             ; pop R8
             ; pop R7
             ; pop R6
+            // FIXME: adjust the stack layout such that this code be a single `add rsp...`
+            ; add rsp, 8
             ; pop RINSN
             ; add rsp, 8
             // `EXIT` leaves the remaining budget in `meter`, convert back to the instruction limit.
