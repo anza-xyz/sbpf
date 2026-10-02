@@ -1,5 +1,90 @@
 pub mod x64;
 
+use crate::ebpf;
+use crate::error::{EbpfError, ProgramResult};
+use crate::vm::{ContextObject, EbpfVm};
+use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry, StaticLabel};
+use dynasmrt::relocations::{Relocation, RelocationKind};
+use dynasmrt::{AssemblyOffset, DynamicLabel};
+use std::convert::TryFrom;
+
+/// Size of the stack frame allocated for each internal call (fixed frames, as in SBPFv3.)
+const STACK_FRAME_SIZE: i32 = 4096;
+/// Maximum internal call depth (as in SBPFv3.)
+const MAX_CALL_DEPTH: i32 = 64;
+
+/// Size of the instruction with the opcode `op`, in bytes.
+const fn insn_size(op: u8) -> usize {
+    if op == ebpf::LD_DW_IMM {
+        2 * ebpf::INSN_SIZE
+    } else {
+        ebpf::INSN_SIZE
+    }
+}
+
+const SIG_INVALID_INSN: i8 = -1;
+const SIG_EXCEEDED_MAX_INSTRUCTIONS: i8 = -2;
+const SIG_CALL_DEPTH_EXCEEDED: i8 = -3;
+const SIG_DIVIDE_BY_ZERO: i8 = -4;
+const SIG_EXECUTION_OVERRUN: i8 = -5;
+const SIG_CALL_OUTSIDE_TEXT_SEGMENT: i8 = -6;
+/// `vm.program_result` has already been set.
+const SIG_PROGRAM_RESULT: i8 = -7;
+
+/// The initial value of `meter` for executing `bpf` from `vm.registers[11]` with
+/// `vm.previous_instruction_meter` as the budget: the address of the instruction following the
+/// last one that is within budget.
+fn initial_meter<C: ContextObject>(bpf: &[u8], vm: &EbpfVm<C>) -> u64 {
+    let pc = vm.registers[11];
+    let budget = vm.previous_instruction_meter;
+    (bpf.as_ptr() as u64).wrapping_add(pc.wrapping_add(budget).wrapping_mul(ebpf::INSN_SIZE as u64))
+}
+
+/// Update `vm` after the generated code has terminated with `code`, leaving `meter` behind.
+fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) {
+    let remaining = if code == SIG_EXCEEDED_MAX_INSTRUCTIONS || (meter as i64) < 0 {
+        0
+    } else {
+        meter / ebpf::INSN_SIZE as u64
+    };
+    // Syscalls consume the budget used up to them and update `previous_instruction_meter`.
+    vm.due_insn_count = vm.previous_instruction_meter.saturating_sub(remaining);
+    use EbpfError::*;
+    match code {
+        0 => vm.program_result = ProgramResult::Ok(vm.registers[0]),
+        // Calls into Rust store their errors into `vm.program_result` themselves.
+        SIG_PROGRAM_RESULT => {}
+        SIG_EXCEEDED_MAX_INSTRUCTIONS => {
+            vm.program_result = ProgramResult::Err(ExceededMaxInstructions)
+        }
+        SIG_INVALID_INSN => vm.program_result = ProgramResult::Err(UnsupportedInstruction),
+        SIG_CALL_DEPTH_EXCEEDED => vm.program_result = ProgramResult::Err(CallDepthExceeded),
+        SIG_DIVIDE_BY_ZERO => vm.program_result = ProgramResult::Err(DivideByZero),
+        SIG_EXECUTION_OVERRUN => vm.program_result = ProgramResult::Err(ExecutionOverrun),
+        SIG_CALL_OUTSIDE_TEXT_SEGMENT => {
+            vm.program_result = ProgramResult::Err(CallOutsideTextSegment)
+        }
+        _ => unreachable!("unexpected exit code {}", code),
+    }
+}
+
+/// The instruction a template is generated for: the opcode and the physical registers standing
+/// in for the source and destination BPF registers (`u8::MAX` if the instruction names a register
+/// that does not exist.)
+#[derive(Clone, Copy)]
+struct TemplateInsn {
+    op: u8,
+    dst: u8,
+    src: u8,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MemoryAccessKind {
+    Load,
+    StoreImm,
+    StoreReg,
+}
+
 const MAX_RELOCATIONS: usize = 16;
 
 #[derive(Copy, Clone)]
@@ -119,5 +204,293 @@ impl<const SIZE: usize, R: Copy> Template<SIZE, R> {
         _ref_offset: u8,
         _kind: u8,
     ) {
+    }
+}
+
+/// Relocations against labels defined within the code being generated (local, global and dynamic
+/// labels.)
+///
+/// These are resolved as soon as the code generation completes: for JIT that's when the template
+/// is finalized, for the interpreter that's once all the steps have been generated.
+struct LabelRelocs<R: Relocation> {
+    labels: LabelRegistry,
+    relocs: RelocRegistry<R>,
+}
+
+impl<R: Relocation + Copy> LabelRelocs<R> {
+    fn new() -> Self {
+        Self {
+            labels: LabelRegistry::new(),
+            relocs: RelocRegistry::new(),
+        }
+    }
+
+    fn new_dynamic_label(&mut self) -> DynamicLabel {
+        self.labels.new_dynamic_label()
+    }
+
+    fn dynamic_label(&mut self, id: DynamicLabel, at: usize) {
+        self.labels.define_dynamic(id, AssemblyOffset(at)).unwrap()
+    }
+
+    fn global_reloc(&mut self, at: usize, name: &'static str, patch: PatchFields<R>) {
+        self.relocs
+            .add_static(StaticLabel::global(name), patch.at(at));
+    }
+
+    fn global_label(&mut self, name: &'static str, at: usize) {
+        self.labels.define_global(name, AssemblyOffset(at)).unwrap();
+    }
+
+    fn dynamic_reloc(&mut self, at: usize, id: DynamicLabel, patch: PatchFields<R>) {
+        self.relocs.add_dynamic(id, patch.at(at));
+    }
+
+    /// Patch all the recorded relocations into `buffer` and reset the label state.
+    ///
+    /// `buf_addr` is the address at which `buffer` will reside during execution. `None` means
+    /// that the code is position independent and will get copied elsewhere, in which case only the
+    /// relative relocations are supported.
+    fn resolve(&mut self, buffer: &mut [u8], buf_addr: Option<usize>) {
+        let patch = |loc: PatchLoc<R>, target: AssemblyOffset, buffer: &mut [u8]| {
+            if buf_addr.is_none() {
+                assert!(
+                    matches!(loc.relocation.kind(), RelocationKind::Relative),
+                    "position independent code may only contain relative label references"
+                );
+            }
+            let range = loc.range(0);
+            loc.patch(&mut buffer[range], buf_addr.unwrap_or(0), target.0)
+                .expect("impossible relocation");
+        };
+        for (loc, label) in self.relocs.take_statics() {
+            let target = self.labels.resolve_static(&label).unwrap();
+            patch(loc, target, buffer);
+        }
+        for (loc, id) in self.relocs.take_dynamics() {
+            let target = self.labels.resolve_dynamic(id).unwrap();
+            patch(loc, target, buffer);
+        }
+        self.labels.clear();
+    }
+}
+
+/// Relocation parameters as produced by `dynasm`, sans the location.
+#[derive(Clone, Copy)]
+struct PatchFields<R> {
+    target_offset: isize,
+    field_offset: u8,
+    ref_offset: u8,
+    relocation: R,
+}
+
+impl<R: Relocation + Copy> PatchFields<R> {
+    fn new(target_offset: isize, field_offset: u8, ref_offset: u8, kind: u8) -> Self {
+        Self {
+            target_offset,
+            field_offset,
+            ref_offset,
+            relocation: R::from_encoding(kind),
+        }
+    }
+
+    /// `at` is the offset right past the instruction containing the field to patch (i.e. the
+    /// offset at the time `dynasm` reports the relocation.)
+    fn at(self, at: usize) -> PatchLoc<R> {
+        PatchLoc::new(
+            AssemblyOffset(at),
+            self.target_offset,
+            self.field_offset,
+            self.ref_offset,
+            self.relocation,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TemplateRelocationKind {
+    /// The JIT holds a pointer to the second instruction of the eBPF program in `insn`,
+    /// whereas the templates default to addressing where `insn` is updated to point to right
+    /// after the current instruction. This relocation adds the offset of the current instruction
+    /// to the field.
+    InsnOffset,
+    /// When BPF instruction represents a branch, and the branch is taken, the control flow has to
+    /// transfer to the machine code representing the target BPF instruction's code. Offset to this
+    /// machine code is what this relocation must overwrite based on the BPF instruction being
+    /// templated.
+    TakenBranch,
+    /// Offset (in bytes) from the instruction following the branch to the branch target.
+    TakenBranchMeterAdjustment,
+}
+
+/// A relocation that can only be resolved once the template is instantiated for a specific eBPF
+/// instruction at a specific location.
+#[derive(Clone, Copy)]
+struct TemplateRelocation<R> {
+    /// Offset within the template right past the instruction containing the field to patch.
+    location: usize,
+    patch: PatchFields<R>,
+    kind: TemplateRelocationKind,
+}
+
+impl<R: Relocation + Copy> TemplateRelocation<R> {
+    /// Patch the relocation into the instantiated template.
+    ///
+    /// `text` must be the buffer into which the template was copied, starting at `template_start`.
+    /// `target` is an offset into `text` for relative relocations or the value to write for
+    /// absolute ones.
+    fn apply(&self, text: &mut [u8], template_start: usize, target: usize) {
+        let loc = self.patch.at(template_start + self.location);
+        let range = loc.range(0);
+        loc.patch(&mut text[range], 0, target)
+            .expect("impossible relocation");
+    }
+}
+
+/// Machine code templates the JIT output is assembled from.
+pub struct JitTemplates<const SIZE: usize, R: Copy> {
+    /// Indexed by the lower 16 bits of an instruction.
+    insns: Vec<Template<SIZE, TemplateRelocation<R>>>,
+    /// Appended after the last instruction, as if it was at `pc = program.len()`.
+    execution_overrun: Template<SIZE, TemplateRelocation<R>>,
+    /// For `pc_section` entries that are not valid jump targets (e.g. the second
+    /// halves of 16 byte instructions.)
+    invalid_jump_target: Template<SIZE, TemplateRelocation<R>>,
+}
+
+/// The JIT output for a program.
+pub struct JitProgram {
+    /// Offset in `text_section` for each BPF instruction.
+    pub pc_section: Vec<u32>,
+    /// The machine code.
+    pub text_section: Vec<u8>,
+}
+
+impl<const SIZE: usize, R: Relocation + Copy> JitTemplates<SIZE, R> {
+    /// Compile `bpf` into machine code.
+    ///
+    /// Due to the time sensitive nature of this code we try to do minimal amount of work here.
+    /// The result is a two pass algorithm where the first pass determines ahead of time where
+    /// each instruction's machine code will be, allowing for e.g. forward jump relocations to be
+    /// resolved immediately during the emission.
+    pub fn compile(&self, bpf: &[u8]) -> JitProgram {
+        let (program, rest) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
+        assert!(rest.is_empty());
+        let mut text_section = Vec::<u8>::from(self.invalid_jump_target.buffer());
+        let invalid_jump_target_loc = 0;
+
+        let mut pc_section = Vec::with_capacity(program.len());
+        let mut position = text_section.len();
+        let mut program_iter = program.iter();
+        while let Some(insn) = program_iter.next() {
+            let insn_size = insn_size(insn[0]);
+            let insn = u64::from_le_bytes(*insn);
+            let template = &self.insns[insn as u16 as usize];
+            pc_section.push(u32::try_from(position).expect("JIT output too large"));
+            position += template.offset();
+            for _ in 1..(insn_size / 8) {
+                program_iter.next();
+                pc_section.push(invalid_jump_target_loc);
+            }
+        }
+        position += self.execution_overrun.offset();
+
+        text_section.reserve(position - text_section.len());
+        let mut emit = |pc, insn, template: &Template<SIZE, TemplateRelocation<R>>| {
+            let template_start = text_section.len();
+            text_section.extend_from_slice(template.buffer());
+            for relocation in template.relocations() {
+                let target = match relocation.kind {
+                    TemplateRelocationKind::InsnOffset => pc * ebpf::INSN_SIZE,
+                    TemplateRelocationKind::TakenBranchMeterAdjustment => {
+                        let off = (insn >> 16) as i16;
+                        (off as isize * ebpf::INSN_SIZE as isize) as usize
+                    }
+                    TemplateRelocationKind::TakenBranch => {
+                        let off = (insn >> 16) as i16;
+                        let target_pc = (pc as isize)
+                            .checked_add(1 + off as isize)
+                            .and_then(|target_pc| usize::try_from(target_pc).ok());
+                        // FIXME: the verifier should have rejected these.
+                        *target_pc
+                            .and_then(|target_pc| pc_section.get(target_pc))
+                            .expect("branch target out of bounds") as usize
+                    }
+                };
+                relocation.apply(&mut text_section, template_start, target);
+            }
+        };
+        let mut program_iter = program.iter().enumerate();
+        while let Some((pc, insn)) = program_iter.next() {
+            let insn = u64::from_le_bytes(*insn);
+            for _ in 1..(insn_size(insn as u8) / 8) {
+                program_iter.next();
+            }
+            emit(pc, insn, &self.insns[insn as u16 as usize]);
+        }
+        emit(program.len(), 0, &self.execution_overrun);
+        JitProgram {
+            pc_section,
+            text_section,
+        }
+    }
+}
+
+#[cfg(feature = "codegen_debug")]
+/// Emit a perf jitdump (`/tmp/jit-<pid>.dump`) describing the code in `ptr..ptr + len`.
+fn write_perf_jitdump(ptr: *const u8, len: usize, elf_machine: u32) {
+    use std::io::Write as _;
+    use std::os::fd::AsRawFd as _;
+    unsafe {
+        let pid = std::process::id();
+        let tid = libc::syscall(libc::SYS_gettid) as u32;
+        let now = || {
+            let mut ts = libc::timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+            (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
+        };
+
+        let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
+        // 1. JIT Header (40 bytes)
+        f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
+        f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
+        f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
+        f.write_all(&elf_machine.to_le_bytes()).unwrap();
+        f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
+        f.write_all(&pid.to_le_bytes()).unwrap();
+        f.write_all(&now().to_le_bytes()).unwrap();
+        f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
+
+        // Triggers perf record's MMAP detection
+        let m = libc::mmap(
+            std::ptr::null_mut(),
+            4096,
+            libc::PROT_READ | libc::PROT_EXEC,
+            libc::MAP_PRIVATE,
+            f.as_raw_fd(),
+            0,
+        );
+        if m != libc::MAP_FAILED {
+            libc::munmap(m, 4096);
+        }
+
+        // 2. JIT_CODE_LOAD Record Header (60 bytes = 56 byte record + 4 byte name)
+        let rec_size = (60 + len) as u32;
+        f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
+        f.write_all(&rec_size.to_le_bytes()).unwrap();
+        f.write_all(&now().to_le_bytes()).unwrap();
+        f.write_all(&pid.to_le_bytes()).unwrap();
+        f.write_all(&tid.to_le_bytes()).unwrap();
+        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // VMA
+        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // Code Address
+        f.write_all(&(len as u64).to_le_bytes()).unwrap(); // Code Size
+        f.write_all(&1u64.to_le_bytes()).unwrap(); // Index
+        f.write_all(b"jit\0").unwrap(); // Symbol Name
+
+        // 3. Raw Code Bytes
+        f.write_all(std::slice::from_raw_parts(ptr, len)).unwrap();
     }
 }
