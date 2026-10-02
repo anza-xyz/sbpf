@@ -21,7 +21,9 @@ fn main() {
         let mut vm = EbpfVm::new(loader.clone(), SBPFVersion::V3, &mut context, 0);
         vm.previous_instruction_meter = BUDGET;
         let start = std::time::Instant::now();
-        std::hint::black_box(solana_sbpf::codegen::x64::interpret_and_run(&bpf, &mut vm));
+        std::hint::black_box(solana_sbpf::codegen::x64::interpret_and_run(
+            &bpf, 0, &mut vm,
+        ));
         remaining = BUDGET - vm.due_insn_count;
         duration += start.elapsed();
     }

@@ -45,6 +45,7 @@ const SIG_EXCEEDED_MAX_INSTRUCTIONS: i8 = -2;
 const SIG_CALL_DEPTH_EXCEEDED: i8 = -3;
 const SIG_DIVIDE_BY_ZERO: i8 = -4;
 const SIG_EXECUTION_OVERRUN: i8 = -5;
+const SIG_CALL_OUTSIDE_TEXT_SEGMENT: i8 = -6;
 
 /// Is the value in the provided register disposable/temporary?
 pub const fn disposable_reg(reg: u8) -> bool {
@@ -170,13 +171,6 @@ trait X64Generator {
 
     // Generate code to handle branch taken case.
     fn bpf_taken_branch(&mut self);
-
-    /// Set up for, and call, the shared trampoline (see `SupportingCode::internal_call`) to
-    /// dispatch to the target of an internal call (`next + imm`.)
-    ///
-    /// The address of the instruction following the call is expected to be found on top of the
-    /// stack.
-    fn bpf_internal_call(&mut self);
 }
 
 /// Produce a template for a single (currently processed) instruction.
@@ -406,26 +400,37 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         }
 
         ebpf::CALL_IMM => {
+            load_next_insn(out);
             if src == GPREG_MAP[1] {
-                // Callee is `next + imm`. The meter, r6-r10 spills, frame pointer handling, and
-                // dispatching to the target is handled by a shared trampoline (see
-                // `bpf_internal_call`.)
-                load_next_insn(out);
+                // Callee is `next + imm`.
+                let call = out.supports().call_internal;
                 x64asm!(out
                     ; push RTEMP
-                    ;; out.bpf_internal_call()
+                    ; movsxd RTEMP, DWORD REL32_IMM
+                    ; lea RTEMP, [ DWORD 0i32 + RINSN + RTEMP * 8 ]
+                    ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
+                    ;; invoke_support(out, call)
                     ; pop RTEMP
                 );
             } else {
                 // TODO: syscalls.
-                load_next_insn(out);
                 terminate(out, SIG_INVALID_INSN)
             }
         }
         ebpf::CALL_REG => {
-            // TODO
             load_next_insn(out);
-            terminate(out, SIG_INVALID_INSN)
+            if dst == u8::MAX {
+                terminate(out, SIG_INVALID_INSN)
+            } else {
+                let call = out.supports().call_internal;
+                x64asm!(out
+                    ; push RTEMP
+                    ; mov RTEMP, Rq(dst)
+                    ; gs sub RTEMP, [ RuntimeEnvironmentSlot::TextSectionHostToVm as i32 ]
+                    ;; invoke_support(out, call)
+                    ; pop RTEMP
+                );
+            }
         }
         ebpf::EXIT => {
             load_next_insn(out);
@@ -674,8 +679,6 @@ enum TemplateRelocationKind {
     TakenBranch,
     /// Offset (in bytes) from the instruction following the branch to the branch target.
     TakenBranchMeterAdjustment,
-    /// Same as `TakenBranch`, but for the target of an internal call (`next + imm`.)
-    InternalCall,
 }
 
 /// A relocation that can only be resolved once the template is instantiated for a specific eBPF
@@ -778,7 +781,6 @@ impl X64Generator for JITGenerator {
         let patch = PatchFields::new(target_offset, field_offset, ref_offset, kind);
         let kind = match name {
             "template_taken_branch" => TemplateRelocationKind::TakenBranch,
-            "template_internal_call" => TemplateRelocationKind::InternalCall,
             _ => panic!("global reference to an unknown symbol {}", name),
         };
         self.template.add_relocation(TemplateRelocation {
@@ -847,13 +849,6 @@ impl X64Generator for JITGenerator {
             ; jmp ->template_taken_branch
         );
     }
-
-    fn bpf_internal_call(&mut self) {
-        x64asm!(self
-            ; lea RTEMP, [ ->template_internal_call ]
-        );
-        invoke_support(self, self.supports.internal_call);
-    }
 }
 
 // TODO: when dynasm supports const codegen, we can make these be generated at compile time into an
@@ -902,14 +897,14 @@ impl JitTemplates {
     /// Compile `bpf` into machine code.
     pub fn compile(&self, bpf: &[u8]) -> JitProgram {
         let templates = self;
-        assert!(bpf.as_ptr().cast::<u64>().is_aligned());
-        assert!(bpf.len() % ebpf::INSN_SIZE == 0);
-        let program: &[u64] = unsafe { bpf.align_to::<u64>().1 };
+        let (program, rest) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
+        assert!(rest.is_empty());
         let mut pc_section = Vec::<u32>::with_capacity(program.len());
         let mut position: usize = 0;
         // first scan
         for insn in program {
-            let template = &templates.insns[*insn as u16 as usize];
+            let insn = u64::from_le_bytes(*insn);
+            let template = &templates.insns[insn as u16 as usize];
             pc_section.push(u32::try_from(position).expect("JIT output too large"));
             position += template.offset();
         }
@@ -917,8 +912,11 @@ impl JitTemplates {
             Vec::<u8>::with_capacity(position + templates.execution_overrun.offset());
         let all_templates = program
             .iter()
-            .map(|insn| (&templates.insns[*insn as u16 as usize], insn))
-            .chain(std::iter::once((&templates.execution_overrun, &0)));
+            .map(|insn| {
+                let insn = u64::from_le_bytes(*insn);
+                (&templates.insns[insn as u16 as usize], insn)
+            })
+            .chain(std::iter::once((&templates.execution_overrun, 0)));
         // 2nd scan
         for (pc, (template, insn)) in all_templates.enumerate() {
             let template_start = text_section.len();
@@ -927,11 +925,11 @@ impl JitTemplates {
                 let target = match relocation.kind {
                     TemplateRelocationKind::InsnOffset => pc * ebpf::INSN_SIZE,
                     TemplateRelocationKind::TakenBranchMeterAdjustment => {
-                        let off = (*insn >> 16) as i16;
+                        let off = (insn >> 16) as i16;
                         (off as isize * ebpf::INSN_SIZE as isize) as usize
                     }
                     TemplateRelocationKind::TakenBranch => {
-                        let off = (*insn >> 16) as i16;
+                        let off = (insn >> 16) as i16;
                         let target_pc = (pc as isize)
                             .checked_add(1 + off as isize)
                             .and_then(|target_pc| usize::try_from(target_pc).ok());
@@ -939,16 +937,6 @@ impl JitTemplates {
                         *target_pc
                             .and_then(|target_pc| pc_section.get(target_pc))
                             .expect("branch target out of bounds") as usize
-                    }
-                    TemplateRelocationKind::InternalCall => {
-                        let imm = (*insn >> 32) as i32;
-                        let target_pc = (pc as isize)
-                            .checked_add(1 + imm as isize)
-                            .and_then(|target_pc| usize::try_from(target_pc).ok());
-                        // FIXME: the verifier should have rejected these.
-                        *target_pc
-                            .and_then(|target_pc| pc_section.get(target_pc))
-                            .expect("call target out of bounds") as usize
                     }
                 };
                 relocation.apply(&mut text_section, template_start, target);
@@ -962,7 +950,11 @@ impl JitTemplates {
 }
 
 /// Compile `bpf` and execute.
-pub fn jit_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::EbpfVm<C>) {
+pub fn jit_and_run<C: crate::vm::ContextObject>(
+    bpf: &[u8],
+    bpf_vm_addr: u64,
+    vm: &mut crate::vm::EbpfVm<C>,
+) {
     let program = JIT_TEMPLATES.compile(bpf);
     let code = &program.text_section;
     let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len())
@@ -974,6 +966,9 @@ pub fn jit_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::
         .expect("failed to make the JIT output executable");
     let start_addr =
         buffer.as_ptr() as usize + program.pc_section[vm.registers[11] as usize] as usize;
+    vm.set_text_section(bpf, bpf_vm_addr);
+    vm.jit_pc_section = program.pc_section.as_ptr();
+    vm.jit_text_section = buffer.as_ptr();
     enter(
         bpf,
         start_addr,
@@ -983,7 +978,11 @@ pub fn jit_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::
 }
 
 /// Interpret `bpf`.
-pub fn interpret_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate::vm::EbpfVm<C>) {
+pub fn interpret_and_run<C: crate::vm::ContextObject>(
+    bpf: &[u8],
+    bpf_vm_addr: u64,
+    vm: &mut crate::vm::EbpfVm<C>,
+) {
     let pc = vm.registers[11] as usize;
     let insn = &bpf[pc * ebpf::INSN_SIZE..][..2];
     let opcode = u16::from_le_bytes(<[u8; 2]>::try_from(insn).unwrap()) as usize;
@@ -994,6 +993,9 @@ pub fn interpret_and_run<C: crate::vm::ContextObject>(bpf: &[u8], vm: &mut crate
             .add(opcode << InterpreterGenerator::STEP_SIZE_LOG2)
     };
     let insn = bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE);
+    vm.set_text_section(bpf, bpf_vm_addr);
+    vm.jit_pc_section = std::ptr::null();
+    vm.jit_text_section = std::ptr::null();
     enter(bpf, address as usize, insn, vm)
 }
 
@@ -1072,7 +1074,7 @@ impl InterpreterGenerator {
                 src: 0,
                 terminal: false,
                 supports: SupportingCode {
-                    internal_call: std::ptr::null(),
+                    call_internal: std::ptr::null(),
                     entry_point: std::ptr::null(),
                     divide: Vec::new(),
                 },
@@ -1198,21 +1200,6 @@ impl X64Generator for InterpreterGenerator {
         );
         self.terminal = true;
     }
-
-    fn bpf_internal_call(&mut self) {
-        let base_addr = i32::try_from(self.buffer as usize).expect("interpreter in first 2GB");
-        x64asm!(self
-            ; movsxd RTEMP, DWORD REL32_IMM
-            ; lea RINSN, [ RINSN + RTEMP*8 ]
-            // FIXME: maybe some code reuse here is possible with the epilogue?
-            ; movzx RTEMP, WORD [ RINSN ]
-            ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
-            ; lea RTEMP, [ DWORD base_addr + RTEMP ]
-            ; add RINSN, 8
-        );
-        invoke_support(self, self.supports.internal_call);
-        x64asm!(self; mov RINSN, [rsp]);
-    }
 }
 
 /// Emit a perf jitdump (`/tmp/jit-<pid>.dump`) describing the interpreter buffer.
@@ -1327,7 +1314,10 @@ pub(super) static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCod
     });
 
 struct SupportingCode {
-    internal_call: *const u8,
+    /// Internal call trampoline, invoked (see `invoke_support`) with the host address of the
+    /// target instruction in `temp`, and the address of the instruction to return to pushed
+    /// beforehand.
+    call_internal: *const u8,
     entry_point: *const u8,
     /// See `SupportingCode::divide`.
     divide: Vec<*const u8>,
@@ -1364,40 +1354,81 @@ impl SupportingCode {
     }
 
     pub fn generate_into(out: &mut InterpreterGenerator) -> SupportingCode {
-        // `[rsp + 16]` is the address of the instruction following the call, pushed by the call
-        // site.
-        let internal_call = unsafe { out.buffer.add(out.offset()) };
-        let call_depth = RuntimeEnvironmentSlot::CallDepth as i32;
-        let depth_exceeded = out.new_dynamic_label();
+        // `[rsp + 24]` is the address of the instruction following the call, once the target is
+        // pushed.
+        let call_internal = unsafe { out.buffer.add(out.offset()) };
+        let within_depth = out.new_dynamic_label();
+        let in_bounds = out.new_dynamic_label();
         x64asm!(out
             ; push RTEMP
             ; mov RTEMP, [rsp + 24]
             ;; bpf_validate_meter(out)
-            ; gs add QWORD [ call_depth ], 1
-            ; gs cmp QWORD [ call_depth ], MAX_CALL_DEPTH
-            ; jae =>depth_exceeded
-            // Like a taken branch, by `imm`.
-            ; movsxd RTEMP, DWORD [RTEMP - 4]
-            ; lea RMETER, [RMETER + RTEMP * 8]
+            ; gs add QWORD [ RuntimeEnvironmentSlot::CallDepth as i32 ], 1
+            ; gs cmp QWORD [ RuntimeEnvironmentSlot::CallDepth as i32 ], MAX_CALL_DEPTH
+            ; jb =>within_depth
+            ;; terminate(out, SIG_CALL_DEPTH_EXCEEDED)
+            ; =>within_depth
+            ; mov RTEMP, [rsp]
+            ; gs sub RTEMP, [ RuntimeEnvironmentSlot::TextSection as i32 ]
+            ; gs cmp RTEMP, [ RuntimeEnvironmentSlot::TextSectionLen as i32 ]
+            ; jb =>in_bounds
+            ; mov RTEMP, [rsp + 24]
+            ;; terminate(out, SIG_CALL_OUTSIDE_TEXT_SEGMENT)
+            ; =>in_bounds
+            ; and RTEMP, -(ebpf::INSN_SIZE as i32)
+        );
+
+        // In the JIT, the machine code to call is found via `jit_pc_section`. Otherwise this is the
+        // interpreter, and `insn` needs to point past the target instead.
+        let base_addr = i32::try_from(out.buffer as usize).expect("interpreter in first 2GB");
+        let interpreted = out.new_dynamic_label();
+        let resolved = out.new_dynamic_label();
+        x64asm!(out
+            // `insn` is restored after the call: the JIT's never changes, and the interpreter's
+            // is the instruction following the call.
+            ; push RINSN
+            ; gs add RTEMP, [ RuntimeEnvironmentSlot::TextSection as i32 ]
+            ; mov [rsp + 8], RTEMP
+            ; gs cmp QWORD [ RuntimeEnvironmentSlot::JitPcSection as i32 ], 0
+            ; je =>interpreted
+            // JIT specific: translate the jump address to a machine code address
+            ; gs sub RTEMP, [ RuntimeEnvironmentSlot::TextSection as i32 ]
+            ; shr RTEMP, 1
+            ; gs add RTEMP, [ RuntimeEnvironmentSlot::JitPcSection as i32 ]
+            ; mov WTEMP, [RTEMP]
+            ; gs add RTEMP, [ RuntimeEnvironmentSlot::JitTextSection as i32 ]
+            ; jmp =>resolved
+            ; =>interpreted
+            ; lea RINSN, [RTEMP + 8]
+            ; movzx RTEMP, WORD [RTEMP]
+            ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
+            ; lea RTEMP, [ DWORD base_addr + RTEMP ]
+        );
+        // `temp` is the code to call, `[rsp + 8]` the target instruction.
+        x64asm!(out
+            ; =>resolved
+            // Like a taken branch, from the instruction following the call to the target.
+            ; add RMETER, [rsp + 8]
+            ; sub RMETER, [rsp + 32]
+            ; mov [rsp + 8], RTEMP
             ; push R6
             ; push R7
             ; push R8
             ; push R9
             ; push R10
             ; add R10, STACK_FRAME_SIZE
-            ; call QWORD [rsp + 40]
+            ; call QWORD [rsp + 48]
             ; pop R10
             ; pop R9
             ; pop R8
             ; pop R7
             ; pop R6
+            ; pop RINSN
             ; add rsp, 8
             // `EXIT` leaves the remaining budget in `meter`, convert back to the instruction limit.
             ; add RMETER, [rsp + 16]
-            ; gs sub QWORD [ call_depth ], 1
+            ; gs sub QWORD [ RuntimeEnvironmentSlot::CallDepth as i32 ], 1
             ; ret
-            ; =>depth_exceeded
-            ;; terminate(out, SIG_CALL_DEPTH_EXCEEDED)
         );
 
         let last_reg = *GPREG_MAP.last().unwrap();
@@ -1419,12 +1450,7 @@ impl SupportingCode {
                                 .unwrap();
                             divide[index] = unsafe { out.buffer.add(out.offset()) };
                             Self::generate_div_mod_support(
-                                out,
-                                is_div,
-                                is_64,
-                                is_reg,
-                                dst_reg,
-                                src_reg,
+                                out, is_div, is_64, is_reg, dst_reg, src_reg,
                             );
                         }
                     }
@@ -1459,7 +1485,7 @@ impl SupportingCode {
         );
 
         Self {
-            internal_call,
+            call_internal,
             entry_point,
             divide,
         }
@@ -1584,6 +1610,7 @@ pub fn enter<C: crate::vm::ContextObject>(
         SIG_CALL_DEPTH_EXCEEDED => ProgramResult::Err(EbpfError::CallDepthExceeded),
         SIG_DIVIDE_BY_ZERO => ProgramResult::Err(EbpfError::DivideByZero),
         SIG_EXECUTION_OVERRUN => ProgramResult::Err(EbpfError::ExecutionOverrun),
+        SIG_CALL_OUTSIDE_TEXT_SEGMENT => ProgramResult::Err(EbpfError::CallOutsideTextSegment),
         _ => unreachable!("unexpected exit code {}", code),
     };
 }

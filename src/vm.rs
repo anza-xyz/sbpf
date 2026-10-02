@@ -277,6 +277,18 @@ pub enum RuntimeEnvironmentSlot {
     MemoryMapping = offset_of!(EbpfVm<DummyContextObject>, memory_mapping) as isize,
     /// [EbpfVm::register_trace]
     RegisterTrace = offset_of!(EbpfVm<DummyContextObject>, register_trace) as isize,
+    /// [EbpfVm::text_section]
+    TextSection = offset_of!(EbpfVm<DummyContextObject>, text_section) as isize,
+    /// [EbpfVm::text_section_len]
+    TextSectionLen = offset_of!(EbpfVm<DummyContextObject>, text_section_len) as isize,
+    /// [EbpfVm::text_section_vm_addr]
+    TextSectionVmAddr = offset_of!(EbpfVm<DummyContextObject>, text_section_vm_addr) as isize,
+    /// [EbpfVm::text_section_host_to_vm]
+    TextSectionHostToVm = offset_of!(EbpfVm<DummyContextObject>, text_section_host_to_vm) as isize,
+    /// [EbpfVm::jit_pc_section]
+    JitPcSection = offset_of!(EbpfVm<DummyContextObject>, jit_pc_section) as isize,
+    /// [EbpfVm::jit_text_section]
+    JitTextSection = offset_of!(EbpfVm<DummyContextObject>, jit_text_section) as isize,
 }
 
 /// A virtual machine to run eBPF programs.
@@ -365,6 +377,20 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub loader: Arc<BuiltinProgram<C>>,
     /// Collector for the instruction trace
     pub register_trace: Vec<RegisterTraceEntry>,
+    /// The text section being executed, for `ExecutionMode::Dynasm*`.
+    pub text_section: *const u8,
+    /// Length of `text_section` in bytes.
+    pub text_section_len: u64,
+    /// VM address of `text_section`.
+    pub text_section_vm_addr: u64,
+    /// `text_section_vm_addr - text_section`: translates host addresses within `text_section` to
+    /// VM addresses.
+    pub text_section_host_to_vm: u64,
+    /// For `ExecutionMode::DynasmJit`: offset in `jit_text_section` of the machine code for each
+    /// instruction of `text_section`. Null for `ExecutionMode::DynasmInterpreted`.
+    pub jit_pc_section: *const u32,
+    /// For `ExecutionMode::DynasmJit`: the machine code being executed.
+    pub jit_text_section: *const u8,
     /// TCP port for the debugger interface
     #[cfg(feature = "debugger")]
     pub debug_port: Option<u16>,
@@ -411,7 +437,21 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             #[cfg(feature = "debugger")]
             debug_metadata: None,
             register_trace: Vec::default(),
+            text_section: ptr::null(),
+            text_section_len: 0,
+            text_section_vm_addr: 0,
+            text_section_host_to_vm: 0,
+            jit_pc_section: ptr::null(),
+            jit_text_section: ptr::null(),
         }
+    }
+
+    /// Set `text_section` and the fields describing it.
+    pub fn set_text_section(&mut self, text_section: &[u8], vm_addr: u64) {
+        self.text_section = text_section.as_ptr();
+        self.text_section_len = text_section.len() as u64;
+        self.text_section_vm_addr = vm_addr;
+        self.text_section_host_to_vm = vm_addr.wrapping_sub(text_section.as_ptr() as u64);
     }
 
     /// Execute the program
@@ -473,14 +513,14 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
 
                 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
                 ExecutionMode::DynasmJit => {
-                    let (_, text) = executable.get_text_bytes();
-                    crate::codegen::x64::jit_and_run(text, self);
+                    let (text_vm_addr, text) = executable.get_text_bytes();
+                    crate::codegen::x64::jit_and_run(text, text_vm_addr, self);
                     break 'execute;
                 }
                 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
                 ExecutionMode::DynasmInterpreted => {
-                    let (_, text) = executable.get_text_bytes();
-                    crate::codegen::x64::interpret_and_run(text, self);
+                    let (text_vm_addr, text) = executable.get_text_bytes();
+                    crate::codegen::x64::interpret_and_run(text, text_vm_addr, self);
                     break 'execute;
                 }
             }

@@ -13,17 +13,16 @@ fn main() {
         255, 0x00, 0x00, 0x20, 0x00, 149, 0, 0, 0, 0, 0, 0, 0,
     ]);
 
-    let code = solana_sbpf::codegen::x64::JIT_TEMPLATES
-        .compile(&bpf)
-        .text_section;
-    for b in &code {
+    let program = solana_sbpf::codegen::x64::JIT_TEMPLATES.compile(&bpf);
+    let code = &program.text_section;
+    for b in code {
         print!("{:02X}", b);
     }
     println!();
 
     let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len()).unwrap();
     buffer.set_len(code.len());
-    buffer.copy_from_slice(&code);
+    buffer.copy_from_slice(code);
     let buffer = buffer.make_exec().unwrap();
     let entrypoint = buffer.as_ptr() as usize;
 
