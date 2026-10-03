@@ -38,7 +38,6 @@ fn main() {
     buffer.set_len(code.len());
     buffer.copy_from_slice(code);
     let buffer = buffer.make_exec().unwrap();
-    let entrypoint = buffer.as_ptr() as usize + program.pc_section[0] as usize;
 
     let mut duration = std::time::Duration::new(0, 0);
     let iters = 500;
@@ -48,15 +47,8 @@ fn main() {
         let mut vm = EbpfVm::new(loader.clone(), SBPFVersion::V3, &mut context, 0);
         vm.previous_instruction_meter = BUDGET;
         let start = std::time::Instant::now();
-        std::hint::black_box(solana_sbpf::codegen::x64::enter(
-            SBPFVersion::V3,
-            &bpf,
-            solana_sbpf::ebpf::MM_BYTECODE_START,
-            Some((&program.pc_section, buffer.as_ptr())),
-            entrypoint,
-            bpf.as_ptr().wrapping_add(8),
-            &mut vm,
-        ));
+        let jit = Some((&program.pc_section[..], buffer.as_ptr()));
+        std::hint::black_box(solana_sbpf::codegen::x64::enter(&executable, jit, &mut vm));
         remaining = BUDGET - vm.due_insn_count;
         duration += start.elapsed();
         assert!(matches!(

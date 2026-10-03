@@ -856,7 +856,7 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
 
 /// The interpreter step for the instructions with `opcode`, of the interpreter for the SBPF
 /// `version`.
-pub(super) fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
+fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
     let offset = InterpreterGenerator::step_offset(opcode);
     unsafe { interpreter(version).0.buffer.add(offset) }
 }
@@ -1199,34 +1199,43 @@ struct Frame {
     stack_frame_bump: u64,
 }
 
-/// Run the code at `start_addr` (machine code), with `vm.previous_instruction_meter` as the budget
-/// and `insn` as the initial value of `RINSN`.
+/// Run `executable` starting at `vm.registers[11]`, with `vm.previous_instruction_meter` as the
+/// budget.
 ///
-/// `bpf` is the text section at `bpf_vm_addr`, and `jit` is the `pc_section` and the machine code
-/// of the JIT output (`None` for the interpreter.)
+/// `jit` is the `pc_section` and the machine code (in executable memory) of the JIT output for the
+/// `executable`, or `None` to interpret it.
 pub fn enter<C: crate::vm::ContextObject>(
-    version: SBPFVersion,
-    bpf: &[u8],
-    bpf_vm_addr: u64,
+    executable: &Executable<C>,
     jit: Option<(&[u32], *const u8)>,
-    start_addr: usize,
-    insn: *const u8,
     vm: &mut crate::vm::EbpfVm<C>,
 ) {
+    let version = executable.get_sbpf_version();
+    let (bpf_vm_addr, bpf) = executable.get_text_bytes();
+    let pc = vm.registers[11] as usize;
+    let (start_addr, insn, jit_pc_section, jit_text_section) = match jit {
+        Some((pc_section, text_section)) => (
+            text_section as usize + pc_section[pc] as usize,
+            bpf.as_ptr().wrapping_add(ebpf::INSN_SIZE),
+            pc_section.as_ptr(),
+            text_section,
+        ),
+        None => {
+            let starting_insn = bpf.as_chunks::<{ ebpf::INSN_SIZE }>().0[pc];
+            let opcode = TemplateOpcode::of(u64::from_le_bytes(starting_insn));
+            (
+                interpreter_step(version, opcode) as usize,
+                bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE),
+                std::ptr::null(),
+                std::ptr::null(),
+            )
+        }
+    };
     let entry_point = interpreter(version).1.entry_point;
     let meter = initial_meter(bpf, vm);
-    let (jit_pc_section, jit_text_section) = match jit {
-        Some((pc_section, text_section)) => (pc_section.as_ptr(), text_section),
-        None => (std::ptr::null(), std::ptr::null()),
-    };
-    let config = vm.loader.get_config();
+    let config = executable.get_config();
     let (max_call_depth, stack_frame_size) = (config.max_call_depth, config.stack_frame_size);
-    // As in `Interpreter::push_frame`: the frames have gaps in between, in the memory mapping.
-    let frames_per_call = if version.stack_frame_gaps() && config.enable_stack_frame_gaps {
-        2
-    } else {
-        1
-    };
+    let gaps = version.stack_frame_gaps() && config.enable_stack_frame_gaps;
+    let frames_per_call = 1 + gaps as u64;
     let mut frame = Frame {
         vm: std::ptr::from_mut(vm).cast(),
         exit: std::ptr::null(),

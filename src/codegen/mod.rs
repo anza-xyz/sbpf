@@ -75,7 +75,6 @@ fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) 
 #[cfg(target_arch = "x86_64")]
 /// Compile `executable` and execute it, starting at `vm.registers[11]`.
 pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
-    let (bpf_vm_addr, bpf) = executable.get_text_bytes();
     let program = x64::jit_templates(executable.get_sbpf_version()).compile(executable);
     let code = &program.text_section;
     let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len())
@@ -85,31 +84,13 @@ pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm
     let buffer = buffer
         .make_exec()
         .expect("failed to make the JIT output executable");
-    let start_addr =
-        buffer.as_ptr() as usize + program.pc_section[vm.registers[11] as usize] as usize;
-    // The JIT output addresses the instructions relative to the second one.
-    x64::enter(
-        executable.get_sbpf_version(),
-        bpf,
-        bpf_vm_addr,
-        Some((&program.pc_section, buffer.as_ptr())),
-        start_addr,
-        bpf.as_ptr().wrapping_add(ebpf::INSN_SIZE),
-        vm,
-    )
+    x64::enter(executable, Some((&program.pc_section, buffer.as_ptr())), vm)
 }
 
 #[cfg(target_arch = "x86_64")]
 /// Interpret `executable`, starting at `vm.registers[11]`.
 pub fn interpret_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
-    let (bpf_vm_addr, bpf) = executable.get_text_bytes();
-    let pc = vm.registers[11] as usize;
-    let insn = bpf.as_chunks::<{ ebpf::INSN_SIZE }>().0[pc];
-    let version = executable.get_sbpf_version();
-    let step = x64::interpreter_step(version, TemplateOpcode::of(u64::from_le_bytes(insn)));
-    // The interpreter steps expect `insn` to point past the instruction being executed.
-    let insn = bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE);
-    x64::enter(version, bpf, bpf_vm_addr, None, step as usize, insn, vm)
+    x64::enter(executable, None, vm)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
