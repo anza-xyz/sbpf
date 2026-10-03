@@ -13,7 +13,7 @@ use dynasmrt::relocations::{Relocation, RelocationKind};
 use dynasmrt::{AssemblyOffset, DynamicLabel};
 use rand::rngs::SmallRng;
 use rand::{thread_rng, Rng, RngCore, SeedableRng};
-use std::convert::TryFrom;
+use std::convert::{TryFrom, TryInto};
 use std::mem::MaybeUninit;
 
 /// Size of the stack frame allocated for each internal call (fixed frames, as in SBPFv3.)
@@ -76,32 +76,11 @@ fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) 
     }
 }
 
-/// The instruction a template is generated for: the opcode and the destination and source
-/// registers.
-#[derive(Clone, Copy)]
-struct TemplateInsn {
-    op: u8,
-    dst: u8,
-    src: u8,
-}
-
-/// Every instruction to generate a template for, with BPF register numbers, in the order of the
-/// lower 16 bits of the instruction (the opcode, then the `dst` and `src` register numbers), which
-/// is how the templates are looked up.
-fn template_insns() -> impl Iterator<Item = TemplateInsn> {
-    (0..=u16::MAX).map(|bits| TemplateInsn {
-        op: bits as u8,
-        dst: (bits >> 8 & 0xf) as u8,
-        src: (bits >> 12) as u8,
-    })
-}
-
 #[cfg(target_arch = "x86_64")]
 /// Compile `executable` and execute it, starting at `vm.registers[11]`.
 pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
     let (bpf_vm_addr, bpf) = executable.get_text_bytes();
-    let noop_instruction_rate = executable.get_config().noop_instruction_rate;
-    let program = x64::JIT_TEMPLATES.compile(bpf, noop_instruction_rate);
+    let program = x64::JIT_TEMPLATES.compile(executable);
     let code = &program.text_section;
     let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len())
         .expect("failed to allocate executable memory for the JIT output");
@@ -128,8 +107,8 @@ pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm
 pub fn interpret_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
     let (bpf_vm_addr, bpf) = executable.get_text_bytes();
     let pc = vm.registers[11] as usize;
-    let insn = &bpf[pc * ebpf::INSN_SIZE..][..2];
-    let step = x64::interpreter_step(u16::from_le_bytes(<[u8; 2]>::try_from(insn).unwrap()));
+    let insn = bpf.as_chunks::<{ ebpf::INSN_SIZE }>().0[pc];
+    let step = x64::interpreter_step(TemplateOpcode::of(u64::from_le_bytes(insn)));
     // The interpreter steps expect `insn` to point past the instruction being executed.
     let insn = bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE);
     x64::enter(bpf, bpf_vm_addr, None, step as usize, insn, vm)
@@ -142,68 +121,82 @@ enum MemoryAccessKind {
     StoreReg,
 }
 
-const MAX_RELOCATIONS: usize = 8;
 
-#[derive(Copy, Clone)]
-struct Template<const SIZE: usize, R: Copy> {
-    buffer: [u8; SIZE],
-    bytes: usize,
-    // Relocations based on BPF instruction contents (offset, immediate) for which this template is
-    // instantiated for.
-    relocations: [std::mem::MaybeUninit<R>; MAX_RELOCATIONS],
-    num_relocations: usize,
+/// 16 bits of a BPF instruction: the opcode and registers.
+///
+/// The JIT templates and the interpreter steps use this part of the instruction to dispatch to the
+/// handlers/templates.
+#[derive(Clone, Copy)]
+#[repr(transparent)]
+struct TemplateOpcode(u16);
+
+impl TemplateOpcode {
+    const COUNT: usize = 1 + u16::MAX as usize;
+
+    /// Of the instruction `insn`.
+    fn of(insn: u64) -> Self {
+        Self(insn as u16)
+    }
+
+    /// Iterator over all instructions in order of the dispatch table.
+    fn all() -> impl Iterator<Item = Self> {
+        (0..=u16::MAX).map(Self)
+    }
+
+    fn index(self) -> usize {
+        usize::from(self.0)
+    }
+
+    fn op(self) -> u8 {
+        self.0 as u8
+    }
+
+    /// The BPF register number.
+    fn dst(self) -> u8 {
+        (self.0 >> 8 & 0xf) as u8
+    }
+
+    /// The BPF register number.
+    fn src(self) -> u8 {
+        (self.0 >> 12) as u8
+    }
 }
 
-impl<const SIZE: usize, R: Copy> Template<SIZE, R> {
-    pub const fn new() -> Self {
-        Self {
-            buffer: [0; SIZE],
-            bytes: 0,
-            relocations: [std::mem::MaybeUninit::uninit(); MAX_RELOCATIONS],
-            num_relocations: 0,
-        }
+
+const MAX_RELOCATIONS: usize = 8;
+
+/// Generates a template into the parts of `JitTemplates`.
+struct TemplateBuilder<'a, const SIZE: usize> {
+    layout: &'a mut TemplateLayout,
+    code: &'a mut [u8; SIZE],
+    relocations: &'a mut [TemplateRelocation; MAX_RELOCATIONS],
+}
+
+impl<const SIZE: usize> TemplateBuilder<'_, SIZE> {
+    fn code_mut(&mut self) -> &mut [u8] {
+        &mut self.code[..self.layout.len()]
     }
 
-    pub const fn buffer_mut(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.buffer.as_mut_ptr(), self.bytes) }
-    }
-
-    pub const fn relocations(&self) -> &[R] {
-        unsafe {
-            std::slice::from_raw_parts(self.relocations.as_ptr().cast::<R>(), self.num_relocations)
-        }
-    }
-
-    pub const fn add_relocation(&mut self, relocation: R) {
-        self.relocations[self.num_relocations].write(relocation);
-        self.num_relocations += 1;
+    fn add_relocation(&mut self, relocation: TemplateRelocation) {
+        self.relocations[usize::from(self.layout.num_relocations)] = relocation;
+        self.layout.num_relocations += 1;
     }
 
     #[track_caller]
-    pub const fn extend(&mut self, buffer: &[u8]) {
-        let mut i = 0;
-        while i < buffer.len() {
-            self.buffer[self.bytes] = buffer[i];
-            self.bytes += 1;
-            i += 1;
+    fn extend(&mut self, buffer: &[u8]) {
+        for &byte in buffer {
+            self.push(byte);
         }
     }
 
-    pub const fn offset(&self) -> usize {
-        self.bytes
+    fn offset(&self) -> usize {
+        self.layout.len()
     }
 
-    pub const fn push(&mut self, byte: u8) {
-        self.buffer[self.bytes] = byte;
-        self.bytes += 1;
-    }
-
-    pub const fn push_i8(&mut self, value: i8) {
-        self.push(value as u8);
-    }
-
-    pub const fn push_i32(&mut self, value: i32) {
-        self.extend(&i32::to_le_bytes(value));
+    #[track_caller]
+    fn push(&mut self, byte: u8) {
+        self.code[self.layout.len()] = byte;
+        self.layout.bytes += 1;
     }
 }
 
@@ -290,7 +283,7 @@ impl<R: Relocation + Copy> PatchFields<R> {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum TemplateRelocationKind {
     /// The JIT holds a pointer to the second instruction of the eBPF program in `insn`,
     /// whereas the templates default to addressing where `insn` is updated to point to right
@@ -309,7 +302,7 @@ enum TemplateRelocationKind {
 /// A relocation that can only be resolved once the template is instantiated for a specific eBPF
 /// instruction at a specific location: a 32-bit field in the template, set to the target of the
 /// relocation plus `addend`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct TemplateRelocation {
     /// Offset of the field within the template.
     field: u8,
@@ -320,6 +313,13 @@ struct TemplateRelocation {
 }
 
 impl TemplateRelocation {
+    /// For the unused entries, which `JitTemplates::emit` does not apply.
+    const UNUSED: Self = Self {
+        field: 0,
+        addend: 0,
+        kind: TemplateRelocationKind::InsnOffset,
+    };
+
     /// `patch` is a relocation reported by `dynasm` at `location` within the template.
     fn new<R: Relocation>(
         kind: TemplateRelocationKind,
@@ -385,7 +385,7 @@ impl TemplateRelocation {
                 let target = *target_pc
                     .and_then(|target_pc| pc_section.get(target_pc))
                     .expect("branch target out of bounds");
-                (target as usize).wrapping_sub(template_start)
+                ((target & !PADDING_DUE) as usize).wrapping_sub(template_start)
             }
         };
         let value = target.wrapping_add(self.addend as usize);
@@ -400,20 +400,69 @@ impl TemplateRelocation {
     }
 }
 
-/// Machine code templates the JIT output is assembled from.
-pub struct JitTemplates<const SIZE: usize> {
-    /// Indexed by the lower 16 bits of an instruction.
-    insns: Vec<Template<SIZE, TemplateRelocation>>,
-    /// Appended after the last instruction, as if it was at `pc = program.len()`.
-    execution_overrun: Template<SIZE, TemplateRelocation>,
-    /// For `pc_section` entries that are not valid jump targets (e.g. the second
-    /// halves of 16 byte instructions.)
-    invalid_jump_target: Template<SIZE, TemplateRelocation>,
-    /// Inserted between the other templates to diversify the output.
-    noop: Template<SIZE, TemplateRelocation>,
+/// What the first pass of `JitTemplates::compile` needs to know of a template, apart from the
+/// machine code and the relocations.
+#[derive(Clone, Copy, Debug)]
+struct TemplateLayout {
+    /// Length of the machine code.
+    bytes: u8,
+    num_relocations: u8,
+    /// Size of the BPF instruction this template is for, minus one.
+    ///
+    /// LD_DW_IMM template holds a 1, all others 0.
+    extra_bpf_insns: u8,
+    /// Does the code check the instruction meter (with the budget of the instruction itself)?
+    checks_meter: bool,
 }
 
-/// Longest run of no-ops `JitTemplates::compile` may insert ahead of the code.
+impl TemplateLayout {
+    /// Length of the machine code.
+    fn len(self) -> usize {
+        usize::from(self.bytes)
+    }
+}
+
+/// The JIT templates other than for the instructions.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+enum AuxTemplate {
+    /// Appended after the last instruction, as if it was at `pc = program.len()`.
+    ExecutionOverrun,
+    /// For `pc_section` entries that are not valid jump targets (e.g. the second halves of 16
+    /// byte instructions.)
+    InvalidJumpTarget,
+    /// Inserted between the other templates to diversify the output.
+    Noop,
+    /// Inserted ahead of an instruction (and instantiated for it) to check the instruction meter.
+    MeterCheckpoint,
+}
+
+impl AuxTemplate {
+    const COUNT: usize = 4;
+    /// Index within `JitTemplates`.
+    fn index(self) -> usize {
+        TemplateOpcode::COUNT + self as usize
+    }
+}
+
+const NUM_TEMPLATES: usize = TemplateOpcode::COUNT + AuxTemplate::COUNT;
+
+/// Machine code templates the JIT output is assembled from.
+///
+/// Split up, so that the first pass of `compile` only touches the layouts.
+pub struct JitTemplates<const SIZE: usize> {
+    layouts: Box<[TemplateLayout; NUM_TEMPLATES]>,
+    code: Box<[[u8; SIZE]; NUM_TEMPLATES]>,
+    relocations: Box<[[TemplateRelocation; MAX_RELOCATIONS]; NUM_TEMPLATES]>,
+}
+
+/// A bitflag set in `pc_section` by `JitTemplates::analyze` for the instructions that include a
+/// checkpoint.
+const CHECKPOINT_DUE: u32 = 1 << 31;
+/// Likewise for a no-op ahead of the instruction.
+const NOOP_DUE: u32 = 1 << 30;
+const PADDING_DUE: u32 = CHECKPOINT_DUE | NOOP_DUE;
+/// Longest run of no-ops `JitTemplates::compile` may insert at the beginning.
 const MAX_START_PADDING_LENGTH: usize = 256;
 
 /// The JIT output for a program.
@@ -425,96 +474,173 @@ pub struct JitProgram {
 }
 
 impl<const SIZE: usize> JitTemplates<SIZE> {
-    /// Compile `bpf` into machine code.
+    fn empty() -> Self {
+        let layout = TemplateLayout {
+            bytes: 0,
+            num_relocations: 0,
+            extra_bpf_insns: 0,
+            checks_meter: false,
+        };
+        const { assert!(SIZE <= u8::MAX as usize) };
+        Self {
+            layouts: vec![layout; NUM_TEMPLATES]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
+            code: vec![[0; SIZE]; NUM_TEMPLATES]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
+            relocations: vec![[TemplateRelocation::UNUSED; MAX_RELOCATIONS]; NUM_TEMPLATES]
+                .into_boxed_slice()
+                .try_into()
+                .unwrap(),
+        }
+    }
+
+    fn builder(&mut self, index: usize) -> TemplateBuilder<'_, SIZE> {
+        TemplateBuilder {
+            layout: &mut self.layouts[index],
+            code: &mut self.code[index],
+            relocations: &mut self.relocations[index],
+        }
+    }
+
+    fn insn_builder(&mut self, opcode: TemplateOpcode) -> TemplateBuilder<'_, SIZE> {
+        self.builder(opcode.index())
+    }
+
+    fn aux_builder(&mut self, template: AuxTemplate) -> TemplateBuilder<'_, SIZE> {
+        self.builder(template.index())
+    }
+
+    /// First pass analysis of the program to be compiled.
+    ///
+    /// This gathers
+    pub fn analyze<C: ContextObject>(&self, executable: &Executable<C>) -> (Vec<u32>, usize, usize) {
+        let bpf = executable.get_text_bytes().1;
+        let config = executable.get_config();
+        let noop_instruction_rate = config.noop_instruction_rate;
+        let instruction_meter_checkpoint_distance = config.instruction_meter_checkpoint_distance;
+        let (program, rest) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
+        assert!(rest.is_empty());
+        // The no-ops diversify the output to make the locations of specific code slightly less
+        // predictable.
+        let mut rng =
+            SmallRng::from_rng(thread_rng()).expect("failed to seed the JIT diversification");
+        let noop_threshold = u32::MAX.checked_div(noop_instruction_rate).unwrap_or(0);
+        let start_padding =
+            rng.gen_range(0..MAX_START_PADDING_LENGTH) * (noop_threshold != 0) as usize;
+
+        let mut pc_sec = Vec::with_capacity(program.len());
+        let mut position = 0;
+        let invalid_jump_target_loc = position as u32;
+        position += self.aux_layout(AuxTemplate::InvalidJumpTarget).len();
+        position += start_padding * self.aux_layout(AuxTemplate::Noop).len();
+        // Introduce checkpoints at certain points in the code; the instruction meter is otherwise
+        // only checked on control flow, so straight-line code could run arbitrarily far past the
+        // budget.
+        let mut until_checkpoint = instruction_meter_checkpoint_distance;
+        let mut program_iter = program.iter();
+        while let Some(insn) = program_iter.next() {
+            let insn = u64::from_le_bytes(*insn);
+            let layout = self.insn_layout(TemplateOpcode::of(insn));
+            let noop = if rng.next_u32() < noop_threshold {
+                position += self.aux_layout(AuxTemplate::Noop).len();
+                NOOP_DUE
+            } else {
+                0
+            };
+            let checkpoint = if layout.checks_meter {
+                until_checkpoint = instruction_meter_checkpoint_distance;
+                0
+            } else if until_checkpoint == 0 {
+                until_checkpoint = instruction_meter_checkpoint_distance;
+                position += self.aux_layout(AuxTemplate::MeterCheckpoint).len();
+                CHECKPOINT_DUE
+            } else {
+                until_checkpoint -= 1;
+                0
+            };
+            // Truncation is ruled out below, once the final `position` is known.
+            pc_sec.push(position as u32 | noop | checkpoint);
+            position += layout.len();
+            for _ in 0..layout.extra_bpf_insns {
+                program_iter.next();
+                pc_sec.push(invalid_jump_target_loc);
+            }
+        }
+        position += self.aux_layout(AuxTemplate::ExecutionOverrun).len();
+        assert!(position < NOOP_DUE as usize, "JIT output too large");
+        (pc_sec, position, start_padding)
+    }
+
+    /// Compile the text section of `executable` into machine code.
     ///
     /// Due to the time sensitive nature of this code we try to do minimal amount of work here.
     /// The result is a two pass algorithm where the first pass determines ahead of time where
     /// each instruction's machine code will be, allowing for e.g. forward jump relocations to be
     /// resolved immediately during the emission.
-    ///
-    /// See `Config::noop_instruction_rate` for `noop_instruction_rate`.
-    pub fn compile(&self, bpf: &[u8], noop_instruction_rate: u32) -> JitProgram {
-        let (program, rest) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
-        assert!(rest.is_empty());
-        let invalid_jump_target_loc = 0;
-
-        // The no-ops diversify the output like `JitCompiler` does, except that they can only go in
-        // between the templates, so the rate counts templates rather than host instructions. A
-        // no-op goes before a template with the probability of 1 / `noop_instruction_rate` (never
-        // for 0), decided by one `next_u32` each, so that the second pass can replay the decisions
-        // of the first one with a clone of the RNG.
-        let mut rng =
-            SmallRng::from_rng(thread_rng()).expect("failed to seed the JIT diversification");
-        let start_padding = if noop_instruction_rate == 0 {
-            0
-        } else {
-            rng.gen_range(0..MAX_START_PADDING_LENGTH)
-        };
-        let noop_threshold = u32::MAX.checked_div(noop_instruction_rate).unwrap_or(0);
-
-        let mut pc_sec = Vec::with_capacity(program.len());
-        let mut position = self.invalid_jump_target.offset();
-        let mut first_pass_rng = rng.clone();
-        position += start_padding * self.noop.offset();
-        let mut program_iter = program.iter();
-        while let Some(insn) = program_iter.next() {
-            let insn_size = insn_size(insn[0]);
-            let insn = u64::from_le_bytes(*insn);
-            let template = &self.insns[insn as u16 as usize];
-            if first_pass_rng.next_u32() < noop_threshold {
-                position += self.noop.offset();
-            }
-            pc_sec.push(u32::try_from(position).expect("JIT output too large"));
-            position += template.offset();
-            for _ in 1..(insn_size / 8) {
-                program_iter.next();
-                pc_sec.push(invalid_jump_target_loc);
-            }
-        }
-        position += self.execution_overrun.offset();
-
+    pub fn compile<C: ContextObject>(&self, executable: &Executable<C>) -> JitProgram {
+        let (mut pc_sec, output_len, start_padding) = self.analyze(executable);
         // Templates are always written out in large chunks to employ SIMD and avoid memcpy calls.
-        let mut text = Vec::with_capacity(position + SIZE);
-        Self::emit(&mut text, &pc_sec, 0, 0, &self.invalid_jump_target);
+        let mut text = Vec::with_capacity(output_len + SIZE);
+        self.emit_aux(&mut text, &pc_sec, 0, AuxTemplate::InvalidJumpTarget);
         for _ in 0..start_padding {
-            Self::emit(&mut text, &pc_sec, 0, 0, &self.noop);
+            self.emit_aux(&mut text, &pc_sec, 0, AuxTemplate::Noop);
         }
-        let mut program_iter = program.iter().enumerate();
-        while let Some((pc, insn)) = program_iter.next() {
+
+        let bpf = executable.get_text_bytes().1;
+        let (program, _) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
+        let mut program_iter = program.iter().zip(&pc_sec).enumerate();
+        while let Some((pc, (insn, &entry))) = program_iter.next() {
             let insn = u64::from_le_bytes(*insn);
-            for _ in 1..(insn_size(insn as u8) / 8) {
+            let opcode = TemplateOpcode::of(insn);
+            for _ in 0..self.insn_layout(opcode).extra_bpf_insns {
                 program_iter.next();
             }
-            if rng.next_u32() < noop_threshold {
-                Self::emit(&mut text, &pc_sec, 0, 0, &self.noop);
+            if entry & PADDING_DUE != 0 {
+                if entry & NOOP_DUE != 0 {
+                    self.emit_aux(&mut text, &pc_sec, pc, AuxTemplate::Noop);
+                }
+                if entry & CHECKPOINT_DUE != 0 {
+                    self.emit_aux(&mut text, &pc_sec, pc, AuxTemplate::MeterCheckpoint);
+                }
             }
-            let tpl = &self.insns[insn as u16 as usize];
-            Self::emit(&mut text, &pc_sec, pc, insn, tpl);
+            self.emit(&mut text, &pc_sec, pc, insn, opcode.index());
         }
-        Self::emit(
-            &mut text,
-            &pc_sec,
-            program.len(),
-            0,
-            &self.execution_overrun,
-        );
-        debug_assert_eq!(text.len(), position);
+        let pc = program.len();
+        self.emit_aux(&mut text, &pc_sec, pc, AuxTemplate::ExecutionOverrun);
+        debug_assert_eq!(text.len(), output_len);
+        for entry in &mut pc_sec {
+            *entry &= !PADDING_DUE;
+        }
         JitProgram {
             pc_section: pc_sec,
             text_section: text,
         }
     }
 
-    /// Append `template` instantiated for the instruction `insn` at `pc` to `text`, which must
-    /// have at least `SIZE` bytes of spare capacity.
+    fn insn_layout(&self, opcode: TemplateOpcode) -> TemplateLayout {
+        self.layouts[opcode.index()]
+    }
+
+    fn aux_layout(&self, template: AuxTemplate) -> TemplateLayout {
+        self.layouts[template.index()]
+    }
+
+    /// Append the `template` instantiated for `pc` to `text`, see `emit`.
     #[inline(always)]
-    fn emit(
-        text: &mut Vec<u8>,
-        pc_section: &[u32],
-        pc: usize,
-        insn: u64,
-        template: &Template<SIZE, TemplateRelocation>,
-    ) {
+    fn emit_aux(&self, text: &mut Vec<u8>, pc_section: &[u32], pc: usize, template: AuxTemplate) {
+        self.emit(text, pc_section, pc, 0, template.index());
+    }
+
+    /// Append the template at `index` instantiated for the instruction `insn` at `pc` to `text`,
+    /// which must have at least `SIZE` bytes of spare capacity.
+    #[inline(always)]
+    fn emit(&self, text: &mut Vec<u8>, pc_section: &[u32], pc: usize, insn: u64, index: usize) {
+        let layout = self.layouts[index];
+        let len = layout.len();
         let start = text.len();
         let out = text
             .spare_capacity_mut()
@@ -525,16 +651,17 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         const SHORT: usize = 16;
         const { assert!(SIZE >= SHORT) };
         let (out_short, out_rest) = out.split_at_mut(SHORT);
-        let (short, rest) = template.buffer.split_at(SHORT);
+        let (short, rest) = self.code[index].split_at(SHORT);
         out_short.write_copy_of_slice(short);
-        if template.offset() > SHORT {
+        if len > SHORT {
             out_rest.write_copy_of_slice(rest);
         }
-        for relocation in template.relocations() {
+        let relocations = &self.relocations[index][..usize::from(layout.num_relocations)];
+        for relocation in relocations {
             relocation.apply(out, start, pc, insn, pc_section);
         }
         // SAFETY: just initialized at least the template's length past the end.
-        unsafe { text.set_len(start + template.offset()) };
+        unsafe { text.set_len(start + len) };
     }
 }
 

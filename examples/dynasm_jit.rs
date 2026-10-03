@@ -1,6 +1,7 @@
 use solana_sbpf::{
-    program::{BuiltinProgram, SBPFVersion},
-    vm::EbpfVm,
+    elf::Executable,
+    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+    vm::{Config, EbpfVm},
 };
 use std::sync::Arc;
 use test_utils::TestContextObject;
@@ -14,7 +15,19 @@ fn main() {
     ]);
 
     // No no-ops, so that the timings are reproducible.
-    let program = solana_sbpf::codegen::x64::JIT_TEMPLATES.compile(&bpf, 0);
+    let config = Config {
+        noop_instruction_rate: 0,
+        ..Config::default()
+    };
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        &bpf,
+        loader.clone(),
+        SBPFVersion::V3,
+        FunctionRegistry::default(),
+    )
+    .unwrap();
+    let program = solana_sbpf::codegen::x64::JIT_TEMPLATES.compile(&executable);
     let code = &program.text_section;
     for b in code {
         print!("{:02X}", b);
@@ -30,7 +43,6 @@ fn main() {
     let mut duration = std::time::Duration::new(0, 0);
     let iters = 500;
     let mut remaining = 0;
-    let loader = Arc::new(BuiltinProgram::new_mock());
     for _ in 0..iters {
         let mut context = TestContextObject::new(BUDGET);
         let mut vm = EbpfVm::new(loader.clone(), SBPFVersion::V3, &mut context, 0);

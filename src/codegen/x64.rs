@@ -41,20 +41,13 @@ const GPREG_MAP: [u8; 11] = [
          // care to generate instructions accordingly.
 ];
 
-/// `insn` with its BPF registers mapped to the machine ones, or `u8::MAX` for the register
-/// numbers not naming a BPF register.
-fn with_machine_regs(insn: TemplateInsn) -> TemplateInsn {
-    let reg = |bpf_reg: u8| {
-        GPREG_MAP
-            .get(usize::from(bpf_reg))
-            .copied()
-            .unwrap_or(u8::MAX)
-    };
-    TemplateInsn {
-        op: insn.op,
-        dst: reg(insn.dst),
-        src: reg(insn.src),
-    }
+/// The machine register for the BPF one, or `u8::MAX` for the register numbers not naming a BPF
+/// register.
+fn machine_reg(bpf_reg: u8) -> u8 {
+    GPREG_MAP
+        .get(usize::from(bpf_reg))
+        .copied()
+        .unwrap_or(u8::MAX)
 }
 
 /// Is the value in the provided register disposable/temporary?
@@ -92,16 +85,16 @@ macro_rules! x64asm {
     // replace ALU_SRC() operand with either a source register for ALU instructions using source
     // register operand, or an immediate fetch for `_IMM` ALU instructions.
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} ALU_SRC8 $($rest:tt)*) => {
-        x64asm!(@munch {$output; [ $($acc)* ] [ ; if ($output.insn().op & ebpf::BPF_X) == ebpf::BPF_X {
-            x64asm!(@munch {$output; [;] [$($curr)*]} Rb($output.insn().src))
+        x64asm!(@munch {$output; [ $($acc)* ] [ ; if ($output.opcode().op() & ebpf::BPF_X) == ebpf::BPF_X {
+            x64asm!(@munch {$output; [;] [$($curr)*]} Rb(machine_reg($output.opcode().src())))
           } else {
             x64asm!(@munch {$output; [;] [$($curr)*]} BYTE REL32_IMM)
           }
         ]} $($rest)*)
     };
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} ALU_SRC32 $($rest:tt)*) => {
-        x64asm!(@munch {$output; [ $($acc)* ] [ ; if ($output.insn().op & ebpf::BPF_X) == ebpf::BPF_X {
-            x64asm!(@munch {$output; [;] [$($curr)*]} Rd($output.insn().src))
+        x64asm!(@munch {$output; [ $($acc)* ] [ ; if ($output.opcode().op() & ebpf::BPF_X) == ebpf::BPF_X {
+            x64asm!(@munch {$output; [;] [$($curr)*]} Rd(machine_reg($output.opcode().src())))
           } else {
             x64asm!(@munch {$output; [;] [$($curr)*]} DWORD REL32_IMM)
           }
@@ -148,7 +141,6 @@ trait X64Generator {
     fn push_i64(&mut self, value: i64) {
         self.extend(&value.to_le_bytes());
     }
-    fn align(&mut self, alignment: usize, with: u8);
     fn global_reloc(
         &mut self,
         name: &'static str,
@@ -180,17 +172,25 @@ trait X64Generator {
     fn new_dynamic_label(&mut self) -> Self::DynamicLabel;
     fn dynamic_label(&mut self, id: Self::DynamicLabel);
 
-    /// The instruction being generated, with the physical registers (see `physical_regs`.)
-    fn insn(&self) -> TemplateInsn;
+    /// Of the instruction being generated.
+    fn opcode(&self) -> TemplateOpcode;
     fn supports(&self) -> &SupportingCode;
 
     // Generate code to handle branch taken case.
     fn bpf_taken_branch(&mut self);
+
+    /// The code generated so far checks the instruction meter.
+    fn meter_checked(&mut self);
 }
 
 /// Produce a template for a single (currently processed) instruction.
 fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
-    let TemplateInsn { op, dst, src } = out.insn();
+    let opcode = out.opcode();
+    let (op, dst, src) = (
+        opcode.op(),
+        machine_reg(opcode.dst()),
+        machine_reg(opcode.src()),
+    );
     let is_alu64 = (op & ebpf::BPF_CLS_MASK) == ebpf::BPF_ALU64_STORE;
 
     match op {
@@ -425,6 +425,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::CALL_IMM => {
             load_next_insn(out);
             if src == GPREG_MAP[1] {
+                out.meter_checked();
                 let call_internal = out.supports().call_internal;
                 x64asm!(out
                     ; push RTEMP
@@ -435,6 +436,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
                     ; pop RTEMP
                 );
             } else if src == GPREG_MAP[0] {
+                out.meter_checked();
                 invoke_support(out, out.supports().syscall);
             } else {
                 terminate(out, SIG_INVALID_INSN)
@@ -612,6 +614,7 @@ fn terminate<G: X64Generator + ?Sized>(out: &mut G, code: i8) {
 ///
 /// `temp` must contain the address of the next BPF instruction.
 fn bpf_validate_meter<G: X64Generator + ?Sized>(out: &mut G) {
+    out.meter_checked();
     let within_budget = out.new_dynamic_label();
     x64asm!(out
         ; cmp RTEMP, RMETER
@@ -623,10 +626,10 @@ fn bpf_validate_meter<G: X64Generator + ?Sized>(out: &mut G) {
 
 const MAX_JIT_TEMPLATE_SIZE: usize = 48;
 
-struct JITGenerator {
-    template: super::Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation>,
-    /// With BPF register numbers.
-    insn: TemplateInsn,
+struct JITGenerator<'a> {
+    template: TemplateBuilder<'a, MAX_JIT_TEMPLATE_SIZE>,
+    /// `None` for an `AuxTemplate`.
+    opcode: Option<TemplateOpcode>,
     /// Temporary relocations within the code that will be resolved before the template is
     /// finalized.
     ///
@@ -636,30 +639,37 @@ struct JITGenerator {
     supports: &'static SupportingCode,
 }
 
-impl JITGenerator {
-    pub fn new() -> Self {
+impl<'a> JITGenerator<'a> {
+    fn new(
+        template: TemplateBuilder<'a, MAX_JIT_TEMPLATE_SIZE>,
+        opcode: Option<TemplateOpcode>,
+    ) -> Self {
         Self {
-            template: super::Template::new(),
-            insn: TemplateInsn {
-                op: 0,
-                dst: 0,
-                src: 0,
-            },
+            template,
+            opcode,
             relocs: LabelRelocs::new(),
             supports: &INTERPRETER_AND_SUPPORTS.1,
         }
     }
 
+    /// Generator for a BPF instruction.
+    fn for_insn(
+        templates: &'a mut JitTemplates<MAX_JIT_TEMPLATE_SIZE>,
+        opcode: TemplateOpcode,
+    ) -> Self {
+        let template = templates.insn_builder(opcode);
+        template.layout.extra_bpf_insns = (insn_size(opcode.op()) / 8) as u8 - 1;
+        Self::new(template, Some(opcode))
+    }
+
     /// Resolve all the relocations that can be resolved without knowing the specific eBPF
-    /// instruction and return the template. The generator is reset to generate the next template.
-    fn finalize(&mut self) -> Template<MAX_JIT_TEMPLATE_SIZE, TemplateRelocation> {
-        let mut template = std::mem::replace(&mut self.template, Template::new());
-        self.relocs.resolve(template.buffer_mut(), None);
-        template
+    /// instruction.
+    fn finalize(mut self) {
+        self.relocs.resolve(self.template.code_mut(), None);
     }
 }
 
-impl X64Generator for JITGenerator {
+impl X64Generator for JITGenerator<'_> {
     type DynamicLabel = DynamicLabel;
 
     #[track_caller]
@@ -676,15 +686,11 @@ impl X64Generator for JITGenerator {
     }
 
     fn push_i32(&mut self, value: i32) {
-        self.template.push_i32(value);
+        self.template.extend(&value.to_le_bytes());
     }
 
     fn push_i8(&mut self, value: i8) {
-        self.template.push_i8(value);
-    }
-
-    fn align(&mut self, _alignment: usize, _with: u8) {
-        // Ignore alignment requests; we're generating templates.
+        self.template.push(value as u8);
     }
 
     fn global_reloc(
@@ -739,8 +745,9 @@ impl X64Generator for JITGenerator {
         self.relocs.dynamic_label(id, self.offset());
     }
 
-    fn insn(&self) -> TemplateInsn {
-        with_machine_regs(self.insn)
+    fn opcode(&self) -> TemplateOpcode {
+        self.opcode
+            .expect("not generating the template for an instruction")
     }
 
     fn supports(&self) -> &SupportingCode {
@@ -754,37 +761,54 @@ impl X64Generator for JITGenerator {
             ; jmp ->template_taken_branch
         );
     }
+
+    fn meter_checked(&mut self) {
+        self.template.layout.checks_meter = true;
+    }
 }
 
 // TODO: when dynasm supports const codegen, we can make these be generated at compile time into an
 // array.
 /// JIT templates for SBPFv3.
 pub static JIT_TEMPLATES: LazyLock<JitTemplates<MAX_JIT_TEMPLATE_SIZE>> = LazyLock::new(|| {
-    let mut insns = Vec::with_capacity(0x10000);
-    let mut generator = JITGenerator::new();
-    for insn in template_insns() {
-        generator.insn = insn;
+    type Templates = JitTemplates<MAX_JIT_TEMPLATE_SIZE>;
+    let mut templates = Templates::empty();
+    for opcode in TemplateOpcode::all() {
+        let mut generator = JITGenerator::for_insn(&mut templates, opcode);
         bpf_insn_template(&mut generator);
-        insns.push(generator.finalize());
+        generator.finalize();
     }
-    load_next_insn(&mut generator);
-    terminate(&mut generator, SIG_EXECUTION_OVERRUN);
-    let execution_overrun = generator.finalize();
-    terminate(&mut generator, SIG_INVALID_INSN);
-    let invalid_jump_target = generator.finalize();
-    x64asm!(generator; nop);
-    let noop = generator.finalize();
-    JitTemplates {
-        insns,
-        execution_overrun,
-        invalid_jump_target,
-        noop,
-    }
+    let generate = |templates: &mut Templates, template, f: fn(&mut JITGenerator)| {
+        let mut generator = JITGenerator::new(templates.aux_builder(template), None);
+        f(&mut generator);
+        generator.finalize();
+    };
+    generate(&mut templates, AuxTemplate::ExecutionOverrun, |generator| {
+        load_next_insn(generator);
+        // Running out of budget takes precedence, as in `Interpreter::step`.
+        bpf_validate_meter(generator);
+        terminate(generator, SIG_EXECUTION_OVERRUN);
+    });
+    generate(
+        &mut templates,
+        AuxTemplate::InvalidJumpTarget,
+        |generator| terminate(generator, SIG_INVALID_INSN),
+    );
+    generate(
+        &mut templates,
+        AuxTemplate::Noop,
+        |generator| x64asm!(generator; nop),
+    );
+    generate(&mut templates, AuxTemplate::MeterCheckpoint, |generator| {
+        load_next_insn(generator);
+        bpf_validate_meter(generator);
+    });
+    templates
 });
 
-/// The interpreter step for the instruction with the lower 16 bits `insn`.
-pub(super) fn interpreter_step(insn: u16) -> *const u8 {
-    let offset = usize::from(insn) << InterpreterGenerator::STEP_SIZE_LOG2;
+/// The interpreter step for the instructions with `opcode`.
+pub(super) fn interpreter_step(opcode: TemplateOpcode) -> *const u8 {
+    let offset = InterpreterGenerator::step_offset(opcode);
     unsafe { INTERPRETER_AND_SUPPORTS.0.buffer.add(offset) }
 }
 
@@ -870,8 +894,8 @@ struct InterpreterGenerator {
     relocs: LabelRelocs<SimpleRelocation>,
     supports: SupportingCode,
     offset: usize,
-    /// With BPF register numbers.
-    insn: TemplateInsn,
+    /// Of the step being generated.
+    opcode: TemplateOpcode,
     /// Is the code generated for this instruction terminal?
     ///
     /// No further instructions other than the epilogue expected to appear after this point.
@@ -883,6 +907,11 @@ impl InterpreterGenerator {
     const STEP_TABLE_SIZE: usize = 0x1_0000 * (1 << Self::STEP_SIZE_LOG2);
     const STEPS_SIZE: usize = Self::STEP_TABLE_SIZE + SupportingCode::LEN;
 
+    /// Offset into the `buffer` for this opcode.
+    fn step_offset(opcode: TemplateOpcode) -> usize {
+        opcode.index() << Self::STEP_SIZE_LOG2
+    }
+
     pub fn new() -> Self {
         unsafe {
             let buffer = maps::map(Self::STEPS_SIZE);
@@ -890,11 +919,7 @@ impl InterpreterGenerator {
                 buffer,
                 relocs: LabelRelocs::new(),
                 offset: 0,
-                insn: TemplateInsn {
-                    op: 0,
-                    dst: 0,
-                    src: 0,
-                },
+                opcode: TemplateOpcode(0),
                 terminal: false,
                 supports: SupportingCode {
                     call_internal: std::ptr::null(),
@@ -937,21 +962,6 @@ impl X64Generator for InterpreterGenerator {
 
     fn offset(&self) -> usize {
         self.offset
-    }
-
-    fn align(&mut self, alignment: usize, with: u8) {
-        let len = (alignment - self.offset % alignment) % alignment;
-        assert!(
-            self.offset.saturating_add(len) <= InterpreterGenerator::STEPS_SIZE,
-            "0x{:x} 0x{:x} 0x{:x}",
-            self.offset,
-            len,
-            InterpreterGenerator::STEPS_SIZE
-        );
-        unsafe {
-            self.buffer.add(self.offset).write_bytes(with, len);
-            self.offset += len;
-        }
     }
 
     fn push(&mut self, byte: u8) {
@@ -1001,8 +1011,8 @@ impl X64Generator for InterpreterGenerator {
         self.relocs.dynamic_label(id, self.offset);
     }
 
-    fn insn(&self) -> TemplateInsn {
-        with_machine_regs(self.insn)
+    fn opcode(&self) -> TemplateOpcode {
+        self.opcode
     }
 
     fn supports(&self) -> &SupportingCode {
@@ -1017,41 +1027,53 @@ impl X64Generator for InterpreterGenerator {
         );
         self.terminal = true;
     }
+
+    // Every step checks the meter anyway.
+    fn meter_checked(&mut self) {}
 }
 
 static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCode)> = LazyLock::new(|| {
     let mut generator = InterpreterGenerator::new();
     let base_addr = i32::try_from(generator.buffer as usize).expect("interpreter in first 2GB");
-    for insn in template_insns() {
-        generator.insn = insn;
-        let step_start = generator.offset;
+    for opcode in TemplateOpcode::all() {
+        let step_start = InterpreterGenerator::step_offset(opcode);
+        generator.opcode = opcode;
+        generator.offset = step_start;
         bpf_insn_template(&mut generator);
         generator.terminal = false;
-        if insn_size(insn.op) == ebpf::INSN_SIZE {
-            x64asm!(generator
-                ; movzx RTEMP, WORD [ RINSN ]
-                ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
-                ; lea RTEMP, [ DWORD base_addr + RTEMP ]
-                ; add RINSN, 8
-                ; jmp RTEMP
-            );
+        // `insn` points at the last 8 bytes of the instruction just executed.
+        let size = i8::try_from(insn_size(opcode.op())).unwrap();
+        let next_insn = if size == 8 {
+            RINSN
         } else {
-            let size = i8::try_from(insn_size(insn.op)).unwrap();
-            // `insn` points at the second half.
-            x64asm!(generator
-                ; movzx RTEMP, WORD [ BYTE (size - 8) + RINSN ]
-                ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
-                ; lea RTEMP, [ DWORD base_addr + RTEMP ]
-                ; add RINSN, size as i32
-                ; jmp RTEMP
-            );
-        }
+            x64asm!(generator; lea RTEMP, [ BYTE (size - 8) + RINSN ]);
+            RTEMP
+        };
+        // Before dispatching the next instruction, check what the JIT does with the meter
+        // checkpoints and the `execution_overrun` template, in the order of `Interpreter::step`.
+        // `meter` and the limit are both the end of the last instruction that may be executed.
+        let (exceeded, overrun) = (generator.new_dynamic_label(), generator.new_dynamic_label());
+        x64asm!(generator
+            ; cmp Rq(next_insn), RMETER
+            ; jae BYTE =>exceeded
+            ; cmp Rq(next_insn), rbp => Frame[BYTE -1].text_section_limit
+            ; jae BYTE =>overrun
+            ; movzx RTEMP, WORD [ BYTE (size - 8) + RINSN ]
+            ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
+            ; lea RTEMP, [ DWORD base_addr + RTEMP ]
+            ; add RINSN, size as i32
+            ; jmp RTEMP
+            ; =>exceeded
+            ;; terminate(&mut generator, SIG_EXCEEDED_MAX_INSTRUCTIONS)
+            ; =>overrun
+            ; lea RTEMP, [ BYTE size + RINSN ]
+            ;; terminate(&mut generator, SIG_EXECUTION_OVERRUN)
+        );
         assert!(
             generator.offset - step_start <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
             "step for {:#x} is too long",
-            insn.op
+            opcode.0
         );
-        x64asm!(generator; .align 1 << InterpreterGenerator::STEP_SIZE_LOG2);
     }
 
     let buffer = unsafe {
@@ -1084,6 +1106,8 @@ struct Frame {
     text_section: *const u8,
     /// Length of `text_section` in bytes.
     text_section_len: u64,
+    /// The end of `text_section`.
+    text_section_limit: *const u8,
     /// Translates host addresses within `text_section` to VM addresses.
     text_section_host_to_vm: u64,
     /// For the JIT output: offset in `jit_text_section` of the machine code for each instruction
@@ -1122,6 +1146,7 @@ pub fn enter<C: crate::vm::ContextObject>(
         start: start_addr,
         text_section: bpf.as_ptr(),
         text_section_len: bpf.len() as u64,
+        text_section_limit: bpf.as_ptr_range().end,
         text_section_host_to_vm: bpf_vm_addr.wrapping_sub(bpf.as_ptr() as u64),
         jit_pc_section,
         jit_text_section,
