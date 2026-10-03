@@ -4805,6 +4805,54 @@ fn test_direct_stores() {
     }
 }
 
+#[cfg(all(feature = "jit", target_arch = "x86_64"))]
+#[test]
+fn test_jmp32_sbpfv0() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // There is no JMP32 class in SBPFv0, which the verifier rejects, so the program is not
+    // verified.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    let program = [
+        [0xb7, 0x00, 0, 0, 0, 0, 0, 0], // mov64 r0, 0
+        [0xb7, 0x10, 0, 0, 1, 0, 0, 0], // mov64 r1, 1
+        [0x16, 0x01, 1, 0, 1, 0, 0, 0], // jeq32 r1, 1, +1
+        [0xb7, 0x00, 0, 0, 1, 0, 0, 0], // mov64 r0, 1
+        [0x95, 0, 0, 0, 0, 0, 0, 0],    // exit
+    ]
+    .concat();
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        &program,
+        Arc::new(BuiltinProgram::new_loader(config)),
+        SBPFVersion::V0,
+        FunctionRegistry::default(),
+    )
+    .unwrap();
+    for (name, mode) in [
+        ("interpreter", ExecutionMode::Interpreted),
+        ("dynasm jit", ExecutionMode::DynasmJit),
+        ("dynasm interpreter", ExecutionMode::DynasmInterpreted),
+    ] {
+        let mut context_object = TestContextObject::new(10);
+        create_vm!(
+            vm,
+            &executable,
+            &mut context_object,
+            stack,
+            heap,
+            vec![],
+            None
+        );
+        let mut mode = mode;
+        let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+        let (_, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+        let expected = ProgramResult::Err(EbpfError::UnsupportedInstruction);
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "{name}");
+    }
+}
+
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 #[test]
 fn test_max_call_depth_zero() {

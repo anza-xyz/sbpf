@@ -69,9 +69,8 @@ impl SupportingCode {
             ; push RTEMP
             ; mov RTEMP, [rsp + 24]
             ;; bpf_validate_meter(out)
-            ; add QWORD rbp => Frame[BYTE -1].call_depth, 1
-            ; cmp QWORD rbp => Frame[BYTE -1].call_depth, MAX_CALL_DEPTH
-            ; jb =>within_depth
+            ; sub QWORD rbp => Frame[BYTE -1].calls_remaining, 1
+            ; jnz =>within_depth
             ;; terminate(out, SIG_CALL_DEPTH_EXCEEDED)
             ; =>within_depth
             ; mov RTEMP, [rsp]
@@ -126,7 +125,7 @@ impl SupportingCode {
             ; push R8
             ; push R9
             ; push R10
-            ; add R10, STACK_FRAME_SIZE
+            ; add R10, rbp => Frame[BYTE -1].stack_frame_bump
             ; call QWORD [rsp + 40]
             ; pop R10
             ; pop R9
@@ -139,7 +138,7 @@ impl SupportingCode {
             ; add rsp, 8
             // `EXIT` leaves the remaining budget in `meter`, convert back to the instruction limit.
             ; add RMETER, [rsp + 16]
-            ; sub QWORD rbp => Frame[BYTE -1].call_depth, 1
+            ; add QWORD rbp => Frame[BYTE -1].calls_remaining, 1
             ; ret
         );
 

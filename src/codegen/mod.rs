@@ -7,6 +7,7 @@ pub mod x64;
 use crate::ebpf;
 use crate::elf::Executable;
 use crate::error::{EbpfError, ProgramResult};
+use crate::program::SBPFVersion;
 use crate::vm::{ContextObject, EbpfVm};
 use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
 use dynasmrt::relocations::{Relocation, RelocationKind};
@@ -15,11 +16,6 @@ use rand::rngs::SmallRng;
 use rand::{thread_rng, Rng, RngCore, SeedableRng};
 use std::convert::{TryFrom, TryInto};
 use std::mem::MaybeUninit;
-
-/// Size of the stack frame allocated for each internal call (fixed frames, as in SBPFv3.)
-const STACK_FRAME_SIZE: i32 = 4096;
-/// Maximum internal call depth (as in SBPFv3.)
-const MAX_CALL_DEPTH: i32 = 64;
 
 /// Size of the instruction with the opcode `op`, in bytes.
 const fn insn_size(op: u8) -> usize {
@@ -80,7 +76,7 @@ fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) 
 /// Compile `executable` and execute it, starting at `vm.registers[11]`.
 pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
     let (bpf_vm_addr, bpf) = executable.get_text_bytes();
-    let program = x64::JIT_TEMPLATES.compile(executable);
+    let program = x64::jit_templates(executable.get_sbpf_version()).compile(executable);
     let code = &program.text_section;
     let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len())
         .expect("failed to allocate executable memory for the JIT output");
@@ -93,6 +89,7 @@ pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm
         buffer.as_ptr() as usize + program.pc_section[vm.registers[11] as usize] as usize;
     // The JIT output addresses the instructions relative to the second one.
     x64::enter(
+        executable.get_sbpf_version(),
         bpf,
         bpf_vm_addr,
         Some((&program.pc_section, buffer.as_ptr())),
@@ -108,10 +105,11 @@ pub fn interpret_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut 
     let (bpf_vm_addr, bpf) = executable.get_text_bytes();
     let pc = vm.registers[11] as usize;
     let insn = bpf.as_chunks::<{ ebpf::INSN_SIZE }>().0[pc];
-    let step = x64::interpreter_step(TemplateOpcode::of(u64::from_le_bytes(insn)));
+    let version = executable.get_sbpf_version();
+    let step = x64::interpreter_step(version, TemplateOpcode::of(u64::from_le_bytes(insn)));
     // The interpreter steps expect `insn` to point past the instruction being executed.
     let insn = bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE);
-    x64::enter(bpf, bpf_vm_addr, None, step as usize, insn, vm)
+    x64::enter(version, bpf, bpf_vm_addr, None, step as usize, insn, vm)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -120,7 +118,6 @@ enum MemoryAccessKind {
     StoreImm,
     StoreReg,
 }
-
 
 /// 16 bits of a BPF instruction: the opcode and registers.
 ///
@@ -161,7 +158,6 @@ impl TemplateOpcode {
         (self.0 >> 12) as u8
     }
 }
-
 
 const MAX_RELOCATIONS: usize = 8;
 
@@ -517,7 +513,10 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
     /// First pass analysis of the program to be compiled.
     ///
     /// This gathers
-    pub fn analyze<C: ContextObject>(&self, executable: &Executable<C>) -> (Vec<u32>, usize, usize) {
+    pub fn analyze<C: ContextObject>(
+        &self,
+        executable: &Executable<C>,
+    ) -> (Vec<u32>, usize, usize) {
         let bpf = executable.get_text_bytes().1;
         let config = executable.get_config();
         let noop_instruction_rate = config.noop_instruction_rate;
@@ -666,10 +665,14 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
 }
 
 #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
-/// Emit a perf jitdump (`/tmp/jit-<pid>.dump`) describing the code in `ptr..ptr + len`.
-fn write_perf_jitdump(ptr: *const u8, len: usize, elf_machine: u32) {
+/// Add the code in `ptr..ptr + len` called `name` to the perf jitdump (`/tmp/jit-<pid>.dump`).
+fn write_perf_jitdump(name: &str, ptr: *const u8, len: usize, elf_machine: u32) {
     use std::io::Write as _;
     use std::os::fd::AsRawFd as _;
+    use std::sync::{Mutex, OnceLock};
+    // The header is only written once, then each of the code regions is a record of the same file,
+    // and its index is the number of records before.
+    static JITDUMP: OnceLock<Mutex<(std::fs::File, u64)>> = OnceLock::new();
     unsafe {
         let pid = std::process::id();
         let tid = libc::syscall(libc::SYS_gettid) as u32;
@@ -682,32 +685,36 @@ fn write_perf_jitdump(ptr: *const u8, len: usize, elf_machine: u32) {
             (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
         };
 
-        let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
-        // 1. JIT Header (40 bytes)
-        f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
-        f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
-        f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
-        f.write_all(&elf_machine.to_le_bytes()).unwrap();
-        f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
-        f.write_all(&pid.to_le_bytes()).unwrap();
-        f.write_all(&now().to_le_bytes()).unwrap();
-        f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
+        let dump = JITDUMP.get_or_init(|| {
+            let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
+            // 1. JIT Header (40 bytes)
+            f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
+            f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
+            f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
+            f.write_all(&elf_machine.to_le_bytes()).unwrap();
+            f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
+            f.write_all(&pid.to_le_bytes()).unwrap();
+            f.write_all(&now().to_le_bytes()).unwrap();
+            f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
 
-        // Triggers perf record's MMAP detection
-        let m = libc::mmap(
-            std::ptr::null_mut(),
-            4096,
-            libc::PROT_READ | libc::PROT_EXEC,
-            libc::MAP_PRIVATE,
-            f.as_raw_fd(),
-            0,
-        );
-        if m != libc::MAP_FAILED {
-            libc::munmap(m, 4096);
-        }
+            // Triggers perf record's MMAP detection
+            let m = libc::mmap(
+                std::ptr::null_mut(),
+                4096,
+                libc::PROT_READ | libc::PROT_EXEC,
+                libc::MAP_PRIVATE,
+                f.as_raw_fd(),
+                0,
+            );
+            if m != libc::MAP_FAILED {
+                libc::munmap(m, 4096);
+            }
+            Mutex::new((f, 0))
+        });
+        let (f, records) = &mut *dump.lock().unwrap();
 
-        // 2. JIT_CODE_LOAD Record Header (60 bytes = 56 byte record + 4 byte name)
-        let rec_size = (60 + len) as u32;
+        // 2. JIT_CODE_LOAD Record Header (56 bytes, then the name and its NUL)
+        let rec_size = (56 + name.len() + 1 + len) as u32;
         f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
         f.write_all(&rec_size.to_le_bytes()).unwrap();
         f.write_all(&now().to_le_bytes()).unwrap();
@@ -716,8 +723,10 @@ fn write_perf_jitdump(ptr: *const u8, len: usize, elf_machine: u32) {
         f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // VMA
         f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // Code Address
         f.write_all(&(len as u64).to_le_bytes()).unwrap(); // Code Size
-        f.write_all(&1u64.to_le_bytes()).unwrap(); // Index
-        f.write_all(b"jit\0").unwrap(); // Symbol Name
+        f.write_all(&(*records + 1).to_le_bytes()).unwrap(); // Index
+        f.write_all(name.as_bytes()).unwrap();
+        f.write_all(&[0]).unwrap();
+        *records += 1;
 
         // 3. Raw Code Bytes
         f.write_all(std::slice::from_raw_parts(ptr, len)).unwrap();

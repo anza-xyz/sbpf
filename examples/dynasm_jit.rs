@@ -27,7 +27,7 @@ fn main() {
         FunctionRegistry::default(),
     )
     .unwrap();
-    let program = solana_sbpf::codegen::x64::JIT_TEMPLATES.compile(&executable);
+    let program = solana_sbpf::codegen::x64::jit_templates(SBPFVersion::V3).compile(&executable);
     let code = &program.text_section;
     for b in code {
         print!("{:02X}", b);
@@ -49,6 +49,7 @@ fn main() {
         vm.previous_instruction_meter = BUDGET;
         let start = std::time::Instant::now();
         std::hint::black_box(solana_sbpf::codegen::x64::enter(
+            SBPFVersion::V3,
             &bpf,
             solana_sbpf::ebpf::MM_BYTECODE_START,
             Some((&program.pc_section, buffer.as_ptr())),

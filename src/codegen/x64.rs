@@ -172,6 +172,8 @@ trait X64Generator {
     fn new_dynamic_label(&mut self) -> Self::DynamicLabel;
     fn dynamic_label(&mut self, id: Self::DynamicLabel);
 
+    /// The SBPF version the code is generated for.
+    fn version(&self) -> SBPFVersion;
     /// Of the instruction being generated.
     fn opcode(&self) -> TemplateOpcode;
     fn supports(&self) -> &SupportingCode;
@@ -181,6 +183,71 @@ trait X64Generator {
 
     /// The code generated so far checks the instruction meter.
     fn meter_checked(&mut self);
+}
+
+/// Set the flags for the comparison of the 64 bit registers (or the immediate) of the conditional
+/// jump being generated.
+fn compare_64<G: X64Generator + ?Sized>(out: &mut G, dst: u8, src: u8) {
+    let op = out.opcode().op();
+    let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
+    let is_jset = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
+    match (is_imm, is_jset) {
+        (true, false) => x64asm!(out
+            ; movsxd RTEMP, DWORD REL32_IMM
+            ; cmp Rq(dst), RTEMP
+        ),
+        (true, true) => x64asm!(out
+            ; movsxd RTEMP, DWORD REL32_IMM
+            ; test Rq(dst), RTEMP
+        ),
+        (false, false) => x64asm!(out; cmp Rq(dst), Rq(src)),
+        (false, true) => x64asm!(out; test Rq(dst), Rq(src)),
+    }
+}
+
+/// Like `compare_64`, for the lower 32 bits.
+fn compare_32<G: X64Generator + ?Sized>(out: &mut G, dst: u8, src: u8) {
+    let op = out.opcode().op();
+    let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
+    let is_jset = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
+    match (is_imm, is_jset) {
+        (true, false) => x64asm!(out; cmp Rd(dst), DWORD REL32_IMM),
+        (true, true) => x64asm!(out; test Rd(dst), DWORD REL32_IMM),
+        (false, false) => x64asm!(out; cmp Rd(dst), Rd(src)),
+        (false, true) => x64asm!(out; test Rd(dst), Rd(src)),
+    }
+}
+
+/// Produce a template for a conditional jump, the flags of which are set by `compare`.
+fn conditional_branch<G: X64Generator + ?Sized>(out: &mut G, compare: impl FnOnce(&mut G, u8, u8)) {
+    let opcode = out.opcode();
+    let op = opcode.op();
+    load_next_insn(out);
+    bpf_validate_meter(out);
+    compare(out, machine_reg(opcode.dst()), machine_reg(opcode.src()));
+    let fallthrough = out.new_dynamic_label();
+    match op & ebpf::BPF_ALU_OP_MASK {
+        ebpf::BPF_JEQ => x64asm!(out; jne BYTE =>fallthrough),
+        ebpf::BPF_JGT => x64asm!(out; jbe BYTE =>fallthrough),
+        ebpf::BPF_JGE => x64asm!(out; jb BYTE =>fallthrough),
+        ebpf::BPF_JNE => x64asm!(out; je BYTE =>fallthrough),
+        ebpf::BPF_JSET => x64asm!(out; jz BYTE =>fallthrough),
+        ebpf::BPF_JSGT => x64asm!(out; jle BYTE =>fallthrough),
+        ebpf::BPF_JSGE => x64asm!(out; jl BYTE =>fallthrough),
+        ebpf::BPF_JLT => x64asm!(out; jae BYTE =>fallthrough),
+        ebpf::BPF_JLE => x64asm!(out; ja BYTE =>fallthrough),
+        ebpf::BPF_JSLT => x64asm!(out; jge BYTE =>fallthrough),
+        ebpf::BPF_JSLE => x64asm!(out; jg BYTE =>fallthrough),
+        _ => invalid_insn(out),
+    }
+    out.bpf_taken_branch();
+    out.dynamic_label(fallthrough);
+}
+
+/// Terminate execution for an instruction that is not valid.
+fn invalid_insn<G: X64Generator + ?Sized>(out: &mut G) {
+    load_next_insn(out);
+    terminate(out, SIG_INVALID_INSN)
 }
 
 /// Produce a template for a single (currently processed) instruction.
@@ -282,8 +349,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
                 load_next_insn(out);
                 invoke_support(out, helper);
             } else {
-                load_next_insn(out);
-                terminate(out, SIG_INVALID_INSN);
+                invalid_insn(out);
             }
         }
         ebpf::LSH64_IMM | ebpf::LSH64_REG => x64asm!(out
@@ -351,8 +417,14 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         | ebpf::JSGT32_IMM
         | ebpf::JSGE32_IMM
         | ebpf::JSLT32_IMM
-        | ebpf::JSLE32_IMM
-        | ebpf::JLE64_IMM
+        | ebpf::JSLE32_IMM => {
+            if out.version().enable_jmp32() {
+                conditional_branch(out, compare_32)
+            } else {
+                invalid_insn(out)
+            }
+        }
+        ebpf::JLE64_IMM
         | ebpf::JEQ64_IMM
         | ebpf::JGT64_IMM
         | ebpf::JGE64_IMM
@@ -373,49 +445,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         | ebpf::JSGT64_REG
         | ebpf::JSGE64_REG
         | ebpf::JSLT64_REG
-        | ebpf::JSLE64_REG => {
-            load_next_insn(out);
-            bpf_validate_meter(out);
-            let is_64 = (op & ebpf::BPF_CLS_MASK) == ebpf::BPF_JMP64;
-            let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
-            let is_jset = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
-            match (is_64, is_imm, is_jset) {
-                (true, true, false) => x64asm!(out
-                    ; movsxd RTEMP, DWORD REL32_IMM
-                    ; cmp Rq(dst), RTEMP
-                ),
-                (true, true, true) => x64asm!(out
-                    ; movsxd RTEMP, DWORD REL32_IMM
-                    ; test Rq(dst), RTEMP
-                ),
-                (true, false, false) => x64asm!(out; cmp Rq(dst), Rq(src)),
-                (true, false, true) => x64asm!(out; test Rq(dst), Rq(src)),
-                (false, true, false) => x64asm!(out; cmp Rd(dst), DWORD REL32_IMM),
-                (false, true, true) => x64asm!(out; test Rd(dst), DWORD REL32_IMM),
-                (false, false, false) => x64asm!(out; cmp Rd(dst), Rd(src)),
-                (false, false, true) => x64asm!(out; test Rd(dst), Rd(src)),
-            }
-            let fallthrough = out.new_dynamic_label();
-            match op & ebpf::BPF_ALU_OP_MASK {
-                ebpf::BPF_JEQ => x64asm!(out; jne BYTE =>fallthrough),
-                ebpf::BPF_JGT => x64asm!(out; jbe BYTE =>fallthrough),
-                ebpf::BPF_JGE => x64asm!(out; jb BYTE =>fallthrough),
-                ebpf::BPF_JNE => x64asm!(out; je BYTE =>fallthrough),
-                ebpf::BPF_JSET => x64asm!(out; jz BYTE =>fallthrough),
-                ebpf::BPF_JSGT => x64asm!(out; jle BYTE =>fallthrough),
-                ebpf::BPF_JSGE => x64asm!(out; jl BYTE =>fallthrough),
-                ebpf::BPF_JLT => x64asm!(out; jae BYTE =>fallthrough),
-                ebpf::BPF_JLE => x64asm!(out; ja BYTE =>fallthrough),
-                ebpf::BPF_JSLT => x64asm!(out; jge BYTE =>fallthrough),
-                ebpf::BPF_JSLE => x64asm!(out; jg BYTE =>fallthrough),
-                _ => {
-                    load_next_insn(out);
-                    terminate(out, SIG_INVALID_INSN)
-                }
-            }
-            out.bpf_taken_branch();
-            out.dynamic_label(fallthrough);
-        }
+        | ebpf::JSLE64_REG => conditional_branch(out, compare_64),
         ebpf::JA => {
             load_next_insn(out);
             bpf_validate_meter(out);
@@ -566,10 +596,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         | 223..=229
         | 230..=237
         | 238..=246
-        | 248..=255 => {
-            load_next_insn(out);
-            terminate(out, SIG_INVALID_INSN)
-        }
+        | 248..=255 => invalid_insn(out),
     }
 }
 
@@ -627,6 +654,7 @@ fn bpf_validate_meter<G: X64Generator + ?Sized>(out: &mut G) {
 const MAX_JIT_TEMPLATE_SIZE: usize = 48;
 
 struct JITGenerator<'a> {
+    version: SBPFVersion,
     template: TemplateBuilder<'a, MAX_JIT_TEMPLATE_SIZE>,
     /// `None` for an `AuxTemplate`.
     opcode: Option<TemplateOpcode>,
@@ -641,25 +669,28 @@ struct JITGenerator<'a> {
 
 impl<'a> JITGenerator<'a> {
     fn new(
+        version: SBPFVersion,
         template: TemplateBuilder<'a, MAX_JIT_TEMPLATE_SIZE>,
         opcode: Option<TemplateOpcode>,
     ) -> Self {
         Self {
+            version,
             template,
             opcode,
             relocs: LabelRelocs::new(),
-            supports: &INTERPRETER_AND_SUPPORTS.1,
+            supports: &interpreter(version).1,
         }
     }
 
     /// Generator for a BPF instruction.
     fn for_insn(
+        version: SBPFVersion,
         templates: &'a mut JitTemplates<MAX_JIT_TEMPLATE_SIZE>,
         opcode: TemplateOpcode,
     ) -> Self {
         let template = templates.insn_builder(opcode);
         template.layout.extra_bpf_insns = (insn_size(opcode.op()) / 8) as u8 - 1;
-        Self::new(template, Some(opcode))
+        Self::new(version, template, Some(opcode))
     }
 
     /// Resolve all the relocations that can be resolved without knowing the specific eBPF
@@ -745,6 +776,10 @@ impl X64Generator for JITGenerator<'_> {
         self.relocs.dynamic_label(id, self.offset());
     }
 
+    fn version(&self) -> SBPFVersion {
+        self.version
+    }
+
     fn opcode(&self) -> TemplateOpcode {
         self.opcode
             .expect("not generating the template for an instruction")
@@ -769,17 +804,30 @@ impl X64Generator for JITGenerator<'_> {
 
 // TODO: when dynasm supports const codegen, we can make these be generated at compile time into an
 // array.
-/// JIT templates for SBPFv3.
-pub static JIT_TEMPLATES: LazyLock<JitTemplates<MAX_JIT_TEMPLATE_SIZE>> = LazyLock::new(|| {
+static JIT_TEMPLATES: [LazyLock<JitTemplates<MAX_JIT_TEMPLATE_SIZE>>; 5] = [
+    LazyLock::new(|| generate_jit_templates(SBPFVersion::V0)),
+    LazyLock::new(|| panic!("dynasm for v1 unlikely to be implemented")),
+    LazyLock::new(|| panic!("dynasm for v2 unlikely to be implemented")),
+    LazyLock::new(|| generate_jit_templates(SBPFVersion::V3)),
+    // TODO: same as v3? maybe Arc-share the v3 templates or something?
+    LazyLock::new(|| generate_jit_templates(SBPFVersion::V4)),
+];
+
+/// JIT templates for the SBPF `version`.
+pub fn jit_templates(version: SBPFVersion) -> &'static JitTemplates<MAX_JIT_TEMPLATE_SIZE> {
+    &JIT_TEMPLATES[version as usize]
+}
+
+fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE_SIZE> {
     type Templates = JitTemplates<MAX_JIT_TEMPLATE_SIZE>;
     let mut templates = Templates::empty();
     for opcode in TemplateOpcode::all() {
-        let mut generator = JITGenerator::for_insn(&mut templates, opcode);
+        let mut generator = JITGenerator::for_insn(version, &mut templates, opcode);
         bpf_insn_template(&mut generator);
         generator.finalize();
     }
     let generate = |templates: &mut Templates, template, f: fn(&mut JITGenerator)| {
-        let mut generator = JITGenerator::new(templates.aux_builder(template), None);
+        let mut generator = JITGenerator::new(version, templates.aux_builder(template), None);
         f(&mut generator);
         generator.finalize();
     };
@@ -804,12 +852,13 @@ pub static JIT_TEMPLATES: LazyLock<JitTemplates<MAX_JIT_TEMPLATE_SIZE>> = LazyLo
         bpf_validate_meter(generator);
     });
     templates
-});
+}
 
-/// The interpreter step for the instructions with `opcode`.
-pub(super) fn interpreter_step(opcode: TemplateOpcode) -> *const u8 {
+/// The interpreter step for the instructions with `opcode`, of the interpreter for the SBPF
+/// `version`.
+pub(super) fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
     let offset = InterpreterGenerator::step_offset(opcode);
-    unsafe { INTERPRETER_AND_SUPPORTS.0.buffer.add(offset) }
+    unsafe { interpreter(version).0.buffer.add(offset) }
 }
 
 pub struct Interpreter {
@@ -829,8 +878,11 @@ impl Drop for Interpreter {
 /// within the first 2 GiB of the address space.
 #[cfg(target_os = "linux")]
 mod maps {
-    /// Read-write, until `make_exec`.
-    pub(super) unsafe fn map(len: usize) -> *mut u8 {
+    /// Read-write, until `make_exec`. With `codegen_debug`, backed by the file `interpreter-{name}.bin`
+    /// to inspect.
+    pub(super) unsafe fn map(len: usize, name: &str) -> *mut u8 {
+        #[cfg(not(feature = "codegen_debug"))]
+        let _ = name;
         #[cfg(feature = "codegen_debug")]
         let file = {
             let file = std::fs::OpenOptions::new()
@@ -838,7 +890,7 @@ mod maps {
                 .write(true)
                 .create(true)
                 .truncate(true)
-                .open("interpreter.bin")
+                .open(format!("interpreter-{name}.bin"))
                 .unwrap();
             file.set_len(len as u64).unwrap();
             file
@@ -875,7 +927,7 @@ mod maps {
 // TODO: e.g. `VirtualAlloc` with an address hint on Windows.
 #[cfg(not(target_os = "linux"))]
 mod maps {
-    pub(super) unsafe fn map(_len: usize) -> *mut u8 {
+    pub(super) unsafe fn map(_len: usize, _name: &str) -> *mut u8 {
         unimplemented!("allocating memory within the first 2 GiB on this OS")
     }
 
@@ -894,6 +946,7 @@ struct InterpreterGenerator {
     relocs: LabelRelocs<SimpleRelocation>,
     supports: SupportingCode,
     offset: usize,
+    version: SBPFVersion,
     /// Of the step being generated.
     opcode: TemplateOpcode,
     /// Is the code generated for this instruction terminal?
@@ -912,10 +965,11 @@ impl InterpreterGenerator {
         opcode.index() << Self::STEP_SIZE_LOG2
     }
 
-    pub fn new() -> Self {
+    fn new(version: SBPFVersion) -> Self {
         unsafe {
-            let buffer = maps::map(Self::STEPS_SIZE);
+            let buffer = maps::map(Self::STEPS_SIZE, &format!("{:?}", version));
             let mut this = Self {
+                version,
                 buffer,
                 relocs: LabelRelocs::new(),
                 offset: 0,
@@ -1011,6 +1065,10 @@ impl X64Generator for InterpreterGenerator {
         self.relocs.dynamic_label(id, self.offset);
     }
 
+    fn version(&self) -> SBPFVersion {
+        self.version
+    }
+
     fn opcode(&self) -> TemplateOpcode {
         self.opcode
     }
@@ -1028,11 +1086,25 @@ impl X64Generator for InterpreterGenerator {
         self.terminal = true;
     }
 
-    fn meter_checked(&mut self) { /* every step checks the meter */ }
+    fn meter_checked(&mut self) { /* every step checks the meter */
+    }
 }
 
-static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCode)> = LazyLock::new(|| {
-    let mut generator = InterpreterGenerator::new();
+static INTERPRETERS: [LazyLock<(Interpreter, SupportingCode)>; 5] = [
+    LazyLock::new(|| generate_interpreter(SBPFVersion::V0)),
+    LazyLock::new(|| panic!("dynasm for v1 unlikely to be implemented")),
+    LazyLock::new(|| panic!("dynasm for v2 unlikely to be implemented")),
+    LazyLock::new(|| generate_interpreter(SBPFVersion::V3)),
+    LazyLock::new(|| generate_interpreter(SBPFVersion::V4)),
+];
+
+/// The interpreter and the supporting code for the SBPF `version`.
+fn interpreter(version: SBPFVersion) -> &'static (Interpreter, SupportingCode) {
+    &INTERPRETERS[version as usize]
+}
+
+fn generate_interpreter(version: SBPFVersion) -> (Interpreter, SupportingCode) {
+    let mut generator = InterpreterGenerator::new(version);
     let base_addr = i32::try_from(generator.buffer as usize).expect("interpreter in first 2GB");
     for opcode in TemplateOpcode::all() {
         let step_start = InterpreterGenerator::step_offset(opcode);
@@ -1082,7 +1154,12 @@ static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCode)> = LazyL
 
     #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
     // EM_X86_64
-    super::write_perf_jitdump(generator.buffer, InterpreterGenerator::STEPS_SIZE, 62);
+    super::write_perf_jitdump(
+        &format!("interpreter {:?}", version),
+        generator.buffer,
+        InterpreterGenerator::STEPS_SIZE,
+        62,
+    );
     unsafe { maps::make_exec(generator.buffer, InterpreterGenerator::STEPS_SIZE) };
     (
         Interpreter {
@@ -1090,7 +1167,7 @@ static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCode)> = LazyL
         },
         generator.supports,
     )
-});
+}
 
 /// The state of an execution. `SupportingCode::entry_point` copies it right below its frame
 /// pointer, where the generated code finds it as `rbp => Frame[BYTE -1].field`.
@@ -1116,8 +1193,10 @@ struct Frame {
     jit_text_section: *const u8,
     /// See `supporting_code::syscall_dispatcher`.
     syscall_dispatcher: *const u8,
-    /// Depth of the internal calls.
-    call_depth: u64,
+    /// How many more internal calls there can be before `CallDepthExceeded`.
+    calls_remaining: u64,
+    /// How much a call moves the frame pointer by.
+    stack_frame_bump: u64,
 }
 
 /// Run the code at `start_addr` (machine code), with `vm.previous_instruction_meter` as the budget
@@ -1126,6 +1205,7 @@ struct Frame {
 /// `bpf` is the text section at `bpf_vm_addr`, and `jit` is the `pc_section` and the machine code
 /// of the JIT output (`None` for the interpreter.)
 pub fn enter<C: crate::vm::ContextObject>(
+    version: SBPFVersion,
     bpf: &[u8],
     bpf_vm_addr: u64,
     jit: Option<(&[u32], *const u8)>,
@@ -1133,11 +1213,19 @@ pub fn enter<C: crate::vm::ContextObject>(
     insn: *const u8,
     vm: &mut crate::vm::EbpfVm<C>,
 ) {
-    let entry_point = INTERPRETER_AND_SUPPORTS.1.entry_point;
+    let entry_point = interpreter(version).1.entry_point;
     let meter = initial_meter(bpf, vm);
     let (jit_pc_section, jit_text_section) = match jit {
         Some((pc_section, text_section)) => (pc_section.as_ptr(), text_section),
         None => (std::ptr::null(), std::ptr::null()),
+    };
+    let config = vm.loader.get_config();
+    let (max_call_depth, stack_frame_size) = (config.max_call_depth, config.stack_frame_size);
+    // As in `Interpreter::push_frame`: the frames have gaps in between, in the memory mapping.
+    let frames_per_call = if version.stack_frame_gaps() && config.enable_stack_frame_gaps {
+        2
+    } else {
+        1
     };
     let mut frame = Frame {
         vm: std::ptr::from_mut(vm).cast(),
@@ -1150,7 +1238,8 @@ pub fn enter<C: crate::vm::ContextObject>(
         jit_pc_section,
         jit_text_section,
         syscall_dispatcher: supporting_code::syscall_dispatcher::<C>(),
-        call_depth: 0,
+        calls_remaining: max_call_depth as u64,
+        stack_frame_bump: stack_frame_size as u64 * frames_per_call,
     };
     let code: u64;
     let remaining: u64;
