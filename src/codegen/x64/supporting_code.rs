@@ -50,9 +50,19 @@ impl SupportingCode {
     }
 
     pub(super) fn generate_into(out: &mut InterpreterGenerator) -> SupportingCode {
+        Self {
+            call_internal: Self::generate_call_internal_support(out),
+            syscall: Self::generate_syscall_support(out),
+            memory_access: Self::generate_memory_access_supports(out),
+            entry_point: Self::generate_entry_point(out),
+            divide: Self::generate_divide_supports(out),
+        }
+    }
+
+    fn generate_call_internal_support(out: &mut InterpreterGenerator) -> *const u8 {
         // `[rsp + 24]` is the address of the instruction following the call, once the target is
         // pushed.
-        let call_internal = unsafe { out.buffer.add(out.offset()) };
+        let start = unsafe { out.buffer.add(out.offset()) };
         let within_depth = out.new_dynamic_label();
         let in_bounds = out.new_dynamic_label();
         x64asm!(out
@@ -77,7 +87,7 @@ impl SupportingCode {
         // In the JIT, the machine code to call is found via `jit_pc_section`. Otherwise this is the
         // interpreter, and `insn` needs to point past the target instead.
         let base_addr = i32::try_from(out.buffer as usize).expect("interpreter in first 2GB");
-        let interpreted = out.new_dynamic_label();
+        let translated = out.new_dynamic_label();
         let resolved = out.new_dynamic_label();
         x64asm!(out
             // `insn` is restored after the call: the JIT's never changes, and the interpreter's
@@ -86,7 +96,7 @@ impl SupportingCode {
             ; add RTEMP, rbp => Frame[BYTE -1].text_section
             ; mov [rsp + 8], RTEMP
             ; cmp QWORD rbp => Frame[BYTE -1].jit_pc_section, 0
-            ; je =>interpreted
+            ; je =>translated
             // JIT specific: translate the jump address to a machine code address
             ; sub RTEMP, rbp => Frame[BYTE -1].text_section
             ; shr RTEMP, 1
@@ -94,7 +104,7 @@ impl SupportingCode {
             ; mov WTEMP, [RTEMP]
             ; add RTEMP, rbp => Frame[BYTE -1].jit_text_section
             ; jmp =>resolved
-            ; =>interpreted
+            ; =>translated
             ; lea RINSN, [RTEMP + 8]
             ; movzx RTEMP, WORD [RTEMP]
             ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
@@ -133,18 +143,25 @@ impl SupportingCode {
             ; ret
         );
 
-        let syscall = Self::generate_syscall_support(out);
+        start
+    }
+
+    /// The helpers by `MemoryAccessKind` and log2 of the access size.
+    fn generate_memory_access_supports(out: &mut InterpreterGenerator) -> [[*const u8; 4]; 3] {
         let kinds = [
             MemoryAccessKind::Load,
             MemoryAccessKind::StoreImm,
             MemoryAccessKind::StoreReg,
         ];
-        let memory_access = kinds.map(|kind| {
+        kinds.map(|kind| {
             std::array::from_fn(|size_log2| {
                 Self::generate_memory_access_support(out, kind, size_log2)
             })
-        });
+        })
+    }
 
+    /// The helpers for `divide`.
+    fn generate_divide_supports(out: &mut InterpreterGenerator) -> Vec<*const u8> {
         let last_reg = *GPREG_MAP.last().unwrap();
         let mut divide = vec![
             std::ptr::null();
@@ -172,9 +189,13 @@ impl SupportingCode {
             }
         }
 
+        divide
+    }
+
+    fn generate_entry_point(out: &mut InterpreterGenerator) -> *const u8 {
         // Expects `rsi` to point at the `Frame`, and `RINSN` and `RMETER` to be initialized to
         // their namesakes.
-        let entry_point = unsafe { out.buffer.add(out.offset()) };
+        let start = unsafe { out.buffer.add(out.offset()) };
         let after_dispatch = out.new_dynamic_label();
         let frame_size = std::mem::size_of::<Frame>();
         x64asm!(out
@@ -210,13 +231,7 @@ impl SupportingCode {
             ; ret
         );
 
-        Self {
-            call_internal,
-            syscall,
-            memory_access,
-            entry_point,
-            divide,
-        }
+        start
     }
 
     fn generate_syscall_support(out: &mut InterpreterGenerator) -> *const u8 {

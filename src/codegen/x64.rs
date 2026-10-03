@@ -1028,8 +1028,7 @@ impl X64Generator for InterpreterGenerator {
         self.terminal = true;
     }
 
-    // Every step checks the meter anyway.
-    fn meter_checked(&mut self) {}
+    fn meter_checked(&mut self) { /* every step checks the meter */ }
 }
 
 static INTERPRETER_AND_SUPPORTS: LazyLock<(Interpreter, SupportingCode)> = LazyLock::new(|| {
