@@ -11,8 +11,16 @@ pub(super) struct SupportingCode {
     /// Syscall trampoline, invoked with the address of the instruction following the `CALL_IMM`
     /// in `temp`.
     pub(super) syscall: *const u8,
+    /// For SBPFv0 `CALL_IMM`, which is a syscall or an internal call depending on the immediate:
+    /// invoked like `call_internal` is, only with the immediate in `temp`. It performs a syscall
+    /// itself, and tail calls `call_internal` otherwise. Null for the other versions.
+    pub(super) v0_call_imm: *const u8,
+    /// For SBPFv0 `CALL_REG`, which takes the register from the immediate: invoked like
+    /// `call_internal` is, only with the number of the register in `temp`, and tail calls it.
+    /// Null for the other versions.
+    pub(super) v0_callx: *const u8,
     /// Memory access helpers, by `MemoryAccessKind` and log2 of the access size. See
-    /// `SupportingCode::generate_memory_access_support`.
+    /// `SupportingCode::memory_access`.
     pub(super) memory_access: [[*const u8; 4]; 3],
     pub(super) entry_point: *const u8,
     /// See `SupportingCode::divide`.
@@ -49,17 +57,31 @@ impl SupportingCode {
         Some(helper)
     }
 
+    // FIXME: use an independent generator for the supports, so that a regular dynasm assembler with
+    // full relocation support can be used, for easier code authoring (e.g. `jump_to` and the
+    // addresses of other supports would not need special handling.)
     pub(super) fn generate_into(out: &mut InterpreterGenerator) -> SupportingCode {
+        let call_internal = Self::call_internal(out);
+        let (v0_call_imm, v0_callx) = if out.version().static_syscalls() {
+            (std::ptr::null(), std::ptr::null())
+        } else {
+            (
+                Self::v0_call_imm(out, call_internal),
+                Self::callx_target(out, call_internal),
+            )
+        };
         Self {
-            call_internal: Self::generate_call_internal_support(out),
-            syscall: Self::generate_syscall_support(out),
-            memory_access: Self::generate_memory_access_supports(out),
-            entry_point: Self::generate_entry_point(out),
-            divide: Self::generate_divide_supports(out),
+            call_internal,
+            syscall: Self::syscall(out),
+            v0_call_imm,
+            v0_callx,
+            memory_access: Self::memory_accesses(out),
+            entry_point: Self::entry_point(out),
+            divide: Self::divides(out),
         }
     }
 
-    fn generate_call_internal_support(out: &mut InterpreterGenerator) -> *const u8 {
+    fn call_internal(out: &mut InterpreterGenerator) -> *const u8 {
         // `[rsp + 24]` is the address of the instruction following the call, once the target is
         // pushed.
         let start = unsafe { out.buffer.add(out.offset()) };
@@ -146,21 +168,17 @@ impl SupportingCode {
     }
 
     /// The helpers by `MemoryAccessKind` and log2 of the access size.
-    fn generate_memory_access_supports(out: &mut InterpreterGenerator) -> [[*const u8; 4]; 3] {
+    fn memory_accesses(out: &mut InterpreterGenerator) -> [[*const u8; 4]; 3] {
         let kinds = [
             MemoryAccessKind::Load,
             MemoryAccessKind::StoreImm,
             MemoryAccessKind::StoreReg,
         ];
-        kinds.map(|kind| {
-            std::array::from_fn(|size_log2| {
-                Self::generate_memory_access_support(out, kind, size_log2)
-            })
-        })
+        kinds.map(|kind| std::array::from_fn(|size_log2| Self::memory_access(out, kind, size_log2)))
     }
 
     /// The helpers for `divide`.
-    fn generate_divide_supports(out: &mut InterpreterGenerator) -> Vec<*const u8> {
+    fn divides(out: &mut InterpreterGenerator) -> Vec<*const u8> {
         let last_reg = *GPREG_MAP.last().unwrap();
         let mut divide = vec![
             std::ptr::null();
@@ -179,9 +197,7 @@ impl SupportingCode {
                             let index = Self::divide_index(is_div, is_64, is_reg, dst_reg, src_reg)
                                 .unwrap();
                             divide[index] = unsafe { out.buffer.add(out.offset()) };
-                            Self::generate_div_mod_support(
-                                out, is_div, is_64, is_reg, dst_reg, src_reg,
-                            );
+                            Self::div_mod(out, is_div, is_64, is_reg, dst_reg, src_reg);
                         }
                     }
                 }
@@ -191,7 +207,7 @@ impl SupportingCode {
         divide
     }
 
-    fn generate_entry_point(out: &mut InterpreterGenerator) -> *const u8 {
+    fn entry_point(out: &mut InterpreterGenerator) -> *const u8 {
         // Expects `rsi` to point at the `Frame`, and `RINSN` and `RMETER` to be initialized to
         // their namesakes.
         let start = unsafe { out.buffer.add(out.offset()) };
@@ -233,7 +249,106 @@ impl SupportingCode {
         start
     }
 
-    fn generate_syscall_support(out: &mut InterpreterGenerator) -> *const u8 {
+    /// SBPFv0 `CALL_IMM`: the immediate is the key of either a syscall or an internal function.
+    fn v0_call_imm(out: &mut InterpreterGenerator, call_internal: *const u8) -> *const u8 {
+        let start = unsafe { out.buffer.add(out.offset()) };
+        let (within_budget, not_internal, failed) = (
+            out.new_dynamic_label(),
+            out.new_dynamic_label(),
+            out.new_dynamic_label(),
+        );
+        x64asm!(out
+            // `bpf_validate_meter`, with the address of the next instruction below the return
+            // address and `invoke_support`'s target, as `temp` has the key.
+            ; cmp [rsp + 16], RMETER
+            ; jbe BYTE =>within_budget
+            ;; terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS)
+            ; =>within_budget
+        );
+        let pushed = clobber_for_sysv64_call(out);
+        // The address of the next instruction is above `pushed`, the return address and
+        // `invoke_support`'s target.
+        let next_insn = pushed + 16;
+        let needs_stack_alignment = sysv64_call_needs_stack_alignment(next_insn + 8);
+        x64asm!(out
+            ; mov rdi, rax
+            // `clobber_for_sysv64_call` has pushed `temp`.
+            ; mov esi, [rsp + 8]
+            // `rdx` is `meter`.
+            ; sub rdx, [rsp + next_insn]
+            ; shr rdx, 3
+            ; mov rcx, rbp => Frame[BYTE -1].function_registry
+        );
+        if needs_stack_alignment {
+            x64asm!(out; sub rsp, 8);
+        }
+        debug_assert_sysv64_call_stack_alignment(out);
+        x64asm!(out; call QWORD rbp => Frame[BYTE -1].call_dispatcher);
+        if needs_stack_alignment {
+            x64asm!(out; add rsp, 8);
+        }
+        x64asm!(out
+            ; test rax, rax
+            ; jnz =>not_internal
+            // The target for `call_internal`, which is a host address, replaces `temp`.
+            ; shl rdx, 3
+            ; add rdx, rbp => Frame[BYTE -1].text_section
+            ; mov [rsp + 8], rdx
+            ;; restore_from_sysv64_call(out)
+            ;; jump_to(out, call_internal)
+            ; =>not_internal
+            // As in `syscall`, `rdx` is the budget remaining.
+            ;; const { assert!(SYSV64_PUSHED >> RTEMP == 1 | 1 << (RMETER - RTEMP)) }
+            ; mov rcx, [rsp + next_insn]
+            ; lea rcx, [rcx + rdx * 8]
+            ; mov [rsp], rcx
+            ; cmp rax, CALL_SYSCALL as i32
+            ;; restore_from_sysv64_call(out)
+            ; jne =>failed
+            ; ret
+            ; =>failed
+            ; mov RTEMP, [rsp + 16]
+            ;; terminate(out, SIG_PROGRAM_RESULT)
+        );
+        start
+    }
+
+    /// SBPFv0 `CALL_REG`: the immediate is the number of the register with the target.
+    fn callx_target(out: &mut InterpreterGenerator, call_internal: *const u8) -> *const u8 {
+        // Each register's code takes the same space, which is what `lea` can scale by.
+        const STUB_SIZE: usize = 8;
+        let common = out.new_dynamic_label();
+        let stubs = unsafe { out.buffer.add(out.offset()) };
+        for &reg in &GPREG_MAP {
+            let stub_start = out.offset();
+            x64asm!(out
+                ; mov RTEMP, Rq(reg)
+                ; jmp =>common
+            );
+            assert_eq!(out.offset() - stub_start, STUB_SIZE);
+        }
+        x64asm!(out
+            ; =>common
+            ; sub RTEMP, rbp => Frame[BYTE -1].text_section_host_to_vm
+            ;; jump_to(out, call_internal)
+        );
+        let start = unsafe { out.buffer.add(out.offset()) };
+        let invalid = out.new_dynamic_label();
+        let stubs = u32::try_from(stubs as usize).unwrap() as i32;
+        x64asm!(out
+            ; cmp RTEMP, GPREG_MAP.len() as i32 - 1
+            ; ja =>invalid
+            ; lea RTEMP, [ DWORD stubs + RTEMP * 8 ]
+            ; jmp RTEMP
+            ; =>invalid
+            // `invoke_support`'s target and the return address are on top.
+            ; mov RTEMP, [rsp + 16]
+            ;; terminate(out, SIG_INVALID_INSN)
+        );
+        start
+    }
+
+    fn syscall(out: &mut InterpreterGenerator) -> *const u8 {
         let start = unsafe { out.buffer.add(out.offset()) };
         bpf_validate_meter(out);
         // `vm.invoke_function` takes the arguments from `vm.registers`, where
@@ -252,7 +367,7 @@ impl SupportingCode {
             x64asm!(out; sub rsp, 8);
         }
         debug_assert_sysv64_call_stack_alignment(out);
-        x64asm!(out; call QWORD rbp => Frame[BYTE -1].syscall_dispatcher);
+        x64asm!(out; call QWORD rbp => Frame[BYTE -1].call_dispatcher);
         if needs_stack_alignment {
             x64asm!(out; add rsp, 8);
         }
@@ -277,7 +392,7 @@ impl SupportingCode {
 
     /// Expects the base address and, for `MemoryAccessKind::StoreReg`, the value to store pushed
     /// (in that order.) Loads replace the base address with the loaded value.
-    fn generate_memory_access_support(
+    fn memory_access(
         out: &mut InterpreterGenerator,
         kind: MemoryAccessKind,
         size_log2: usize,
@@ -349,7 +464,7 @@ impl SupportingCode {
         start
     }
 
-    fn generate_div_mod_support(
+    fn div_mod(
         out: &mut InterpreterGenerator,
         is_div: bool,
         is_64: bool,
@@ -425,6 +540,14 @@ const fn reg_mask(regs: &[u8]) -> u16 {
 const SYSV64_CLOBBERED: u16 = reg_mask(&[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11]);
 /// The registers `clobber_for_sysv64_call` pushes, rather than spills into `vm.registers`.
 const SYSV64_PUSHED: u16 = SYSV64_CLOBBERED & !reg_mask(&GPREG_MAP);
+
+/// Jump to `target`, which is also in the buffer.
+fn jump_to(out: &mut InterpreterGenerator, target: *const u8) {
+    const JMP_SIZE: isize = 5;
+    let next = out.buffer as isize + out.offset() as isize + JMP_SIZE;
+    let displacement = i32::try_from(target as isize - next).unwrap();
+    x64asm!(out; jmp displacement);
+}
 
 /// Save the registers that a `sysv64` host function call would clobber: the rest are pushed in
 /// the order of their register numbers (for the internal registers that is `insn`, `temp`,
@@ -534,10 +657,61 @@ extern "sysv64" fn store<T: crate::aligned_memory::Pod>(
     HostCallResult::new(mapping.store::<T>(value, vm_addr), result)
 }
 
+/// The address of the function to store into `Frame::call_dispatcher`.
+///
 /// `remaining` is the budget left after the `CALL_IMM` instruction itself.
-/// The address of the function to store into `Frame::syscall_dispatcher`.
-pub(super) fn syscall_dispatcher<C: crate::vm::ContextObject>() -> *const u8 {
-    dispatch_syscall::<C> as *const u8
+pub(super) fn call_dispatcher<C: crate::vm::ContextObject>(version: SBPFVersion) -> *const u8 {
+    if version.static_syscalls() {
+        dispatch_syscall::<C> as *const u8
+    } else {
+        dispatch_call::<C> as *const u8
+    }
+}
+
+/// Returned by `dispatch_call` in `rax:rdx`.
+///
+// FIXME: consider how to unify with `HostCallResult`.
+#[repr(C)]
+struct CallResult {
+    /// `CALL_INTERNAL`, `CALL_SYSCALL` or `CALL_FAILED`.
+    kind: u64,
+    /// The pc of the function for `CALL_INTERNAL`, otherwise the budget remaining.
+    // FIXME: is this an `union` (butterfly meme here)?
+    value: u64,
+}
+
+const CALL_INTERNAL: u64 = 0;
+const CALL_SYSCALL: u64 = 1;
+/// The error has been stored into `vm.program_result`.
+const CALL_FAILED: u64 = 2;
+
+/// The SBPFv0 `CALL_IMM`: syscalls are looked up first, then `internal_functions`.
+extern "sysv64" fn dispatch_call<C: crate::vm::ContextObject>(
+    vm: &mut crate::vm::EbpfVm<C>,
+    key: u32,
+    remaining: u64,
+    internal_functions: &crate::program::FunctionRegistry<usize>,
+) -> CallResult {
+    let host_call = match vm.loader.get_function_registry().lookup_by_key(key) {
+        Some((_, (function, _))) => invoke_syscall(vm, function, remaining),
+        None => match internal_functions.lookup_by_key(key) {
+            Some((_, target_pc)) => {
+                return CallResult {
+                    kind: CALL_INTERNAL,
+                    value: target_pc as u64,
+                }
+            }
+            None => unsupported_syscall(vm, remaining),
+        },
+    };
+    CallResult {
+        kind: if host_call.is_err {
+            CALL_FAILED
+        } else {
+            CALL_SYSCALL
+        },
+        value: host_call.value,
+    }
 }
 
 extern "sysv64" fn dispatch_syscall<C: crate::vm::ContextObject>(
@@ -545,17 +719,33 @@ extern "sysv64" fn dispatch_syscall<C: crate::vm::ContextObject>(
     key: u32,
     remaining: u64,
 ) -> HostCallResult {
-    use crate::error::ProgramResult;
     // TODO: avoid the lookup on every syscall. Programs only ever run against a handful of
     // syscall sets, which could get dedicated interpreter/JIT variants with the functions resolved
     // ahead of time.
-    let Some((_, (function, _))) = vm.loader.get_function_registry().lookup_by_key(key) else {
-        vm.program_result = ProgramResult::Err(crate::error::EbpfError::UnsupportedInstruction);
-        return HostCallResult {
-            value: remaining,
-            is_err: true,
-        };
-    };
+    match vm.loader.get_function_registry().lookup_by_key(key) {
+        Some((_, (function, _))) => invoke_syscall(vm, function, remaining),
+        None => unsupported_syscall(vm, remaining),
+    }
+}
+
+fn unsupported_syscall<C: crate::vm::ContextObject>(
+    vm: &mut crate::vm::EbpfVm<C>,
+    remaining: u64,
+) -> HostCallResult {
+    vm.program_result =
+        crate::error::ProgramResult::Err(crate::error::EbpfError::UnsupportedInstruction);
+    HostCallResult {
+        value: remaining,
+        is_err: true,
+    }
+}
+
+fn invoke_syscall<C: crate::vm::ContextObject>(
+    vm: &mut crate::vm::EbpfVm<C>,
+    function: crate::program::BuiltinFunction<C>,
+    remaining: u64,
+) -> HostCallResult {
+    use crate::error::ProgramResult;
     vm.due_insn_count = remaining;
     vm.invoke_function(function);
     let is_err = match vm.program_result {

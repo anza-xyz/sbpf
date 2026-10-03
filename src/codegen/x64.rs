@@ -222,7 +222,7 @@ fn compare_32<G: X64Generator + ?Sized>(out: &mut G, dst: u8, src: u8) {
 fn conditional_branch<G: X64Generator + ?Sized>(out: &mut G, compare: impl FnOnce(&mut G, u8, u8)) {
     let opcode = out.opcode();
     let op = opcode.op();
-    load_next_insn(out);
+    load_next_insn_addr(out);
     bpf_validate_meter(out);
     compare(out, machine_reg(opcode.dst()), machine_reg(opcode.src()));
     let fallthrough = out.new_dynamic_label();
@@ -246,7 +246,8 @@ fn conditional_branch<G: X64Generator + ?Sized>(out: &mut G, compare: impl FnOnc
 
 /// Terminate execution for an instruction that is not valid.
 fn invalid_insn<G: X64Generator + ?Sized>(out: &mut G) {
-    load_next_insn(out);
+    load_next_insn_addr(out);
+    bpf_validate_meter(out);
     terminate(out, SIG_INVALID_INSN)
 }
 
@@ -346,7 +347,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
             let is_div = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
             let is_reg = (op & ebpf::BPF_X) == ebpf::BPF_X;
             if let Some(helper) = out.supports().divide(is_div, is_alu64, is_reg, dst, src) {
-                load_next_insn(out);
+                load_next_insn_addr(out);
                 invoke_support(out, helper);
             } else {
                 invalid_insn(out);
@@ -447,48 +448,64 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         | ebpf::JSLT64_REG
         | ebpf::JSLE64_REG => conditional_branch(out, compare_64),
         ebpf::JA => {
-            load_next_insn(out);
+            load_next_insn_addr(out);
             bpf_validate_meter(out);
             out.bpf_taken_branch();
         }
 
         ebpf::CALL_IMM => {
-            load_next_insn(out);
-            if src == GPREG_MAP[1] {
-                out.meter_checked();
-                let call_internal = out.supports().call_internal;
+            load_next_insn_addr(out);
+            out.meter_checked();
+            if !out.version().static_syscalls() {
+                x64asm!(out
+                    ; push RTEMP
+                    ; mov WTEMP, DWORD REL32_IMM
+                    ;; invoke_support(out, out.supports().v0_call_imm)
+                    ; pop RTEMP
+                );
+            } else if src == GPREG_MAP[1] {
                 x64asm!(out
                     ; push RTEMP
                     ; movsxd RTEMP, DWORD REL32_IMM
                     ; lea RTEMP, [ DWORD 0i32 + RINSN + RTEMP * 8 ]
                     ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
-                    ;; invoke_support(out, call_internal)
+                    ;; invoke_support(out, out.supports().call_internal)
                     ; pop RTEMP
                 );
             } else if src == GPREG_MAP[0] {
-                out.meter_checked();
                 invoke_support(out, out.supports().syscall);
             } else {
                 terminate(out, SIG_INVALID_INSN)
             }
         }
         ebpf::CALL_REG => {
-            load_next_insn(out);
-            if dst == u8::MAX {
+            load_next_insn_addr(out);
+            if !out.version().callx_uses_dst_reg() {
+                // The register containing the destination is named by the immediate. We will use an
+                // additional support to resolve this to a real register as the jump table inline
+                // would otherwise be pretty nasty.
+                out.meter_checked();
+                x64asm!(out
+                    ; push RTEMP
+                    ; mov WTEMP, DWORD REL32_IMM
+                    ;; invoke_support(out, out.supports().v0_callx)
+                    ; pop RTEMP
+                );
+            } else if dst == u8::MAX {
                 terminate(out, SIG_INVALID_INSN)
             } else {
-                let call_internal = out.supports().call_internal;
+                out.meter_checked();
                 x64asm!(out
                     ; push RTEMP
                     ; mov RTEMP, Rq(dst)
                     ; sub RTEMP, rbp => Frame[BYTE -1].text_section_host_to_vm
-                    ;; invoke_support(out, call_internal)
+                    ;; invoke_support(out, out.supports().call_internal)
                     ; pop RTEMP
                 );
             }
         }
         ebpf::EXIT => {
-            load_next_insn(out);
+            load_next_insn_addr(out);
             bpf_validate_meter(out);
             x64asm!(out
                 ; sub RMETER, RTEMP
@@ -535,7 +552,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
             };
             let helper = out.supports().memory_access[kind as usize][size_log2];
             let uses_src = kind != MemoryAccessKind::StoreImm;
-            load_next_insn(out);
+            load_next_insn_addr(out);
             if dst == u8::MAX || (uses_src && src == u8::MAX) {
                 terminate(out, SIG_INVALID_INSN);
             } else {
@@ -601,7 +618,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
 }
 
 /// Load the address of the BPF instruction following the current one into `temp`.
-fn load_next_insn<G: X64Generator + ?Sized>(out: &mut G) {
+fn load_next_insn_addr<G: X64Generator + ?Sized>(out: &mut G) {
     x64asm!(out
         ; lea RTEMP, [ DWORD 0i32 + RINSN ]
         ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
@@ -832,7 +849,7 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
         generator.finalize();
     };
     generate(&mut templates, AuxTemplate::ExecutionOverrun, |generator| {
-        load_next_insn(generator);
+        load_next_insn_addr(generator);
         // Running out of budget takes precedence, as in `Interpreter::step`.
         bpf_validate_meter(generator);
         terminate(generator, SIG_EXECUTION_OVERRUN);
@@ -840,7 +857,13 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
     generate(
         &mut templates,
         AuxTemplate::InvalidJumpTarget,
-        |generator| terminate(generator, SIG_INVALID_INSN),
+        |generator| {
+            // Reached through `callx` only (the verifier rejects the jumps), which leaves in
+            // `temp` the address of the instruction following the target, as
+            // `load_next_insn_addr` would.
+            bpf_validate_meter(generator);
+            terminate(generator, SIG_INVALID_INSN);
+        },
     );
     generate(
         &mut templates,
@@ -848,7 +871,7 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
         |generator| x64asm!(generator; nop),
     );
     generate(&mut templates, AuxTemplate::MeterCheckpoint, |generator| {
-        load_next_insn(generator);
+        load_next_insn_addr(generator);
         bpf_validate_meter(generator);
     });
     templates
@@ -978,6 +1001,8 @@ impl InterpreterGenerator {
                 supports: SupportingCode {
                     call_internal: std::ptr::null(),
                     syscall: std::ptr::null(),
+                    v0_call_imm: std::ptr::null(),
+                    v0_callx: std::ptr::null(),
                     memory_access: [[std::ptr::null(); 4]; 3],
                     entry_point: std::ptr::null(),
                     divide: Vec::new(),
@@ -1191,8 +1216,10 @@ struct Frame {
     jit_pc_section: *const u32,
     /// For the JIT output: the machine code being executed.
     jit_text_section: *const u8,
-    /// See `supporting_code::syscall_dispatcher`.
-    syscall_dispatcher: *const u8,
+    /// See `supporting_code::call_dispatcher`.
+    call_dispatcher: *const u8,
+    /// The `FunctionRegistry<usize>` of the executable, for the dispatcher of SBPFv0.
+    function_registry: *const u8,
     /// How many more internal calls there can be before `CallDepthExceeded`.
     calls_remaining: u64,
     /// How much a call moves the frame pointer by.
@@ -1246,7 +1273,8 @@ pub fn enter<C: crate::vm::ContextObject>(
         text_section_host_to_vm: bpf_vm_addr.wrapping_sub(bpf.as_ptr() as u64),
         jit_pc_section,
         jit_text_section,
-        syscall_dispatcher: supporting_code::syscall_dispatcher::<C>(),
+        call_dispatcher: supporting_code::call_dispatcher::<C>(version),
+        function_registry: std::ptr::from_ref(executable.get_function_registry()).cast(),
         calls_remaining: max_call_depth as u64,
         stack_frame_bump: stack_frame_size as u64 * frames_per_call,
     };
