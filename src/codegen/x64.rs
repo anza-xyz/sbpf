@@ -742,7 +742,8 @@ impl<'a> JITGenerator<'a> {
         opcode: TemplateOpcode,
     ) -> Self {
         let template = templates.insn_builder(opcode);
-        template.layout.extra_bpf_insns = (insn_size(opcode.op()) / 8) as u8 - 1;
+        template.layout.extra_bpf_insns =
+            ((insn_size(opcode.op()) / 8) as u8).checked_sub(1).unwrap();
         Self::new(version, template, Some(opcode))
     }
 
@@ -917,6 +918,12 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
 /// `version`.
 fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
     let offset = InterpreterGenerator::step_offset(opcode);
+    // SAFETY:
+    //
+    // Contract from `ptr::add`: the result must be in bounds of the allocation, and the offset
+    // must not overflow `isize`.
+    // Evidence: `buffer` has `STEP_TABLE_SIZE` bytes, which is the number of opcodes
+    // (`TemplateOpcode::COUNT`) times the step size, and the offset of any opcode is less.
     unsafe { interpreter(version).buffer.add(offset) }
 }
 
@@ -924,7 +931,10 @@ struct Interpreter {
     buffer: *mut u8,
 }
 
+// SAFETY: `buffer` is only ever used for its address, as the memory is read-execute and is never
+// freed or written to once the `Interpreter` is constructed.
 unsafe impl Send for Interpreter {}
+// SAFETY: see `Send`.
 unsafe impl Sync for Interpreter {}
 
 /// Generates the interpreter.
@@ -957,7 +967,7 @@ impl InterpreterGenerator {
 
     fn new(version: SBPFVersion) -> Self {
         // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
-        let buffer = unsafe { allocate_pages_low(Self::STEP_TABLE_SIZE) }
+        let buffer = allocate_pages_low(Self::STEP_TABLE_SIZE)
             .expect("failed to allocate memory for the interpreter");
         Self {
             version,
@@ -976,18 +986,28 @@ impl X64Generator for InterpreterGenerator {
 
     fn extend(&mut self, buffer: &[u8]) {
         assert!(!self.terminal);
-        let step_capacity = 1 << Self::STEP_SIZE_LOG2;
-        let remaining_capacity = step_capacity - self.offset % step_capacity;
+        let step_capacity = 1usize << Self::STEP_SIZE_LOG2;
+        let remaining_capacity = step_capacity
+            .checked_sub(self.offset % step_capacity)
+            .unwrap();
         assert!(buffer.len() <= remaining_capacity, "step is too long!");
         assert!(self.offset.saturating_add(buffer.len()) <= Self::STEP_TABLE_SIZE);
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                buffer.as_ptr(),
-                self.buffer.add(self.offset),
-                buffer.len(),
-            );
-            self.offset += buffer.len();
-        }
+        // SAFETY:
+        //
+        // Contract from `ptr::add`: the result must be in bounds of the allocation.
+        // Evidence: `offset` is at most `STEP_TABLE_SIZE`, the size of the allocation, per the
+        // assertion above.
+        let destination = unsafe { self.buffer.add(self.offset) };
+        // SAFETY:
+        //
+        // Contract from `ptr::copy_nonoverlapping`: the source and the destination must be valid
+        // for `buffer.len()` bytes, and not overlap.
+        // Evidence: the destination range ends within the `STEP_TABLE_SIZE` bytes per the
+        // assertion above, which are read-write until `generate_interpreter` protects them after
+        // the generation, and not borrowed anywhere. `buffer` is a slice, so it cannot overlap
+        // memory that is only accessed through raw pointers.
+        unsafe { std::ptr::copy_nonoverlapping(buffer.as_ptr(), destination, buffer.len()) };
+        self.offset = self.offset.checked_add(buffer.len()).unwrap();
     }
 
     fn offset(&self) -> usize {
@@ -1090,10 +1110,11 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
         generator.terminal = false;
         // `insn` points at the last 8 bytes of the instruction just executed.
         let size = i8::try_from(insn_size(opcode.op())).unwrap();
+        let to_last = size.checked_sub(8).unwrap();
         let next_insn = if size == 8 {
             RINSN
         } else {
-            x64asm!(generator; lea RTEMP, [ BYTE (size - 8) + RINSN ]);
+            x64asm!(generator; lea RTEMP, [ BYTE to_last + RINSN ]);
             RTEMP
         };
         // Before dispatching the next instruction, check what the JIT does with the meter
@@ -1105,7 +1126,7 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
             ; jae BYTE =>exceeded
             ; cmp Rq(next_insn), rbp => Frame[BYTE -1].text_section_limit
             ; jae BYTE =>overrun
-            ; movzx RTEMP, WORD [ BYTE (size - 8) + RINSN ]
+            ; movzx RTEMP, WORD [ BYTE to_last + RINSN ]
             ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
             ; lea RTEMP, [ DWORD base_addr + RTEMP ]
             ; add RINSN, size as i32
@@ -1117,12 +1138,19 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
             ;; terminate(&mut generator, SIG_EXECUTION_OVERRUN)
         );
         assert!(
-            generator.offset - step_start <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
+            generator.offset.checked_sub(step_start).unwrap()
+                <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
             "step for {:#x} is too long",
             opcode.0
         );
     }
 
+    // SAFETY:
+    //
+    // Contract from `slice::from_raw_parts_mut`: the memory must be valid for reads and writes of
+    // the length, initialized, and not accessed through other pointers while the slice lives.
+    // Evidence: `generator.buffer` has `STEP_TABLE_SIZE` bytes of mmapped, thus initialized,
+    // read-write memory, and `generator.buffer` is not used until `buffer` is last.
     let buffer = unsafe {
         std::slice::from_raw_parts_mut(generator.buffer, InterpreterGenerator::STEP_TABLE_SIZE)
     };
@@ -1135,9 +1163,16 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     super::write_perf_jitdump(
         &format!("interpreter {:?}", version),
         generator.buffer,
-        InterpreterGenerator::STEP_TABLE_SIZE,
+        buffer,
         62,
     );
+    // SAFETY:
+    //
+    // Contract from `protect_pages`: the range must be whole pages of a mapping that the caller
+    // owns, and nothing may access them in a way the new permissions disallow.
+    // Evidence: it is the whole allocation of `allocate_pages_low`, which is page aligned, and
+    // `STEP_TABLE_SIZE` is a multiple of the page size. `buffer` is not used after this, and the
+    // steps are only executed afterwards.
     unsafe {
         protect_pages(
             generator.buffer,
@@ -1198,17 +1233,19 @@ pub fn enter<C: crate::vm::ContextObject>(
     let pc = vm.registers[11] as usize;
     let (start_addr, insn, jit_pc_section, code) = match jit {
         Some((pc_section, text_section)) => (
-            text_section as usize + pc_section[pc] as usize,
+            (text_section as usize).wrapping_add(pc_section[pc] as usize),
             bpf.as_ptr().wrapping_add(ebpf::INSN_SIZE),
             pc_section.as_ptr(),
             text_section,
         ),
         None => {
+            // `pc` is bounds checked by the indexing below.
             let starting_insn = bpf.as_chunks::<{ ebpf::INSN_SIZE }>().0[pc];
             let opcode = TemplateOpcode::of(u64::from_le_bytes(starting_insn));
             (
                 interpreter_step(version, opcode) as usize,
-                bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE),
+                bpf.as_ptr()
+                    .wrapping_add(pc.wrapping_add(1).wrapping_mul(ebpf::INSN_SIZE)),
                 std::ptr::null(),
                 interpreter(version).buffer.cast_const(),
             )
@@ -1223,7 +1260,7 @@ pub fn enter<C: crate::vm::ContextObject>(
     let meter = initial_meter(bpf, vm);
     let (max_call_depth, stack_frame_size) = (config.max_call_depth, config.stack_frame_size);
     let gaps = version.stack_frame_gaps() && config.enable_stack_frame_gaps;
-    let frames_per_call = 1 + gaps as u64;
+    let frames_per_call = (gaps as u64).wrapping_add(1);
     let mut frame = Frame {
         vm: std::ptr::from_mut(vm).cast(),
         exit: std::ptr::null(),
@@ -1237,10 +1274,18 @@ pub fn enter<C: crate::vm::ContextObject>(
         call_dispatcher: supporting_code::call_dispatcher::<C>(version),
         function_registry: std::ptr::from_ref(executable.get_function_registry()).cast(),
         calls_remaining: max_call_depth as u64,
-        stack_frame_bump: stack_frame_size as u64 * frames_per_call,
+        stack_frame_bump: (stack_frame_size as u64).wrapping_mul(frames_per_call),
     };
     let code: u64;
     let remaining: u64;
+    // SAFETY:
+    //
+    // Contract from `asm!`: every register the code changes must be declared or restored, the
+    // stack must be restored, and the code must not unwind.
+    // Evidence: `entry_point` restores `rbp` and `rsp`, the block itself saves `rbx`, and the other
+    // general purpose registers are declared. The host functions the generated code calls are
+    // `extern "sysv64"`, so a panic in them aborts instead of unwinding. `frame` outlives the call,
+    // and `jit` (if any) or the interpreter is code for the same `version`, which outlives it too.
     unsafe {
         std::arch::asm!(
             "push rbx",
@@ -1261,6 +1306,7 @@ pub fn enter<C: crate::vm::ContextObject>(
             lateout("r15") _,
             lateout("xmm0") _,
             lateout("xmm1") _,
+            clobber_abi("sysv64")
         );
     }
     finish_execution(vm, code as i8, remaining);

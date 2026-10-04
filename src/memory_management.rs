@@ -307,7 +307,7 @@ pub unsafe fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError>
 /// that code in them can be addressed with sign-extended 32-bit absolute addresses.
 ///
 /// The addresses are picked at random, and existing mappings are never replaced.
-pub unsafe fn allocate_pages_low(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
+pub fn allocate_pages_low(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
     /// Same as the allocation granularity of Windows.
     const ALIGNMENT: usize = 64 * 1024;
     /// Well above the NULL area and where non-PIE executables are loaded.
@@ -332,23 +332,27 @@ pub unsafe fn allocate_pages_low(size_in_bytes: usize) -> Result<*mut u8, EbpfEr
             let raw = {
                 let mut raw = hint;
                 // Without `MAP_FIXED` the hint is only honored if the range is free.
-                libc_error_guard!(
-                    mmap,
-                    &mut raw,
-                    size_in_bytes,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-                    -1,
-                    0,
-                );
+                unsafe {
+                    libc_error_guard!(
+                        mmap,
+                        &mut raw,
+                        size_in_bytes,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                        -1,
+                        0,
+                    );
+                }
                 if raw != hint {
-                    free_pages(raw.cast::<u8>(), size_in_bytes)?;
+                    unsafe {
+                        free_pages(raw.cast::<u8>(), size_in_bytes)?;
+                    }
                     continue;
                 }
                 raw
             };
             #[cfg(target_os = "windows")]
-            let raw = {
+            let raw = unsafe {
                 // Fails if the range is occupied.
                 let raw = VirtualAlloc(
                     hint,

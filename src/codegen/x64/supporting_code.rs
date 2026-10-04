@@ -28,7 +28,10 @@ pub(super) struct SupportingCode {
     pub(super) divide: [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4],
 }
 
+// SAFETY: the pointers are only used for their addresses, as the memory they point into is
+// read-execute and is never freed or written to once the `SupportingCode` is constructed.
 unsafe impl Send for SupportingCode {}
+// SAFETY: see `Send`.
 unsafe impl Sync for SupportingCode {}
 
 type Asm = VecAssembler<X64Relocation>;
@@ -53,20 +56,30 @@ impl SupportingCode {
 
     fn generate() -> SupportingCode {
         // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
-        let buffer = unsafe { allocate_pages_low(Self::LEN) }
+        let buffer = allocate_pages_low(Self::LEN)
             .expect("failed to allocate memory for the supporting code");
         let (supports, code) = Self::assemble(buffer as usize);
         assert!(code.len() <= Self::LEN, "supporting code is too long!");
-        unsafe {
-            std::ptr::copy_nonoverlapping(code.as_ptr(), buffer, code.len());
-            #[cfg(feature = "codegen_debug")]
-            std::fs::write("supporting-code.bin", &code).unwrap();
-            #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
-            // EM_X86_64
-            super::super::write_perf_jitdump("supporting code", buffer, code.len(), 62);
-            protect_pages(buffer, Self::LEN, PagePermissions::ReadExecute)
-        }
-        .expect("failed to make the supporting code executable");
+        // SAFETY:
+        //
+        // Contract from `ptr::copy_nonoverlapping`: the source and the destination must be valid
+        // for `code.len()` bytes, and not overlap.
+        // Evidence: `code.len()` was asserted to fit the `LEN` bytes of the fresh read-write
+        // allocation, which `code`, a `Vec`, cannot overlap.
+        unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), buffer, code.len()) };
+        #[cfg(feature = "codegen_debug")]
+        std::fs::write("supporting-code.bin", &code).unwrap();
+        #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
+        // EM_X86_64
+        super::super::write_perf_jitdump("supporting code", buffer, &code, 62);
+        // SAFETY:
+        //
+        // Contract from `protect_pages`: the range must be whole pages of a mapping that the
+        // caller owns, and nothing may access them in a way the new permissions disallow.
+        // Evidence: it is the whole allocation of `allocate_pages_low`, which is page aligned, and
+        // `LEN` is a multiple of the page size. The code is only executed afterwards.
+        unsafe { protect_pages(buffer, Self::LEN, PagePermissions::ReadExecute) }
+            .expect("failed to make the supporting code executable");
         supports
     }
 
@@ -97,6 +110,7 @@ impl SupportingCode {
         x64asm!(out; =>label);
         let within_depth = out.new_dynamic_label();
         let in_bounds = out.new_dynamic_label();
+        let insn_mask = (ebpf::INSN_SIZE as i32).checked_neg().unwrap();
         x64asm!(out
             // `insn` is restored after the call: the JIT's never changes, and the interpreter's
             // is the instruction following the call.
@@ -118,7 +132,7 @@ impl SupportingCode {
             ; mov RTEMP, [rsp + 32]
             ;; terminate(out, SIG_CALL_OUTSIDE_TEXT_SEGMENT)
             ; =>in_bounds
-            ; and RTEMP, -(ebpf::INSN_SIZE as i32)
+            ; and RTEMP, insn_mask
         );
 
         // In the JIT, the machine code to call is found via `jit_pc_section`. Otherwise this is the
@@ -227,7 +241,10 @@ impl SupportingCode {
         // overwritten last.
         const { assert!(GPREG_MAP[0] == RSI) };
         for (i, &reg) in GPREG_MAP.iter().enumerate().rev() {
-            x64asm!(out; mov Rq(reg), [rsi + RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8]);
+            let offset = (RuntimeEnvironmentSlot::Registers as i32)
+                .checked_add((i as i32).checked_mul(8).unwrap())
+                .unwrap();
+            x64asm!(out; mov Rq(reg), [rsi + offset]);
         }
 
         x64asm!(out
@@ -236,7 +253,10 @@ impl SupportingCode {
             ; mov rax, rbp => Frame[BYTE -1].vm
         );
         for (i, &reg) in GPREG_MAP.iter().enumerate() {
-            x64asm!(out; mov [rax + RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8], Rq(reg));
+            let offset = (RuntimeEnvironmentSlot::Registers as i32)
+                .checked_add((i as i32).checked_mul(8).unwrap())
+                .unwrap();
+            x64asm!(out; mov [rax + offset], Rq(reg));
         }
         x64asm!(out
             ; mov rsp, rbp
@@ -266,8 +286,9 @@ impl SupportingCode {
         let pushed = clobber_for_sysv64_call(out);
         // The address of the next instruction is above `pushed`, the return address and
         // `invoke_support`'s target.
-        let next_insn = pushed + 16;
-        let needs_stack_alignment = sysv64_call_needs_stack_alignment(next_insn + 8);
+        let next_insn = pushed.checked_add(16).unwrap();
+        let needs_stack_alignment =
+            sysv64_call_needs_stack_alignment(next_insn.checked_add(8).unwrap());
         x64asm!(out
             ; mov rdi, rax
             // `clobber_for_sysv64_call` has pushed `temp`.
@@ -323,7 +344,7 @@ impl SupportingCode {
                 ; mov RTEMP, Rq(reg)
                 ; jmp =>common
             );
-            assert_eq!(out.offset().0 - stub_start, STUB_SIZE);
+            assert_eq!(out.offset().0.checked_sub(stub_start).unwrap(), STUB_SIZE);
         }
         x64asm!(out
             ; =>common
@@ -333,8 +354,9 @@ impl SupportingCode {
         let start = address(out, base);
         let invalid = out.new_dynamic_label();
         let stubs = i32::try_from(stubs as usize).expect("supports in the first 2 GiB");
+        let last_register = (GPREG_MAP.len() as i32).checked_sub(1).unwrap();
         x64asm!(out
-            ; cmp RTEMP, GPREG_MAP.len() as i32 - 1
+            ; cmp RTEMP, last_register
             ; ja =>invalid
             ; lea RTEMP, [ DWORD stubs + RTEMP * 8 ]
             ; jmp RTEMP
@@ -354,7 +376,8 @@ impl SupportingCode {
         // `clobber_for_sysv64_call` spills them.
         let pushed = clobber_for_sysv64_call(out);
         // Also the return address and `invoke_support`'s target.
-        let needs_stack_alignment = sysv64_call_needs_stack_alignment(pushed + 16);
+        let needs_stack_alignment =
+            sysv64_call_needs_stack_alignment(pushed.checked_add(16).unwrap());
         x64asm!(out
             ; mov rdi, rax
             ; mov esi, [RTEMP - 4]
@@ -412,12 +435,17 @@ impl SupportingCode {
         let pushed = clobber_for_sysv64_call(out);
         // Past the return address and `invoke_support`'s target are the values pushed by the
         // caller, the most recent first.
-        let values = pushed + 16;
-        let value_count = match kind {
+        let values = pushed.checked_add(16).unwrap();
+        let value_count: i32 = match kind {
             MemoryAccessKind::Load | MemoryAccessKind::StoreImm => 1,
             MemoryAccessKind::StoreReg => 2,
         };
-        let base = i8::try_from(values + (value_count - 1) * 8).unwrap();
+        let base = i8::try_from(
+            values
+                .checked_add(value_count.checked_sub(1).unwrap().checked_mul(8).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
         match kind {
             MemoryAccessKind::Load => {}
             MemoryAccessKind::StoreImm => x64asm!(out; movsxd rdx, DWORD [RTEMP - 4]),
@@ -436,7 +464,11 @@ impl SupportingCode {
             MemoryAccessKind::Load => x64asm!(out; mov rdx, rax),
             MemoryAccessKind::StoreImm | MemoryAccessKind::StoreReg => x64asm!(out; mov rcx, rax),
         }
-        let needs_stack_alignment = sysv64_call_needs_stack_alignment(values + value_count * 8);
+        let needs_stack_alignment = sysv64_call_needs_stack_alignment(
+            values
+                .checked_add(value_count.checked_mul(8).unwrap())
+                .unwrap(),
+        );
         x64asm!(out; mov rax, QWORD function as i64);
         if needs_stack_alignment {
             x64asm!(out; sub rsp, 8);
@@ -516,7 +548,7 @@ const fn reg_mask(regs: &[u8]) -> u16 {
     let mut i = 0;
     while i < regs.len() {
         mask |= 1 << regs[i];
-        i += 1;
+        i = i.checked_add(1).unwrap();
     }
     mask
 }
@@ -569,10 +601,13 @@ fn clobber_for_sysv64_call(out: &mut Asm) -> i32 {
     x64asm!(out; mov rax, rbp => Frame[BYTE -1].vm);
     for (i, &reg) in GPREG_MAP.iter().enumerate() {
         if SYSV64_CLOBBERED & 1 << reg != 0 {
-            x64asm!(out; mov [rax + RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8], Rq(reg));
+            let offset = (RuntimeEnvironmentSlot::Registers as i32)
+                .checked_add((i as i32).checked_mul(8).unwrap())
+                .unwrap();
+            x64asm!(out; mov [rax + offset], Rq(reg));
         }
     }
-    SYSV64_PUSHED.count_ones() as i32 * 8
+    (SYSV64_PUSHED.count_ones() as i32).checked_mul(8).unwrap()
 }
 
 /// Does `rsp` need to be adjusted by 8 bytes for a host function call, given the number of bytes
@@ -602,7 +637,10 @@ fn restore_from_sysv64_call(out: &mut Asm) {
     x64asm!(out; mov rax, rbp => Frame[BYTE -1].vm);
     for (i, &reg) in GPREG_MAP.iter().enumerate() {
         if SYSV64_CLOBBERED & 1 << reg != 0 {
-            x64asm!(out; mov Rq(reg), [rax + RuntimeEnvironmentSlot::Registers as i32 + i as i32 * 8]);
+            let offset = (RuntimeEnvironmentSlot::Registers as i32)
+                .checked_add((i as i32).checked_mul(8).unwrap())
+                .unwrap();
+            x64asm!(out; mov Rq(reg), [rax + offset]);
         }
     }
     for reg in (0..16).rev() {
@@ -657,6 +695,13 @@ extern "sysv64" fn store<T: crate::aligned_memory::Pod>(
 ) -> HostCallResult {
     const { assert!(cfg!(target_endian = "little")) };
     // Truncates `value`.
+    // SAFETY:
+    //
+    // Contract from `mem::transmute_copy`: `T` must not be larger than `u64`, and the first
+    // `size_of::<T>()` bytes of the `u64` must be a valid `T`.
+    // Evidence: `store` is only instantiated for `u8` to `u64` (see the match above), for which
+    // every bit pattern is valid, and on little endian the first bytes are the low ones, which
+    // truncates as intended.
     let value = unsafe { std::mem::transmute_copy::<u64, T>(&value) };
     HostCallResult::new(mapping.store::<T>(value, vm_addr), result)
 }
@@ -800,6 +845,12 @@ mod tests {
             assert!(contains_address(template(divide), divide_helper));
             assert!(contains_address(template(call_imm), call_imm_helper));
 
+            // SAFETY:
+            //
+            // Contract from `slice::from_raw_parts`: the memory must be valid for reads of the
+            // length, and not mutated while borrowed.
+            // Evidence: a step is `1 << STEP_SIZE_LOG2` bytes of the interpreter buffer, which is
+            // read-execute and never freed, and the opcode's step is within it.
             let step = |opcode| unsafe {
                 std::slice::from_raw_parts(
                     interpreter_step(version, opcode),

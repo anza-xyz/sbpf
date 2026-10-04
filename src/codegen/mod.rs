@@ -23,6 +23,7 @@ use dynasmrt::{AssemblyOffset, DynamicLabel};
 use rand::rngs::SmallRng;
 use rand::{thread_rng, Rng, RngCore, SeedableRng};
 use std::convert::{TryFrom, TryInto};
+use std::num::NonZeroU64;
 use std::ptr::NonNull;
 
 /// Size of the instruction with the opcode `op`, in bytes.
@@ -63,7 +64,7 @@ fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) 
     let remaining = if code == SIG_EXCEEDED_MAX_INSTRUCTIONS || (meter as i64) < 0 {
         0
     } else {
-        meter / ebpf::INSN_SIZE as u64
+        meter / const { NonZeroU64::new(ebpf::INSN_SIZE as u64).unwrap() }
     };
     // Syscalls consume the budget used up to them and update `previous_instruction_meter`.
     vm.due_insn_count = vm.previous_instruction_meter.saturating_sub(remaining);
@@ -189,7 +190,7 @@ impl<const SIZE: usize> TemplateBuilder<'_, SIZE> {
 
     fn add_relocation(&mut self, relocation: TemplateRelocation) {
         self.relocations[usize::from(self.layout.num_relocations)] = relocation;
-        self.layout.num_relocations += 1;
+        self.layout.num_relocations = self.layout.num_relocations.checked_add(1).unwrap();
     }
 
     #[track_caller]
@@ -206,7 +207,7 @@ impl<const SIZE: usize> TemplateBuilder<'_, SIZE> {
     #[track_caller]
     fn push(&mut self, byte: u8) {
         self.code[self.layout.len()] = byte;
-        self.layout.bytes += 1;
+        self.layout.bytes = self.layout.bytes.checked_add(1).unwrap();
     }
 }
 
@@ -355,17 +356,23 @@ impl TemplateRelocation {
             "unsupported template relocation"
         );
         let reference = if relative {
-            location - usize::from(patch.ref_offset)
+            location.checked_sub(usize::from(patch.ref_offset)).unwrap()
         } else {
             0
         };
-        let field = location - usize::from(patch.field_offset);
+        let field = location
+            .checked_sub(usize::from(patch.field_offset))
+            .unwrap();
         // The template ends no earlier than `location`, so the field is within it. `apply` relies
         // on this.
-        assert!(field + 4 <= location, "unsupported template relocation");
+        assert!(
+            field.checked_add(4).unwrap() <= location,
+            "unsupported template relocation"
+        );
         Self {
             field: u8::try_from(field).unwrap(),
-            addend: i32::try_from(patch.target_offset - reference as isize).unwrap(),
+            addend: i32::try_from(patch.target_offset.checked_sub(reference as isize).unwrap())
+                .unwrap(),
             kind,
         }
     }
@@ -381,33 +388,34 @@ impl TemplateRelocation {
         insn: u64,
         pc_section: &[u32],
     ) {
-        let off = (insn >> 16) as i16 as isize;
+        // Computed in `i64`, to which all the inputs convert losslessly, and in which none of the
+        // arithmetic below can overflow: `template_start` is below `NOOP_DUE` (see `analyze`), as
+        // are the `pc_section` entries, `pc * INSN_SIZE` is an offset into the text section, and
+        // `off` and `addend` are at most 32 bits.
+        let off = (insn >> 16) as i16;
         let target = match self.kind {
-            TemplateRelocationKind::InsnOffset => pc * ebpf::INSN_SIZE,
+            TemplateRelocationKind::InsnOffset => (pc as i64).wrapping_mul(ebpf::INSN_SIZE as i64),
             TemplateRelocationKind::TakenBranchMeterAdjustment => {
-                (off * ebpf::INSN_SIZE as isize) as usize
+                i64::from(off).wrapping_mul(ebpf::INSN_SIZE as i64)
             }
             TemplateRelocationKind::TakenBranch => {
-                let target_pc = (pc as isize)
-                    .checked_add(1 + off)
-                    .and_then(|target_pc| usize::try_from(target_pc).ok());
-                // The verifier rejects invalid jump offsets…
-                let target = target_pc
+                // The verifier rejects invalid jump offsets, but doing this defensive thing is
+                // faster anyway.
+                let target = pc
+                    .checked_add_signed(isize::from(off).wrapping_add(1))
                     .and_then(|target_pc| pc_section.get(target_pc))
                     .copied()
                     .unwrap_or(JitTemplates::<SIZE>::INVALID_JUMP_TARGET);
-                ((target & !PADDING_DUE) as usize).wrapping_sub(template_start)
+                i64::from(target & !PADDING_DUE).wrapping_sub(template_start as i64)
             }
         };
-        let value = target.wrapping_add(self.addend as usize);
-        debug_assert!(
-            i32::try_from(value as isize).is_ok(),
-            "impossible relocation"
-        );
+        let value = target.wrapping_add(i64::from(self.addend));
+        debug_assert!(i32::try_from(value).is_ok(), "impossible relocation");
         // Never clamps (see `new`), but `min` elides a bounds check.
-        debug_assert!(usize::from(self.field) <= SIZE - 4);
-        let field = usize::from(self.field).min(SIZE - 4);
-        template[field..field + 4].copy_from_slice(&(value as u32).to_le_bytes());
+        let max_field = const { SIZE - 4 };
+        debug_assert!(usize::from(self.field) <= max_field);
+        let field = usize::from(self.field).min(max_field);
+        template[field..field.wrapping_add(4)].copy_from_slice(&(value as i32).to_le_bytes());
     }
 }
 
@@ -451,8 +459,8 @@ enum AuxTemplate {
 impl AuxTemplate {
     const COUNT: usize = 4;
     /// Index within `JitTemplates`.
-    fn index(self) -> usize {
-        TemplateOpcode::COUNT + self as usize
+    const fn index(self) -> usize {
+        TemplateOpcode::COUNT.wrapping_add(self as usize)
     }
 }
 
@@ -519,31 +527,42 @@ impl JitProgram {
         let page_size = get_system_page_size();
         let pc_size = round_to_page_size(std::mem::size_of_val(self.pc_section()), page_size);
         let code_size = round_to_page_size(used, page_size);
+        let text = self.text_section.as_ptr().cast::<u8>();
         // SAFETY:
         //
-        // Contract from `ptr::add` and `ptr::write_bytes`: the range written must be in bounds of
-        // one allocation and valid for writes.
-        // Evidence: `used` is at most the length of `text_section`, which is page-rounded, so
-        // `used..code_size` is within it. The pages are still read-write, as nothing has protected
-        // them yet.
+        // Contract from `ptr::add`: the result must be in bounds of the allocation.
+        // Evidence: `used` is at most the length of `text_section` (see `compile`).
+        let unused = unsafe { text.add(used) };
+
+        // Debugger traps in the unused tail of the last code page.
         //
-        // Contract from `protect_pages`: the range must be page aligned and be owned by the caller.
-        // Evidence: the pooled allocation is page aligned and `pc_section` is at its start,
-        // followed by `text_section` at the page-rounded `pc_size`. `pc_size` and `code_size` are
-        // page-rounded and within the allocation, which `self` owns until dropped.
+        // SAFETY:
         //
-        // No reference into the pages is alive, as they are only created by borrowing `self`.
+        // Contract from `ptr::write_bytes`: the range must be valid for writes.
+        // Evidence: `code_size` is `used` rounded up to the page size, and the length of
+        // `text_section` is page-rounded too, so the range is within it. Its pages are read-write,
+        // as nothing has protected them yet, and no reference into them is alive, as references
+        // are only created by borrowing `self`.
+        unsafe { std::ptr::write_bytes(unused, 0xcc, code_size.wrapping_sub(used)) };
+
+        // SAFETY:
+        //
+        // Contract from `protect_pages`: the range must be whole pages of a mapping that the
+        // caller owns, and nothing may access them in a way the new permissions disallow.
+        // Evidence: the pooled allocation is page aligned, starts with `pc_section`, and has the
+        // page-rounded `pc_size` bytes for it. `self` owns the allocation, and the section is only
+        // read after this.
         unsafe {
-            let text = self.text_section.as_ptr().cast::<u8>();
-            // Debugger traps in the unused tail of the last code page.
-            std::ptr::write_bytes(text.add(used), 0xcc, code_size - used);
             protect_pages(
                 self.pc_section.as_ptr().cast::<u8>(),
                 pc_size,
                 PagePermissions::Read,
-            )?;
-            protect_pages(text, code_size, PagePermissions::ReadExecute)?;
-        }
+            )
+        }?;
+
+        // SAFETY: as above, with `text_section` following at the page-rounded `pc_size`, and
+        // `code_size` within it. The section is only read and executed after this.
+        unsafe { protect_pages(text, code_size, PagePermissions::ReadExecute) }?;
         self.text_section = NonNull::slice_from_raw_parts(self.text_section.cast::<u8>(), used);
         Ok(())
     }
@@ -627,13 +646,16 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         let mut rng =
             SmallRng::from_rng(thread_rng()).expect("failed to seed the JIT diversification");
         let noop_threshold = u32::MAX.checked_div(noop_instruction_rate).unwrap_or(0);
-        let start_padding =
-            rng.gen_range(0..MAX_START_PADDING_LENGTH) * (noop_threshold != 0) as usize;
+        let start_padding = rng
+            .gen_range(0..MAX_START_PADDING_LENGTH)
+            .wrapping_mul((noop_threshold != 0) as usize);
 
+        // `position` saturates so that an absurdly large output fails the check at the end.
         let mut pc_sec = Vec::with_capacity(program.len());
-        let mut position = 0;
-        position += self.aux_layout(AuxTemplate::InvalidJumpTarget).len();
-        position += start_padding * self.aux_layout(AuxTemplate::Noop).len();
+        let mut position = 0usize;
+        position = position.wrapping_add(self.aux_layout(AuxTemplate::InvalidJumpTarget).len());
+        position = position
+            .wrapping_add(start_padding.wrapping_mul(self.aux_layout(AuxTemplate::Noop).len()));
         // Introduce checkpoints at certain points in the code; the instruction meter is otherwise
         // only checked on control flow, so straight-line code could run arbitrarily far past the
         // budget.
@@ -643,7 +665,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             let insn = u64::from_le_bytes(*insn);
             let layout = self.insn_layout(TemplateOpcode::of(insn));
             let noop = if rng.next_u32() < noop_threshold {
-                position += self.aux_layout(AuxTemplate::Noop).len();
+                position = position.wrapping_add(self.aux_layout(AuxTemplate::Noop).len());
                 NOOP_DUE
             } else {
                 0
@@ -653,21 +675,23 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
                 0
             } else if until_checkpoint == 0 {
                 until_checkpoint = instruction_meter_checkpoint_distance;
-                position += self.aux_layout(AuxTemplate::MeterCheckpoint).len();
+                position =
+                    position.wrapping_add(self.aux_layout(AuxTemplate::MeterCheckpoint).len());
                 CHECKPOINT_DUE
             } else {
-                until_checkpoint -= 1;
+                // Not zero in this branch.
+                until_checkpoint = until_checkpoint.wrapping_sub(1);
                 0
             };
             // Truncation is ruled out below, once the final `position` is known.
             pc_sec.push(position as u32 | noop | checkpoint);
-            position += layout.len();
+            position = position.wrapping_add(layout.len());
             for _ in 0..layout.extra_bpf_insns {
                 program_iter.next();
                 pc_sec.push(Self::INVALID_JUMP_TARGET);
             }
         }
-        position += self.aux_layout(AuxTemplate::ExecutionOverrun).len();
+        position = position.wrapping_add(self.aux_layout(AuxTemplate::ExecutionOverrun).len());
         assert!(position < NOOP_DUE as usize, "JIT output too large");
         (pc_sec, position, start_padding)
     }
@@ -687,8 +711,9 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         let pc_size = round_to_page_size(std::mem::size_of_val(pc_sec.as_slice()), page_size);
         // Templates are always written out in large chunks to employ SIMD and avoid memcpy calls,
         // so the last one may extend past the output.
-        let text_capacity = round_to_page_size(output_len.saturating_add(SIZE), page_size);
-        let (raw, allocation_size) = allocate_pages_pooled(pc_size.saturating_add(text_capacity));
+        // `output_len` is below `NOOP_DUE`, see `analyze`, and the sizes are far from `usize::MAX`.
+        let text_capacity = round_to_page_size(output_len.wrapping_add(SIZE), page_size);
+        let (raw, allocation_size) = allocate_pages_pooled(pc_size.wrapping_add(text_capacity));
         let raw = NonNull::new(raw).expect("the pooled allocation is never null");
         // The allocation is page aligned, and the `pc_sec.len()` words fit within `pc_size`, so the
         // sections are aligned and disjoint.
@@ -824,75 +849,101 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         for relocation in relocations {
             relocation.apply(out, start, pc, insn, pc_section);
         }
-        *position = start.saturating_add(len);
+        *position = start.wrapping_add(len);
     }
 }
 
 #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
-/// Add the code in `ptr..ptr + len` called `name` to the perf jitdump (`/tmp/jit-<pid>.dump`).
-fn write_perf_jitdump(name: &str, ptr: *const u8, len: usize, elf_machine: u32) {
+/// Add `code`, which runs from `address`, called `name` to the perf jitdump
+/// (`/tmp/jit-<pid>.dump`).
+fn write_perf_jitdump(name: &str, address: *const u8, code: &[u8], elf_machine: u32) {
     use std::io::Write as _;
     use std::os::fd::AsRawFd as _;
     use std::sync::{Mutex, OnceLock};
+
+    fn now() -> u64 {
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        // SAFETY:
+        //
+        // Contract from `clock_gettime`: the pointer must be valid for writing a `timespec`.
+        // Evidence: it points at the local `ts`.
+        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
+        (ts.tv_sec as u64)
+            .wrapping_mul(1_000_000_000)
+            .wrapping_add(ts.tv_nsec as u64)
+    }
+
     // The header is only written once, then each of the code regions is a record of the same file,
     // and its index is the number of records before.
     static JITDUMP: OnceLock<Mutex<(std::fs::File, u64)>> = OnceLock::new();
-    unsafe {
-        let pid = std::process::id();
-        let tid = libc::syscall(libc::SYS_gettid) as u32;
-        let now = || {
-            let mut ts = libc::timespec {
-                tv_sec: 0,
-                tv_nsec: 0,
-            };
-            libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
-            (ts.tv_sec as u64) * 1_000_000_000 + ts.tv_nsec as u64
-        };
+    let pid = std::process::id();
+    // SAFETY:
+    //
+    // Contract from `syscall`: the arguments must be what the system call expects.
+    // Evidence: `gettid` takes none.
+    let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
 
-        let dump = JITDUMP.get_or_init(|| {
-            let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
-            // 1. JIT Header (40 bytes)
-            f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
-            f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
-            f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
-            f.write_all(&elf_machine.to_le_bytes()).unwrap();
-            f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
-            f.write_all(&pid.to_le_bytes()).unwrap();
-            f.write_all(&now().to_le_bytes()).unwrap();
-            f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
+    let dump = JITDUMP.get_or_init(|| {
+        let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
+        // 1. JIT Header (40 bytes)
+        f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
+        f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
+        f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
+        f.write_all(&elf_machine.to_le_bytes()).unwrap();
+        f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
+        f.write_all(&pid.to_le_bytes()).unwrap();
+        f.write_all(&now().to_le_bytes()).unwrap();
+        f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
 
-            // Triggers perf record's MMAP detection
-            let m = libc::mmap(
+        // Triggers perf record's MMAP detection
+        //
+        // SAFETY:
+        //
+        // Contract from `mmap`: without `MAP_FIXED` it may not replace existing mappings, and the
+        // file descriptor must be open.
+        // Evidence: the hint is null and no flags beyond `MAP_PRIVATE` are given, and `f` is open.
+        let m = unsafe {
+            libc::mmap(
                 std::ptr::null_mut(),
                 4096,
                 libc::PROT_READ | libc::PROT_EXEC,
                 libc::MAP_PRIVATE,
                 f.as_raw_fd(),
                 0,
-            );
-            if m != libc::MAP_FAILED {
-                libc::munmap(m, 4096);
-            }
-            Mutex::new((f, 0))
-        });
-        let (f, records) = &mut *dump.lock().unwrap();
+            )
+        };
+        if m != libc::MAP_FAILED {
+            // SAFETY:
+            //
+            // Contract from `munmap`: nothing may access the range afterwards.
+            // Evidence: it is exactly the mapping just created, which nothing references.
+            unsafe { libc::munmap(m, 4096) };
+        }
+        Mutex::new((f, 0))
+    });
+    let (f, records) = &mut *dump.lock().unwrap();
 
-        // 2. JIT_CODE_LOAD Record Header (56 bytes, then the name and its NUL)
-        let rec_size = (56 + name.len() + 1 + len) as u32;
-        f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
-        f.write_all(&rec_size.to_le_bytes()).unwrap();
-        f.write_all(&now().to_le_bytes()).unwrap();
-        f.write_all(&pid.to_le_bytes()).unwrap();
-        f.write_all(&tid.to_le_bytes()).unwrap();
-        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // VMA
-        f.write_all(&(ptr as u64).to_le_bytes()).unwrap(); // Code Address
-        f.write_all(&(len as u64).to_le_bytes()).unwrap(); // Code Size
-        f.write_all(&(*records + 1).to_le_bytes()).unwrap(); // Index
-        f.write_all(name.as_bytes()).unwrap();
-        f.write_all(&[0]).unwrap();
-        *records += 1;
+    // 2. JIT_CODE_LOAD Record Header (56 bytes, then the name and its NUL)
+    let rec_size = 56usize
+        .wrapping_add(name.len())
+        .wrapping_add(1)
+        .wrapping_add(code.len()) as u32;
+    f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
+    f.write_all(&rec_size.to_le_bytes()).unwrap();
+    f.write_all(&now().to_le_bytes()).unwrap();
+    f.write_all(&pid.to_le_bytes()).unwrap();
+    f.write_all(&tid.to_le_bytes()).unwrap();
+    f.write_all(&(address as u64).to_le_bytes()).unwrap(); // VMA
+    f.write_all(&(address as u64).to_le_bytes()).unwrap(); // Code Address
+    f.write_all(&(code.len() as u64).to_le_bytes()).unwrap(); // Code Size
+    f.write_all(&records.wrapping_add(1).to_le_bytes()).unwrap(); // Index
+    f.write_all(name.as_bytes()).unwrap();
+    f.write_all(&[0]).unwrap();
+    *records = records.wrapping_add(1);
 
-        // 3. Raw Code Bytes
-        f.write_all(std::slice::from_raw_parts(ptr, len)).unwrap();
-    }
+    // 3. Raw Code Bytes
+    f.write_all(code).unwrap();
 }
