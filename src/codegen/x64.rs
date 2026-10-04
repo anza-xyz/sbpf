@@ -80,6 +80,7 @@ macro_rules! x64asm {
             ; .alias BTEMP, cl
             ; .alias RMETER, rdx
             $($acc)* $($curr)*
+        )
     }};
 
     // replace ALU_SRC32(src) operand with either the source register for ALU instructions using
@@ -986,7 +987,11 @@ mod maps {
     }
 }
 
-/// Generate an interpreter...
+/// Generates the interpreter.
+///
+/// This interpreter uses a dispatch table with one step of `1 << STEP_SIZE_LOG2` bytes per
+/// `TemplateOpcode`, each running its instruction and then threading execution to the next one
+/// directly, thus implementing a technique known as direct threading.
 struct InterpreterGenerator {
     buffer: *mut u8,
     relocs: LabelRelocs<SimpleRelocation>,
