@@ -928,12 +928,6 @@ struct Interpreter {
 unsafe impl Send for Interpreter {}
 unsafe impl Sync for Interpreter {}
 
-impl Drop for Interpreter {
-    fn drop(&mut self) {
-        unsafe { maps::unmap(self.buffer, InterpreterGenerator::STEPS_SIZE) }
-    }
-}
-
 /// Memory for the interpreter, which is addressed with absolute 32-bit addresses, so it has to be
 /// within the first 2 GiB of the address space.
 #[cfg(target_os = "linux")]
@@ -978,10 +972,6 @@ mod maps {
     pub(super) unsafe fn make_exec(buffer: *mut u8, len: usize) {
         unsafe { libc::mprotect(buffer.cast(), len, libc::PROT_READ | libc::PROT_EXEC) };
     }
-
-    pub(super) unsafe fn unmap(buffer: *mut u8, len: usize) {
-        unsafe { libc::munmap(buffer.cast(), len) };
-    }
 }
 
 // TODO: e.g. `VirtualAlloc` with an address hint on Windows.
@@ -992,10 +982,6 @@ mod maps {
     }
 
     pub(super) unsafe fn make_exec(_buffer: *mut u8, _len: usize) {
-        unreachable!()
-    }
-
-    pub(super) unsafe fn unmap(_buffer: *mut u8, _len: usize) {
         unreachable!()
     }
 }
