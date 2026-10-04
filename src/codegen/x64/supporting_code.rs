@@ -65,14 +65,17 @@ impl SupportingCode {
     }
 
     fn call_internal(out: &mut InterpreterGenerator) -> *const u8 {
-        // `[rsp + 24]` is the address of the instruction following the call, once the target is
-        // pushed.
+        // `[rsp + 32]` is the address of the instruction following the call, once `insn` and the
+        // target are pushed.
         let start = unsafe { out.buffer.add(out.offset()) };
         let within_depth = out.new_dynamic_label();
         let in_bounds = out.new_dynamic_label();
         x64asm!(out
+            // `insn` is restored after the call: the JIT's never changes, and the interpreter's
+            // is the instruction following the call.
+            ; push RINSN
             ; push RTEMP
-            ; mov RTEMP, [rsp + 24]
+            ; mov RTEMP, [rsp + 32]
             ;; bpf_validate_meter(out)
             // FIXME: with `max_call_depth = 0` this wraps around and the depth is never exceeded,
             // whereas the old JIT raises `CallDepthExceeded` at the first call and the old
@@ -85,7 +88,7 @@ impl SupportingCode {
             ; sub RTEMP, rbp => Frame[BYTE -1].text_section
             ; cmp RTEMP, rbp => Frame[BYTE -1].text_section_len
             ; jb =>in_bounds
-            ; mov RTEMP, [rsp + 24]
+            ; mov RTEMP, [rsp + 32]
             ;; terminate(out, SIG_CALL_OUTSIDE_TEXT_SEGMENT)
             ; =>in_bounds
             ; and RTEMP, -(ebpf::INSN_SIZE as i32)
@@ -97,11 +100,8 @@ impl SupportingCode {
         let translated = out.new_dynamic_label();
         let resolved = out.new_dynamic_label();
         x64asm!(out
-            // `insn` is restored after the call: the JIT's never changes, and the interpreter's
-            // is the instruction following the call.
-            ; push RINSN
             ; add RTEMP, rbp => Frame[BYTE -1].text_section
-            ; mov [rsp + 8], RTEMP
+            ; mov [rsp], RTEMP
             ; cmp QWORD rbp => Frame[BYTE -1].jit_pc_section, 0
             ; je =>translated
             // JIT specific: translate the jump address to a machine code address
@@ -117,16 +117,16 @@ impl SupportingCode {
             ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
             ; lea RTEMP, [ DWORD base_addr + RTEMP ]
         );
-        // `temp` is the code to call, `[rsp + 8]` the target instruction.
+        // `temp` is the code to call, `[rsp]` the target instruction.
         x64asm!(out
             ; =>resolved
             // Like a taken branch, from the instruction following the call to the target.
-            ; add RMETER, [rsp + 8]
+            ; add RMETER, [rsp]
             ; sub RMETER, [rsp + 32]
             ; push RTEMP
             // The callee gets the address of the instruction following it in `temp`, as
             // `load_next_insn` would produce it.
-            ; mov RTEMP, [rsp + 16]
+            ; mov RTEMP, [rsp + 8]
             ; add RTEMP, ebpf::INSN_SIZE as i32
             ; push R6
             ; push R7
@@ -140,10 +140,8 @@ impl SupportingCode {
             ; pop R8
             ; pop R7
             ; pop R6
-            // FIXME: adjust the stack layout such that this code be a single `add rsp...`
-            ; add rsp, 8
+            ; add rsp, 16
             ; pop RINSN
-            ; add rsp, 8
             // `EXIT` leaves the remaining budget in `meter`, convert back to the instruction limit.
             ; add RMETER, [rsp + 16]
             ; add QWORD rbp => Frame[BYTE -1].calls_remaining, 1
