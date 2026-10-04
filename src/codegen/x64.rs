@@ -57,7 +57,8 @@ pub const fn disposable_reg(reg: u8) -> bool {
 
 macro_rules! x64asm {
     ($output: expr; $($tts:tt)*) => { x64asm!(@munch {$output; [] []} ; $($tts)*) };
-    (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]}) => {
+    (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]}) => {{
+        #![allow(clippy::neg_multiply, clippy::useless_conversion)]
         dynasm::dynasm!($output
             ; .arch x64
             // BPF registers (see `GPREG_MAP`.)
@@ -79,8 +80,7 @@ macro_rules! x64asm {
             ; .alias BTEMP, cl
             ; .alias RMETER, rdx
             $($acc)* $($curr)*
-        )
-    };
+    }};
 
     // replace ALU_SRC32(src) operand with either the source register for ALU instructions using
     // source register operand, or an immediate fetch for `_IMM` ALU instructions.
