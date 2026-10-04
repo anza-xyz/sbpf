@@ -1,3 +1,7 @@
+//! Unified JIT and interpreted execution of BPF code.
+//!
+//! TODO: write some design philosphies here.
+
 // Everything here is used by the architecture specific backends, of which there may be none.
 #![cfg_attr(not(target_arch = "x86_64"), allow(dead_code, unused_imports))]
 

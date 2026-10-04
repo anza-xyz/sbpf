@@ -1,3 +1,5 @@
+//! The x86_64 backend.
+
 use dynasmrt::relocations::SimpleRelocation;
 use dynasmrt::DynamicLabel;
 
@@ -919,7 +921,7 @@ fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
     unsafe { interpreter(version).0.buffer.add(offset) }
 }
 
-pub struct Interpreter {
+struct Interpreter {
     buffer: *mut u8,
 }
 
