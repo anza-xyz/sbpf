@@ -106,7 +106,10 @@ fn bench_dynasm_jit_compile_impl(bencher: &mut Bencher, text: Vec<u8>) {
     let templates = solana_sbpf::codegen::x64::jit_templates(SBPFVersion::V3);
     let executable = sbpfv3_executable(&text);
     // Exclude the template generation.
-    bencher.bytes = templates.compile(&executable).unwrap().text_section().len() as u64;
+    bencher.bytes = templates
+        .compile(&executable)
+        .unwrap()
+        .machine_code_length() as u64;
     bencher.iter(|| templates.compile(&executable));
 }
 

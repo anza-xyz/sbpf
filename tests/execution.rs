@@ -4684,7 +4684,7 @@ fn test_direct_stores() {
     }
 }
 
-#[cfg(all(feature = "jit", target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 #[test]
 fn test_jmp32_sbpfv0() {
     use solana_sbpf::vm::{CallFrame, ExecutionMode};
@@ -4709,9 +4709,10 @@ fn test_jmp32_sbpfv0() {
         FunctionRegistry::default(),
     )
     .unwrap();
+    executable.dynasm_compile().unwrap();
     for (name, mode) in [
         ("interpreter", ExecutionMode::Interpreted),
-        ("dynasm jit", ExecutionMode::DynasmJit),
+        ("dynasm jit", ExecutionMode::Jit),
         ("dynasm interpreter", ExecutionMode::DynasmInterpreted),
     ] {
         let mut context_object = TestContextObject::new(10);
@@ -4729,6 +4730,51 @@ fn test_jmp32_sbpfv0() {
         let (_, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
         let expected = ProgramResult::Err(EbpfError::UnsupportedInstruction);
         assert_eq!(format!("{result:?}"), format!("{expected:?}"), "{name}");
+    }
+}
+
+#[test]
+fn test_dynasm_compile_cached() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+        let executable = assemble::<TestContextObject>(
+            "
+            mov64 r0, 0
+            mov64 r1, 0
+            add64 r1, 1
+            call function_foo
+            jlt r1, 10, -3
+            exit
+            function_foo:
+            add64 r0, r1
+            exit",
+            Arc::new(BuiltinProgram::new_loader(config)),
+        )
+        .unwrap();
+        executable.dynasm_compile().unwrap();
+        let mut results = Vec::new();
+        for mode in [ExecutionMode::Interpreted, ExecutionMode::Jit] {
+            let mut context_object = TestContextObject::new(100);
+            create_vm!(
+                vm,
+                &executable,
+                &mut context_object,
+                stack,
+                heap,
+                vec![],
+                None
+            );
+            let mut mode = mode;
+            let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+            let (count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+            results.push((count, format!("{result:?}")));
+        }
+        assert_eq!(results[0], results[1], "{sbpf_version:?}");
+        assert_eq!(results[0].1, format!("{:?}", ProgramResult::Ok(55)));
     }
 }
 

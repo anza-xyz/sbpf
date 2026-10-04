@@ -11,10 +11,7 @@ pub mod x64;
 use crate::ebpf;
 use crate::elf::Executable;
 use crate::error::{EbpfError, ProgramResult};
-use crate::memory_management::{
-    allocate_pages_pooled, free_pages_pooled, get_system_page_size, protect_pages,
-    round_to_page_size, PagePermissions,
-};
+pub use crate::program::JitProgram;
 use crate::program::SBPFVersion;
 use crate::vm::{ContextObject, EbpfVm};
 use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
@@ -24,7 +21,6 @@ use rand::rngs::SmallRng;
 use rand::{thread_rng, Rng, RngCore, SeedableRng};
 use std::convert::{TryFrom, TryInto};
 use std::num::NonZeroU64;
-use std::ptr::NonNull;
 
 /// Size of the instruction with the opcode `op`, in bytes.
 const fn insn_size(op: u8) -> usize {
@@ -88,23 +84,26 @@ fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) 
 }
 
 #[cfg(target_arch = "x86_64")]
-/// Compile `executable` and execute it, starting at `vm.registers[11]`.
-pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
-    let program = x64::jit_templates(executable.get_sbpf_version())
-        .compile(executable)
-        .expect("failed to compile the JIT output");
-    x64::enter(
-        executable,
-        Some((program.pc_section(), program.text_section().as_ptr())),
-        vm,
-    )
-}
-
-#[cfg(target_arch = "x86_64")]
 /// Interpret `executable`, starting at `vm.registers[11]`.
-pub fn interpret_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
+pub fn interpret<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
     x64::enter(executable, None, vm)
 }
+
+impl JitProgram {
+    #[cfg(target_arch = "x86_64")]
+    pub(crate) fn dynasm_invoke<C: ContextObject>(
+        &self,
+        executable: &Executable<C>,
+        vm: &mut EbpfVm<C>,
+    ) {
+        x64::enter(
+            executable,
+            Some((self.pc_section(), self.text_section().as_ptr())),
+            vm,
+        )
+    }
+}
+
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemoryAccessKind {
@@ -491,106 +490,6 @@ const PADDING_DUE: u32 = CHECKPOINT_DUE | NOOP_DUE;
 /// Longest run of no-ops `JitTemplates::compile` may insert at the beginning.
 const MAX_START_PADDING_LENGTH: usize = 256;
 
-/// The JIT output for a program, in a single pooled allocation.
-pub struct JitProgram {
-    /// Size of the pooled allocation: the page-rounded `pc_section`, then the `text_section`.
-    allocation_size: usize,
-    /// Offset in `text_section` for each BPF instruction.
-    ///
-    /// Pointers rather than `&'static` slices, so that no borrow can outlive the allocation.
-    pc_section: NonNull<[u32]>,
-    /// The machine code.
-    ///
-    /// Before `seal` this is the whole capacity of the code pages.
-    text_section: NonNull<[u8]>,
-}
-
-// SAFETY: `JitProgram` owns its allocation like a `Box<[u8]>` would, and only `compile` writes to
-// it, before the program is shared.
-unsafe impl Send for JitProgram {}
-// SAFETY: see `Send`.
-unsafe impl Sync for JitProgram {}
-
-impl JitProgram {
-    /// Offset in `text_section` for each BPF instruction.
-    pub fn pc_section(&self) -> &[u32] {
-        // SAFETY:
-        //
-        // Contract from `NonNull::as_ref`: the pointer must be convertible to a reference, and the
-        // memory not mutated while the reference lives.
-        // Evidence: `pc_section` is within the allocation, which lives as long as `self`, and is
-        // only written to through `&mut self`.
-        unsafe { self.pc_section.as_ref() }
-    }
-
-    /// The machine code, which is executable.
-    pub fn text_section(&self) -> &[u8] {
-        // SAFETY: as for `pc_section`.
-        unsafe { self.text_section.as_ref() }
-    }
-
-    /// Make the pages read-only and read-execute, with `text_section` shrunk to the `used` length.
-    fn seal(&mut self, used: usize) -> Result<(), EbpfError> {
-        let page_size = get_system_page_size();
-        let pc_size = round_to_page_size(std::mem::size_of_val(self.pc_section()), page_size);
-        let code_size = round_to_page_size(used, page_size);
-        let text = self.text_section.as_ptr().cast::<u8>();
-        // SAFETY:
-        //
-        // Contract from `ptr::add`: the result must be in bounds of the allocation.
-        // Evidence: `used` is at most the length of `text_section` (see `compile`).
-        let unused = unsafe { text.add(used) };
-
-        // Debugger traps in the unused tail of the last code page.
-        //
-        // SAFETY:
-        //
-        // Contract from `ptr::write_bytes`: the range must be valid for writes.
-        // Evidence: `code_size` is `used` rounded up to the page size, and the length of
-        // `text_section` is page-rounded too, so the range is within it. Its pages are read-write,
-        // as nothing has protected them yet, and no reference into them is alive, as references
-        // are only created by borrowing `self`.
-        unsafe { std::ptr::write_bytes(unused, 0xcc, code_size.wrapping_sub(used)) };
-
-        // SAFETY:
-        //
-        // Contract from `protect_pages`: the range must be whole pages of a mapping that the
-        // caller owns, and nothing may access them in a way the new permissions disallow.
-        // Evidence: the pooled allocation is page aligned, starts with `pc_section`, and has the
-        // page-rounded `pc_size` bytes for it. `self` owns the allocation, and the section is only
-        // read after this.
-        unsafe {
-            protect_pages(
-                self.pc_section.as_ptr().cast::<u8>(),
-                pc_size,
-                PagePermissions::Read,
-            )
-        }?;
-
-        // SAFETY: as above, with `text_section` following at the page-rounded `pc_size`, and
-        // `code_size` within it. The section is only read and executed after this.
-        unsafe { protect_pages(text, code_size, PagePermissions::ReadExecute) }?;
-        self.text_section = NonNull::slice_from_raw_parts(self.text_section.cast::<u8>(), used);
-        Ok(())
-    }
-}
-
-impl Drop for JitProgram {
-    fn drop(&mut self) {
-        // SAFETY:
-        //
-        // Contract from `free_pages_pooled`: the pointer and size must identify a full allocation
-        // from `allocate_pages_pooled` that is not freed yet, and no references into it may be
-        // retained.
-        // Evidence: `pc_section` starts at the allocation and `allocation_size` is what
-        // `allocate_pages_pooled` returned with it, both set only by `compile`. This is the only
-        // place freeing them, and any reference into them borrows `self`.
-        unsafe {
-            free_pages_pooled(self.pc_section.as_ptr().cast::<u8>(), self.allocation_size);
-        }
-    }
-}
-
 impl<const SIZE: usize> JitTemplates<SIZE> {
     /// Offset of the `AuxTemplate::InvalidJumpTarget` in the output, which is emitted first.
     const INVALID_JUMP_TARGET: u32 = 0;
@@ -714,36 +613,14 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         executable: &Executable<C>,
     ) -> Result<JitProgram, EbpfError> {
         let (mut pc_sec, output_len, start_padding) = self.analyze(executable);
-        let page_size = get_system_page_size();
-        let pc_size = round_to_page_size(std::mem::size_of_val(pc_sec.as_slice()), page_size);
         // Templates are always written out in large chunks to employ SIMD and avoid memcpy calls,
         // so the last one may extend past the output.
         // `output_len` is below `NOOP_DUE`, see `analyze`, and the sizes are far from `usize::MAX`.
-        let text_capacity = round_to_page_size(output_len.wrapping_add(SIZE), page_size);
-        let (raw, allocation_size) = allocate_pages_pooled(pc_size.wrapping_add(text_capacity));
-        let raw = NonNull::new(raw).expect("the pooled allocation is never null");
-        // The allocation is page aligned, and the `pc_sec.len()` words fit within `pc_size`, so the
-        // sections are aligned and disjoint.
-        //
-        // SAFETY:
-        //
-        // Contract from `NonNull::add`: the result must be in bounds of the allocation.
-        // Evidence: the allocation has `pc_size + text_capacity` bytes.
-        let mut program = JitProgram {
-            allocation_size,
-            pc_section: NonNull::slice_from_raw_parts(raw.cast::<u32>(), pc_sec.len()),
-            text_section: NonNull::slice_from_raw_parts(unsafe { raw.add(pc_size) }, text_capacity),
-        };
+        let mut program = JitProgram::new(pc_sec.len(), output_len.wrapping_add(SIZE));
+        program.dynasm = true;
 
         let mut position = 0;
-        // SAFETY:
-        //
-        // Contract from `NonNull::as_mut`: the pointer must be convertible to a reference, and the
-        // memory not accessed through other pointers while the reference lives.
-        // Evidence: the section is read-write memory of the pool, which was mmapped, thus is
-        // initialized, and a reused block still holds bytes written before. `program` hands out no
-        // other references until `text` is last used.
-        let text = unsafe { program.text_section.as_mut() };
+        let text = program.text_section_mut();
         self.emit_aux(
             text,
             &mut position,
@@ -794,8 +671,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         }
         // The emission looks the jump targets up in the `Vec`, which is also the only place
         // the flags are in; it is small next to the machine code, so the copy is cheap.
-        // SAFETY: as for `text_section` above.
-        unsafe { program.pc_section.as_mut() }.copy_from_slice(&pc_sec);
+        program.pc_section_mut().copy_from_slice(&pc_sec);
         program.seal(output_len)?;
         Ok(program)
     }

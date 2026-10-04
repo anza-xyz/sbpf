@@ -30,7 +30,7 @@ fn main() {
         let mut vm = EbpfVm::new(loader.clone(), SBPFVersion::V3, &mut context, 0);
         vm.previous_instruction_meter = BUDGET;
         let start = std::time::Instant::now();
-        std::hint::black_box(solana_sbpf::codegen::interpret_and_run(
+        std::hint::black_box(solana_sbpf::codegen::interpret(
             &executable,
             &mut vm,
         ));

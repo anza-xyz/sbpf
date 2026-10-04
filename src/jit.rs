@@ -29,10 +29,6 @@ use crate::{
     ebpf::{self, FIRST_SCRATCH_REG, FRAME_PTR_REG, INSN_SIZE, SCRATCH_REGS},
     elf::Executable,
     error::{EbpfError, ProgramResult},
-    memory_management::{
-        allocate_pages_pooled, free_pages_pooled, get_system_page_size, protect_pages,
-        round_to_page_size, PagePermissions,
-    },
     memory_region::MemoryMapping,
     program::BuiltinFunction,
     vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm, RuntimeEnvironmentSlot},
@@ -43,6 +39,8 @@ use crate::{
     },
 };
 
+pub use crate::program::JitProgram;
+
 /// The maximum machine code length in bytes of a program with no guest instructions
 pub const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
 /// The maximum machine code length in bytes of a single guest instruction
@@ -52,79 +50,7 @@ pub const MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT: usize = 24;
 /// The maximum machine code length of the randomized padding
 pub const MAX_START_PADDING_LENGTH: usize = 256;
 
-/// The program compiled to native host machinecode
-pub struct JitProgram {
-    /// OS page size in bytes and the alignment of the sections
-    page_size: usize,
-    /// Full pooled allocation size backing the pc and text sections.
-    allocation_size: usize,
-    /// Byte offset in the text_section for each BPF instruction
-    pc_section: &'static mut [u32],
-    /// The x86 machinecode.
-    ///
-    /// Before sealing this is the full code capacity; after sealing
-    /// this is the emitted code.
-    text_section: &'static mut [u8],
-}
-
 impl JitProgram {
-    fn new(pc: usize, code_size: usize) -> Result<Self, EbpfError> {
-        let page_size = get_system_page_size();
-        let pc_loc_table_size = round_to_page_size(pc * std::mem::size_of::<u32>(), page_size);
-        let over_allocated_code_size = round_to_page_size(code_size, page_size);
-        let (raw, allocation_size) =
-            allocate_pages_pooled(pc_loc_table_size + over_allocated_code_size);
-
-        unsafe {
-            let pc_section = std::slice::from_raw_parts_mut(raw.cast::<u32>(), pc);
-            // pc_section relies on zero-initialization to distinguish unfilled
-            // forward-jump targets from filled backward-jump targets in
-            // relative_to_target_pc. The pool may hand back recycled memory, so
-            // zero just the pc_section bytes here.
-            pc_section.fill(0);
-            Ok(Self {
-                page_size,
-                allocation_size,
-                pc_section,
-                text_section: std::slice::from_raw_parts_mut(
-                    raw.add(pc_loc_table_size),
-                    over_allocated_code_size,
-                ),
-            })
-        }
-    }
-
-    fn seal(&mut self, text_section_usage: usize) -> Result<(), EbpfError> {
-        if self.page_size == 0 {
-            return Ok(());
-        }
-        let raw = self.pc_section.as_ptr() as *mut u8;
-        let pc_loc_table_size =
-            round_to_page_size(std::mem::size_of_val(self.pc_section), self.page_size);
-        let code_size = round_to_page_size(text_section_usage, self.page_size);
-        unsafe {
-            // Fill with debugger traps
-            std::ptr::write_bytes(
-                raw.add(pc_loc_table_size).add(text_section_usage),
-                0xcc,
-                code_size - text_section_usage,
-            );
-            protect_pages(
-                self.pc_section.as_mut_ptr().cast::<u8>(),
-                pc_loc_table_size,
-                PagePermissions::Read,
-            )?;
-            protect_pages(
-                self.text_section.as_mut_ptr(),
-                code_size,
-                PagePermissions::ReadExecute,
-            )?;
-            self.text_section =
-                std::slice::from_raw_parts_mut(self.text_section.as_mut_ptr(), text_section_usage);
-        }
-        Ok(())
-    }
-
     pub(crate) fn invoke<C: ContextObject>(
         &self,
         _config: &Config,
@@ -134,8 +60,8 @@ impl JitProgram {
         unsafe {
             let instruction_meter =
                 (vm.previous_instruction_meter as i64).wrapping_add(registers[11] as i64);
-            let entrypoint = &self.text_section
-                [self.pc_section[registers[11] as usize] as usize & (i32::MAX as u32 as usize)]
+            let entrypoint = &self.text_section()
+                [self.pc_section()[registers[11] as usize] as usize & (i32::MAX as u32 as usize)]
                 as *const u8;
             let host_stack_pointer = &raw mut vm.host_stack_pointer;
             let vm = vm.encrypted_host_address();
@@ -182,39 +108,6 @@ impl JitProgram {
                 // lateout("rbp") _, lateout("rbx") _,
             );
         }
-    }
-
-    /// The length of the host machinecode in bytes
-    pub fn machine_code_length(&self) -> usize {
-        self.text_section.len()
-    }
-
-    /// The total pooled allocation size retained by the compiled program.
-    pub fn mem_size(&self) -> usize {
-        self.allocation_size
-    }
-}
-
-impl Drop for JitProgram {
-    fn drop(&mut self) {
-        unsafe {
-            free_pages_pooled(
-                self.pc_section.as_mut_ptr().cast::<u8>(),
-                self.allocation_size,
-            );
-        }
-    }
-}
-
-impl Debug for JitProgram {
-    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        fmt.write_fmt(format_args!("JitProgram {:?}", self as *const _))
-    }
-}
-
-impl PartialEq for JitProgram {
-    fn eq(&self, other: &Self) -> bool {
-        std::ptr::eq(self as *const _, other as *const _)
     }
 }
 
@@ -411,7 +304,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         let immediate_value_key = diversification_rng.gen::<i64>();
 
         Ok(Self {
-            result: JitProgram::new(pc, code_length_estimate)?,
+            result: JitProgram::new(pc, code_length_estimate),
             text_section_jumps: vec![],
             anchors: [std::ptr::null(); ANCHOR_COUNT],
             offset_in_text_section: 0,
@@ -443,11 +336,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_subroutines();
 
         while self.pc * ebpf::INSN_SIZE < self.program.len() {
-            if self.offset_in_text_section + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION * 2 >= self.result.text_section.len() {
+            if self.offset_in_text_section + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION * 2 >= self.result.text_section().len() {
                 return Err(EbpfError::ExhaustedTextSegment(self.pc));
             }
             let mut insn = ebpf::get_insn_unchecked(self.program, self.pc);
-            self.result.pc_section[self.pc] = self.offset_in_text_section as u32;
+            self.result.pc_section_mut()[self.pc] = self.offset_in_text_section as u32;
 
             // Regular instruction meter checkpoints to prevent long linear runs from exceeding their budget
             if self.last_instruction_meter_validation_pc + self.config.instruction_meter_checkpoint_distance <= self.pc {
@@ -469,7 +362,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ebpf::LD_DW_IMM if !self.executable.get_sbpf_version().disable_lddw() => {
                     self.emit_validate_and_profile_instruction_count(self.pc + 2);
                     self.pc += 1;
-                    self.result.pc_section[self.pc] = unsafe { self.anchors[ANCHOR_CALL_UNSUPPORTED_INSTRUCTION].offset_from(self.result.text_section.as_ptr()) as u32 };
+                    let unsupported_offset = unsafe { self.anchors[ANCHOR_CALL_UNSUPPORTED_INSTRUCTION].offset_from(self.result.text_section().as_ptr()) as u32 };
+                    self.result.pc_section_mut()[self.pc] = unsupported_offset;
                     ebpf::augment_lddw_unchecked(self.program, &mut insn);
                     if self.should_sanitize_constant(insn.imm) {
                         self.emit_sanitized_load_immediate(dst, insn.imm);
@@ -887,7 +781,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         }
 
         // Bumper in case there was no final exit
-        if self.offset_in_text_section + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION * 2 >= self.result.text_section.len() {
+        if self.offset_in_text_section + MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION * 2 >= self.result.text_section().len() {
             return Err(EbpfError::ExhaustedTextSegment(self.pc));
         }
         self.emit_validate_and_profile_instruction_count(self.pc + 1);
@@ -928,9 +822,9 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     /// Emits a fixed length machinecode sequence into the text section
     pub fn emit<T>(&mut self, data: T) {
         unsafe {
-            let ptr = self.result.text_section.as_ptr().add(self.offset_in_text_section);
+            let ptr = self.result.text_section_mut().as_mut_ptr().add(self.offset_in_text_section);
             #[allow(clippy::cast_ptr_alignment)]
-            ptr::write_unaligned(ptr as *mut T, data as T);
+            ptr::write_unaligned(ptr.cast::<T>(), data as T);
         }
         self.offset_in_text_section += mem::size_of::<T>();
     }
@@ -1655,7 +1549,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 4, REGISTER_SCRATCH, !(INSN_SIZE as i64 - 1), None)); // guest_target_pc &= !(INSN_SIZE - 1);
         // Bound check
         // if(guest_target_pc >= number_of_instructions * INSN_SIZE) throw CALL_OUTSIDE_TEXT_SEGMENT;
-        let number_of_instructions = self.result.pc_section.len();
+        let number_of_instructions = self.result.pc_section().len();
         self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S64, REGISTER_SCRATCH, (number_of_instructions * INSN_SIZE) as i64, None)); // guest_target_pc.cmp(number_of_instructions * INSN_SIZE)
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x83, self.relative_to_anchor(ANCHOR_CALL_REG_OUTSIDE_TEXT_SEGMENT, 6)));
         // Calculate the guest_target_pc (dst / INSN_SIZE) to update REGISTER_INSTRUCTION_METER
@@ -1664,7 +1558,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         debug_assert_eq!(INSN_SIZE, 1 << shift_amount);
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 5, REGISTER_SCRATCH, shift_amount as i64, None)); // guest_target_pc /= INSN_SIZE;
         // Load host_target_address offset from self.result.pc_section
-        self.emit_ins(X86Instruction::load_immediate(REGISTER_MAP[0], self.result.pc_section.as_ptr() as i64)); // host_target_address = self.result.pc_section;
+        self.emit_ins(X86Instruction::load_immediate(REGISTER_MAP[0], self.result.pc_section().as_ptr() as i64)); // host_target_address = self.result.pc_section;
         self.emit_ins(X86Instruction::load(OperandSize::S32, REGISTER_MAP[0], REGISTER_MAP[0], X86IndirectAccess::OffsetIndexShift(0, REGISTER_SCRATCH, 2))); // host_target_address = self.result.pc_section[guest_target_pc];
         // Check destination is valid
         self.emit_ins(X86Instruction::test_immediate(OperandSize::S32, REGISTER_MAP[0], 1 << 31, None)); // host_target_address & (1 << 31)
@@ -1676,7 +1570,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += guest_target_pc;
         // Offset host_target_address by self.result.text_section
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[0], RSP, X86IndirectAccess::OffsetIndexShift(-16, RSP, 0)));
-        self.emit_ins(X86Instruction::load_immediate(REGISTER_MAP[0], self.result.text_section.as_ptr() as i64)); // RAX = self.result.text_section;
+        self.emit_ins(X86Instruction::load_immediate(REGISTER_MAP[0], self.result.text_section().as_ptr() as i64)); // RAX = self.result.text_section;
         self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_MAP[0], RSP, Some(X86IndirectAccess::OffsetIndexShift(-16, RSP, 0)))); // host_target_address += self.result.text_section;
         // Restore the clobbered REGISTER_MAP[0]
         self.emit_ins(X86Instruction::pop(REGISTER_MAP[0]));
@@ -1744,7 +1638,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     fn set_anchor(&mut self, anchor: usize) {
-        self.anchors[anchor] = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section) };
+        self.anchors[anchor] = unsafe { self.result.text_section().as_ptr().add(self.offset_in_text_section) };
     }
 
     /// Resolves or records a relocation for jumps/calls to the subroutines
@@ -1752,7 +1646,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     /// instruction_length = 5 (Unconditional jump / call)
     /// instruction_length = 6 (Conditional jump)
     pub fn relative_to_anchor(&self, anchor: usize, instruction_length: usize) -> i32 {
-        let instruction_end = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section).add(instruction_length) };
+        let instruction_end = unsafe { self.result.text_section().as_ptr().add(self.offset_in_text_section).add(instruction_length) };
         let destination = self.anchors[anchor];
         debug_assert!(!destination.is_null());
         (unsafe { destination.offset_from(instruction_end) } as i32) // Relative jump
@@ -1760,10 +1654,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     /// Resolves or records a relocation for jumps/calls inside the program
     pub fn relative_to_target_pc(&mut self, target_pc: usize, instruction_length: usize) -> i32 {
-        let instruction_end = unsafe { self.result.text_section.as_ptr().add(self.offset_in_text_section).add(instruction_length) };
-        let destination = if self.result.pc_section[target_pc] != 0 {
+        let instruction_end = unsafe { self.result.text_section().as_ptr().add(self.offset_in_text_section).add(instruction_length) };
+        let destination = if self.result.pc_section()[target_pc] != 0 {
             // Backward jump
-            &self.result.text_section[self.result.pc_section[target_pc] as usize & (i32::MAX as u32 as usize)] as *const u8
+            &self.result.text_section()[self.result.pc_section()[target_pc] as usize & (i32::MAX as u32 as usize)] as *const u8
         } else {
             // Forward jump, needs relocation
             self.text_section_jumps.push(Jump { location: unsafe { instruction_end.sub(4) }, target_pc });
@@ -1776,7 +1670,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     fn resolve_jumps(&mut self) {
         // Relocate forward jumps
         for jump in &self.text_section_jumps {
-            let destination = &self.result.text_section[self.result.pc_section[jump.target_pc] as usize & (i32::MAX as u32 as usize)] as *const u8;
+            let destination = &self.result.text_section()[self.result.pc_section()[jump.target_pc] as usize & (i32::MAX as u32 as usize)] as *const u8;
             let offset_value =
                 unsafe { destination.offset_from(jump.location) } as i32 // Relative jump
                 - mem::size_of::<i32>() as i32; // Jump from end of instruction

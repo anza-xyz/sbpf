@@ -103,16 +103,13 @@ pub enum ExecutionMode {
     Interpreted,
     /// Execute the program in JIT mode.
     ///
-    /// The program must be JIT compiled.
+    /// The program must be JIT compiled, and runs with whichever JIT compiled it last: see
+    /// `Executable::jit_compile` and `Executable::dynasm_compile`.
     Jit,
     /// Allow JIT execution, if compiled. Otherwise fallback to interpreted.
     PreferJit,
-    /// Execute the program through the prototype unified JIT+interpreter in `codegen::x64`.
-    #[cfg(target_arch = "x86_64")]
-    DynasmJit,
-    /// Execute the program through the prototype unified JIT+interpreter's interpreter, in
-    /// `codegen::x64`.
-    #[cfg(target_arch = "x86_64")]
+    /// Execute the program with the interpreter of `codegen`, where it supports the architecture
+    /// and the SBPF version. Otherwise fallback to interpreted.
     DynasmInterpreted,
 }
 
@@ -436,66 +433,44 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
 
-        // `codegen::x64` is not going to implement these versions.
-        #[cfg(target_arch = "x86_64")]
-        if matches!(
-            executable.get_sbpf_version(),
-            SBPFVersion::V1 | SBPFVersion::V2
-        ) && matches!(
-            *mode,
-            ExecutionMode::DynasmJit | ExecutionMode::DynasmInterpreted
-        ) {
-            *mode = ExecutionMode::Jit;
-        }
-
-        'execute: {
+        'execute: loop {
             match *mode {
-                ExecutionMode::Interpreted => {}
-
-                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-                ExecutionMode::PreferJit => {
-                    if let Some(compiled_program) = executable.get_compiled_program() {
-                        *mode = ExecutionMode::Jit;
-                        break 'execute compiled_program.invoke(config, self, self.registers);
-                    }
+                ExecutionMode::Interpreted => {
+                    let interpreter =
+                        Interpreter::new(self, executable, self.registers, call_frames);
+                    break 'execute run_interpreter(interpreter);
                 }
-                #[cfg(not(all(
-                    feature = "jit",
-                    not(target_os = "windows"),
-                    target_arch = "x86_64"
-                )))]
-                ExecutionMode::PreferJit => {}
 
-                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                ExecutionMode::PreferJit => {
+                    if executable.get_compiled_program().is_some() {
+                        *mode = ExecutionMode::Jit;
+                    } else {
+                        *mode = ExecutionMode::Interpreted;
+                    }
+                    continue 'execute;
+                }
+
                 ExecutionMode::Jit => {
                     let Some(compiled_program) = executable.get_compiled_program() else {
                         return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
                     };
                     *mode = ExecutionMode::Jit;
-                    break 'execute compiled_program.invoke(config, self, self.registers);
+                    break 'execute compiled_program.run(executable, self);
                 }
-                #[cfg(not(all(
-                    feature = "jit",
-                    not(target_os = "windows"),
-                    target_arch = "x86_64"
-                )))]
-                ExecutionMode::Jit => return (0, ProgramResult::Err(EbpfError::JitNotCompiled)),
 
-                #[cfg(target_arch = "x86_64")]
-                ExecutionMode::DynasmJit => {
-                    crate::codegen::jit_and_run(executable, self);
-                    break 'execute;
-                }
-                #[cfg(target_arch = "x86_64")]
                 ExecutionMode::DynasmInterpreted => {
-                    crate::codegen::interpret_and_run(executable, self);
-                    break 'execute;
+                    // `codegen` is not going to implement these versions.
+                    #[cfg(target_arch = "x86_64")]
+                    if !matches!(
+                        executable.get_sbpf_version(),
+                        SBPFVersion::V1 | SBPFVersion::V2
+                    ) {
+                        crate::codegen::interpret(executable, self);
+                        break 'execute;
+                    }
+                    *mode = ExecutionMode::Interpreted;
                 }
             }
-
-            *mode = ExecutionMode::Interpreted;
-            let interpreter = Interpreter::new(self, executable, self.registers, call_frames);
-            break 'execute run_interpreter(interpreter);
         }
 
         let instruction_count = if config.enable_instruction_meter {
