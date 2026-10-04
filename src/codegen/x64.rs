@@ -218,6 +218,19 @@ fn conditional_branch<G: X64Generator + ?Sized>(
     compare: impl FnOnce(&mut G, Reg, Reg),
 ) {
     let op = out.opcode().op();
+    if (op & ebpf::BPF_X) == ebpf::BPF_X && dst == src {
+        match op & ebpf::BPF_ALU_OP_MASK {
+            ebpf::BPF_JEQ | ebpf::BPF_JGE | ebpf::BPF_JLE | ebpf::BPF_JSGE | ebpf::BPF_JSLE => {
+                load_next_insn_addr(out);
+                bpf_validate_meter(out);
+                return out.bpf_taken_branch();
+            }
+            ebpf::BPF_JNE | ebpf::BPF_JGT | ebpf::BPF_JLT | ebpf::BPF_JSGT | ebpf::BPF_JSLT => {
+                return;
+            }
+            _ => {}
+        }
+    }
     load_next_insn_addr(out);
     bpf_validate_meter(out);
     compare(out, dst, src);
