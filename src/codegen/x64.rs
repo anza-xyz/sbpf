@@ -247,8 +247,8 @@ fn invalid_insn<G: X64Generator + ?Sized>(out: &mut G) {
     terminate(out, SIG_INVALID_INSN)
 }
 
-/// Produce a template for a single (currently processed) instruction.
-fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
+/// Build the code to execute the BPF instruction.
+fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
     #[cfg(feature = "tracer")]
     {
         load_next_insn_addr(out);
@@ -880,7 +880,7 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
     let mut templates = Templates::empty();
     for opcode in TemplateOpcode::all() {
         let mut generator = JITGenerator::for_insn(version, &mut templates, opcode);
-        bpf_insn_template(&mut generator);
+        bpf_insn(&mut generator);
         generator.finalize();
     }
     let generate = |templates: &mut Templates, template, f: fn(&mut JITGenerator)| {
@@ -1111,7 +1111,7 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
         let step_start = InterpreterGenerator::step_offset(opcode);
         generator.opcode = opcode;
         generator.offset = step_start;
-        bpf_insn_template(&mut generator);
+        bpf_insn(&mut generator);
         generator.terminal = false;
         // `insn` points at the last 8 bytes of the instruction just executed.
         let size = i8::try_from(insn_size(opcode.op())).unwrap();
