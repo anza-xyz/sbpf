@@ -40,8 +40,12 @@ const GPREG_MAP: [u8; 11] = [
     13,  // r7
     14,  // r8
     15,  // r9 = r15
-    RBX, // r10 = rbx // FIXME: this should be a special case read-only register. We should take
-         // care to generate instructions accordingly.
+    // NOTE: this is a pretty special read-only register which we could have a special case for
+    // (likely at a significant expense of code complexity.) Dedicating an architectural register
+    // for this feels like a shame. At the same time we can't make instructions involving r10 much
+    // slower or produce significantly more code, because it would be an obvious target for resource
+    // exploitation.
+    RBX, // r10 = rbx
 ];
 
 impl From<Reg> for u8 {
@@ -218,6 +222,7 @@ fn conditional_branch<G: X64Generator + ?Sized>(
     compare: impl FnOnce(&mut G, Reg, Reg),
 ) {
     let op = out.opcode().op();
+    // OPTIMIZATION: comparisons between same registers have predetermined outcome.
     if (op & ebpf::BPF_X) == ebpf::BPF_X && dst == src {
         match op & ebpf::BPF_ALU_OP_MASK {
             ebpf::BPF_JEQ | ebpf::BPF_JGE | ebpf::BPF_JLE | ebpf::BPF_JSGE | ebpf::BPF_JSLE => {
@@ -285,6 +290,7 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             ; or Rq(dst), RTEMP
         ),
         #[rustfmt::skip]
+        // OPTIMIZATION: X | X = X
         ebpf::OR64_REG => if dst != src { x64asm!(out
             ; or Rq(dst), Rq(src)
         )},
@@ -308,6 +314,7 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             ; and Rq(dst), RTEMP
         ),
         #[rustfmt::skip]
+        // OPTIMIZATION: X & X = X
         ebpf::AND64_REG => if dst != src { x64asm!(out
             ; and Rq(dst), Rq(src)
         )},
@@ -323,6 +330,7 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::MOV64_IMM => x64asm!(out; movsxd Rq(dst), ALU_SRC32(src)),
         ebpf::MOV32_REG => x64asm!(out; mov Rd(dst), Rd(src)),
         #[rustfmt::skip]
+        // OPTIMIZATION: no-op move
         ebpf::MOV64_REG => if src != dst { x64asm!(out
             ; mov Rq(dst), Rq(src)
         )},
