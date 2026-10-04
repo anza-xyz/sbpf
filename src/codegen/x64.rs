@@ -41,18 +41,16 @@ const GPREG_MAP: [u8; 11] = [
          // care to generate instructions accordingly.
 ];
 
-/// The machine register for the BPF one, or `u8::MAX` for the register numbers not naming a BPF
-/// register.
-fn machine_reg(bpf_reg: u8) -> u8 {
-    GPREG_MAP
-        .get(usize::from(bpf_reg))
-        .copied()
-        .unwrap_or(u8::MAX)
+impl From<Reg> for u8 {
+    /// The machine register for the BPF one, which is how `dynasm` takes the registers.
+    fn from(reg: Reg) -> u8 {
+        GPREG_MAP[reg.0 as usize]
+    }
 }
 
 /// Is the value in the provided register disposable/temporary?
 pub const fn disposable_reg(reg: u8) -> bool {
-    reg == RCX
+    reg == RTEMP
 }
 
 macro_rules! x64asm {
@@ -82,19 +80,11 @@ macro_rules! x64asm {
         )
     };
 
-    // replace ALU_SRC() operand with either a source register for ALU instructions using source
-    // register operand, or an immediate fetch for `_IMM` ALU instructions.
-    (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} ALU_SRC8 $($rest:tt)*) => {
+    // replace ALU_SRC32(src) operand with either the source register for ALU instructions using
+    // source register operand, or an immediate fetch for `_IMM` ALU instructions.
+    (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} ALU_SRC32($src:expr) $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [ ; if ($output.opcode().op() & ebpf::BPF_X) == ebpf::BPF_X {
-            x64asm!(@munch {$output; [;] [$($curr)*]} Rb(machine_reg($output.opcode().src())))
-          } else {
-            x64asm!(@munch {$output; [;] [$($curr)*]} BYTE REL32_IMM)
-          }
-        ]} $($rest)*)
-    };
-    (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} ALU_SRC32 $($rest:tt)*) => {
-        x64asm!(@munch {$output; [ $($acc)* ] [ ; if ($output.opcode().op() & ebpf::BPF_X) == ebpf::BPF_X {
-            x64asm!(@munch {$output; [;] [$($curr)*]} Rd(machine_reg($output.opcode().src())))
+            x64asm!(@munch {$output; [;] [$($curr)*]} Rd($src))
           } else {
             x64asm!(@munch {$output; [;] [$($curr)*]} DWORD REL32_IMM)
           }
@@ -187,7 +177,7 @@ trait X64Generator {
 
 /// Set the flags for the comparison of the 64 bit registers (or the immediate) of the conditional
 /// jump being generated.
-fn compare_64<G: X64Generator + ?Sized>(out: &mut G, dst: u8, src: u8) {
+fn compare_64<G: X64Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
     let op = out.opcode().op();
     let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
     let is_jset = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
@@ -206,7 +196,7 @@ fn compare_64<G: X64Generator + ?Sized>(out: &mut G, dst: u8, src: u8) {
 }
 
 /// Like `compare_64`, for the lower 32 bits.
-fn compare_32<G: X64Generator + ?Sized>(out: &mut G, dst: u8, src: u8) {
+fn compare_32<G: X64Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
     let op = out.opcode().op();
     let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
     let is_jset = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
@@ -219,12 +209,16 @@ fn compare_32<G: X64Generator + ?Sized>(out: &mut G, dst: u8, src: u8) {
 }
 
 /// Produce a template for a conditional jump, the flags of which are set by `compare`.
-fn conditional_branch<G: X64Generator + ?Sized>(out: &mut G, compare: impl FnOnce(&mut G, u8, u8)) {
-    let opcode = out.opcode();
-    let op = opcode.op();
+fn conditional_branch<G: X64Generator + ?Sized>(
+    out: &mut G,
+    dst: Reg,
+    src: Reg,
+    compare: impl FnOnce(&mut G, Reg, Reg),
+) {
+    let op = out.opcode().op();
     load_next_insn_addr(out);
     bpf_validate_meter(out);
-    compare(out, machine_reg(opcode.dst()), machine_reg(opcode.src()));
+    compare(out, dst, src);
     let fallthrough = out.new_dynamic_label();
     match op & ebpf::BPF_ALU_OP_MASK {
         ebpf::BPF_JEQ => x64asm!(out; jne BYTE =>fallthrough),
@@ -252,13 +246,13 @@ fn invalid_insn<G: X64Generator + ?Sized>(out: &mut G) {
 }
 
 /// Produce a template for a single (currently processed) instruction.
+// FIXME: register tracing (`feature = "tracer"`) is not implemented.
 fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
     let opcode = out.opcode();
-    let (op, dst, src) = (
-        opcode.op(),
-        machine_reg(opcode.dst()),
-        machine_reg(opcode.src()),
-    );
+    let op = opcode.op();
+    let (Some(dst), Some(src)) = (opcode.dst(), opcode.src()) else {
+        return invalid_insn(out);
+    };
     let is_alu64 = (op & ebpf::BPF_CLS_MASK) == ebpf::BPF_ALU64_STORE;
 
     match op {
@@ -266,7 +260,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::NEG64 => x64asm!(out; neg Rq(dst)),
         #[rustfmt::skip]
         ebpf::OR32_IMM |
-        ebpf::OR32_REG => x64asm!(out; or Rd(dst), ALU_SRC32),
+        ebpf::OR32_REG => x64asm!(out; or Rd(dst), ALU_SRC32(src)),
         ebpf::OR64_IMM => x64asm!(out
             ; movsxd RTEMP, DWORD REL32_IMM
             ; or Rq(dst), RTEMP
@@ -275,14 +269,20 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::OR64_REG => if dst != src { x64asm!(out
             ; or Rq(dst), Rq(src)
         )},
-        ebpf::HOR64_IMM => x64asm!(out
-            ; mov WTEMP, ALU_SRC32
-            ; shl RTEMP, 32
-            ; or Rq(dst), RTEMP
-        ),
+        ebpf::HOR64_IMM => {
+            if out.version().disable_lddw() {
+                x64asm!(out
+                    ; mov WTEMP, ALU_SRC32(src)
+                    ; shl RTEMP, 32
+                    ; or Rq(dst), RTEMP
+                )
+            } else {
+                invalid_insn(out)
+            }
+        }
         #[rustfmt::skip]
         ebpf::AND32_IMM |
-        ebpf::AND32_REG => x64asm!(out; and Rd(dst), ALU_SRC32),
+        ebpf::AND32_REG => x64asm!(out; and Rd(dst), ALU_SRC32(src)),
         #[rustfmt::skip]
         ebpf::AND64_IMM => x64asm!(out
             ; movsxd RTEMP, DWORD REL32_IMM
@@ -294,14 +294,14 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         )},
         #[rustfmt::skip]
         ebpf::XOR32_IMM |
-        ebpf::XOR32_REG => x64asm!(out; xor Rd(dst), ALU_SRC32),
+        ebpf::XOR32_REG => x64asm!(out; xor Rd(dst), ALU_SRC32(src)),
         ebpf::XOR64_IMM => x64asm!(out
             ; movsxd RTEMP, DWORD REL32_IMM
             ; xor Rq(dst), RTEMP
         ),
         ebpf::XOR64_REG => x64asm!(out; xor Rq(dst), Rq(src)),
-        ebpf::MOV32_IMM => x64asm!(out; mov Rd(dst), ALU_SRC32),
-        ebpf::MOV64_IMM => x64asm!(out; movsxd Rq(dst), ALU_SRC32),
+        ebpf::MOV32_IMM => x64asm!(out; mov Rd(dst), ALU_SRC32(src)),
+        ebpf::MOV64_IMM => x64asm!(out; movsxd Rq(dst), ALU_SRC32(src)),
         ebpf::MOV32_REG => x64asm!(out; mov Rd(dst), Rd(src)),
         #[rustfmt::skip]
         ebpf::MOV64_REG => if src != dst { x64asm!(out
@@ -324,64 +324,106 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
             ; imul Rq(dst), RTEMP
         ),
         ebpf::ADD32_IMM | ebpf::ADD32_REG => x64asm!(out
-            ; add Rd(dst), ALU_SRC32
+            ; add Rd(dst), ALU_SRC32(src)
             ; movsxd Rq(dst), Rd(dst)
         ),
         ebpf::SUB32_IMM | ebpf::SUB32_REG => x64asm!(out
-            ; sub Rd(dst), ALU_SRC32
+            ; sub Rd(dst), ALU_SRC32(src)
             ; movsxd Rq(dst), Rd(dst)
         ),
         ebpf::MUL32_IMM | ebpf::MUL32_REG => x64asm!(out
-            ; imul Rd(dst), ALU_SRC32
+            ; imul Rd(dst), ALU_SRC32(src)
             ; movsxd Rq(dst), Rd(dst)
         ),
         #[rustfmt::skip]
-        ebpf::DIV32_IMM |
         ebpf::DIV32_REG |
-        ebpf::MOD32_IMM |
         ebpf::MOD32_REG |
-        ebpf::DIV64_IMM |
         ebpf::DIV64_REG |
-        ebpf::MOD64_IMM |
         ebpf::MOD64_REG => {
             let is_div = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
-            let is_reg = (op & ebpf::BPF_X) == ebpf::BPF_X;
-            if let Some(helper) = out.supports().divide(is_div, is_alu64, is_reg, dst, src) {
-                load_next_insn_addr(out);
-                invoke_support(out, helper);
-            } else {
-                invalid_insn(out);
-            }
+            let helper = out.supports().divide(is_div, is_alu64, dst, src);
+            load_next_insn_addr(out);
+            invoke_support(out, helper);
         }
-        ebpf::LSH64_IMM | ebpf::LSH64_REG => x64asm!(out
-            // if failing, you can switch to shlx/shrx/sarx
+        // The verifier rejects zero immediates, so there's no need to check those.
+        ebpf::DIV32_IMM => x64asm!(out
+            ; mov WTEMP, DWORD REL32_IMM
+            ; push rax
+            ; push rdx
+            ; xor edx, edx
+            ; mov eax, Rd(dst)
+            ; div WTEMP
+            ; mov Rd(dst), eax
+            ; pop rdx
+            ; pop rax
+        ),
+        ebpf::MOD32_IMM => x64asm!(out
+            ; mov WTEMP, DWORD REL32_IMM
+            ; push rax
+            ; push rdx
+            ; xor edx, edx
+            ; mov eax, Rd(dst)
+            ; div WTEMP
+            ; mov Rd(dst), edx
+            ; pop rdx
+            ; pop rax
+        ),
+        ebpf::DIV64_IMM => x64asm!(out
+            ; movsxd RTEMP, DWORD REL32_IMM
+            ; push rax
+            ; push rdx
+            ; xor edx, edx
+            ; mov rax, Rq(dst)
+            ; div RTEMP
+            ; mov Rq(dst), rax
+            ; pop rdx
+            ; pop rax
+        ),
+        ebpf::MOD64_IMM => x64asm!(out
+            ; movsxd RTEMP, DWORD REL32_IMM
+            ; push rax
+            ; push rdx
+            ; xor edx, edx
+            ; mov rax, Rq(dst)
+            ; div RTEMP
+            ; mov Rq(dst), rdx
+            ; pop rdx
+            ; pop rax
+        ),
+        ebpf::LSH64_REG => x64asm!(out; shlx Rq(dst), Rq(dst), Rq(src)),
+        ebpf::LSH32_REG => x64asm!(out; shlx Rd(dst), Rd(dst), Rd(src)),
+        ebpf::RSH64_REG => x64asm!(out; shrx Rq(dst), Rq(dst), Rq(src)),
+        ebpf::RSH32_REG => x64asm!(out; shrx Rd(dst), Rd(dst), Rd(src)),
+        ebpf::ARSH64_REG => x64asm!(out; sarx Rq(dst), Rq(dst), Rq(src)),
+        ebpf::ARSH32_REG => x64asm!(out; sarx Rd(dst), Rd(dst), Rd(src)),
+        ebpf::LSH64_IMM => x64asm!(out
             ;; const { assert!(disposable_reg(RCX)) }
-            ; mov cl, ALU_SRC8
+            ; mov cl, BYTE REL32_IMM
             ; shl Rq(dst), cl
         ),
-        ebpf::LSH32_IMM | ebpf::LSH32_REG => x64asm!(out
+        ebpf::LSH32_IMM => x64asm!(out
             ;; const { assert!(disposable_reg(RCX)) }
-            ; mov cl, ALU_SRC8
+            ; mov cl, BYTE REL32_IMM
             ; shl Rd(dst), cl
         ),
-        ebpf::RSH64_IMM | ebpf::RSH64_REG => x64asm!(out
+        ebpf::RSH64_IMM => x64asm!(out
             ;; const { assert!(disposable_reg(RCX)) }
-            ; mov cl, ALU_SRC8
+            ; mov cl, BYTE REL32_IMM
             ; shr Rq(dst), cl
         ),
-        ebpf::RSH32_IMM | ebpf::RSH32_REG => x64asm!(out
+        ebpf::RSH32_IMM => x64asm!(out
             ;; const { assert!(disposable_reg(RCX)) }
-            ; mov cl, ALU_SRC8
+            ; mov cl, BYTE REL32_IMM
             ; shr Rd(dst), cl
         ),
-        ebpf::ARSH64_IMM | ebpf::ARSH64_REG => x64asm!(out
+        ebpf::ARSH64_IMM => x64asm!(out
             ;; const { assert!(disposable_reg(RCX)) }
-            ; mov cl, ALU_SRC8
+            ; mov cl, BYTE REL32_IMM
             ; sar Rq(dst), cl
         ),
-        ebpf::ARSH32_IMM | ebpf::ARSH32_REG => x64asm!(out
+        ebpf::ARSH32_IMM => x64asm!(out
             ;; const { assert!(disposable_reg(RCX)) }
-            ; mov cl, ALU_SRC8
+            ; mov cl, BYTE REL32_IMM
             ; sar Rd(dst), cl
         ),
         ebpf::BE => x64asm!(out
@@ -393,7 +435,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
             ; shr Rq(dst), cl
         ),
         ebpf::LE => x64asm!(out
-            ; mov WTEMP, ALU_SRC32
+            ; mov WTEMP, ALU_SRC32(src)
             ; bzhi Rq(dst), Rq(dst), RTEMP
         ),
 
@@ -420,7 +462,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         | ebpf::JSLT32_IMM
         | ebpf::JSLE32_IMM => {
             if out.version().enable_jmp32() {
-                conditional_branch(out, compare_32)
+                conditional_branch(out, dst, src, compare_32)
             } else {
                 invalid_insn(out)
             }
@@ -446,7 +488,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         | ebpf::JSGT64_REG
         | ebpf::JSGE64_REG
         | ebpf::JSLT64_REG
-        | ebpf::JSLE64_REG => conditional_branch(out, compare_64),
+        | ebpf::JSLE64_REG => conditional_branch(out, dst, src, compare_64),
         ebpf::JA => {
             load_next_insn_addr(out);
             bpf_validate_meter(out);
@@ -456,45 +498,45 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::CALL_IMM => {
             load_next_insn_addr(out);
             out.meter_checked();
-            if !out.version().static_syscalls() {
-                x64asm!(out
+            match (out.version().static_syscalls(), src.0) {
+                (false, _) => x64asm!(out
                     ; push RTEMP
                     ; mov WTEMP, DWORD REL32_IMM
-                    ;; invoke_support(out, out.supports().v0_call_imm)
+                    ;; invoke_support(out, out.supports().v0_call_imm.unwrap())
                     ; pop RTEMP
-                );
-            } else if src == GPREG_MAP[1] {
-                x64asm!(out
+                ),
+                // FIXME: the old JIT reports `UnsupportedInstruction` when the target is out of the
+                // text section, whereas `call_internal` reports `CallOutsideTextSegment` like it
+                // does for `callx`.
+                (true, 1) => x64asm!(out
                     ; push RTEMP
                     ; movsxd RTEMP, DWORD REL32_IMM
                     ; lea RTEMP, [ DWORD 0i32 + RINSN + RTEMP * 8 ]
                     ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
                     ;; invoke_support(out, out.supports().call_internal)
                     ; pop RTEMP
-                );
-            } else if src == GPREG_MAP[0] {
-                invoke_support(out, out.supports().syscall);
-            } else {
-                terminate(out, SIG_INVALID_INSN)
+                ),
+                (true, 0) => invoke_support(out, out.supports().syscall),
+                (true, _) => {
+                    bpf_validate_meter(out);
+                    terminate(out, SIG_INVALID_INSN)
+                }
             }
         }
         ebpf::CALL_REG => {
             load_next_insn_addr(out);
+            out.meter_checked();
             if !out.version().callx_uses_dst_reg() {
                 // The register containing the destination is named by the immediate. We will use an
                 // additional support to resolve this to a real register as the jump table inline
                 // would otherwise be pretty nasty.
-                out.meter_checked();
                 x64asm!(out
                     ; push RTEMP
                     ; mov WTEMP, DWORD REL32_IMM
-                    ;; invoke_support(out, out.supports().v0_callx)
+                    ;; invoke_support(out, out.supports().v0_callx.unwrap())
                     ; pop RTEMP
                 );
-            } else if dst == u8::MAX {
-                terminate(out, SIG_INVALID_INSN)
             } else {
-                out.meter_checked();
                 x64asm!(out
                     ; push RTEMP
                     ; mov RTEMP, Rq(dst)
@@ -551,29 +593,24 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
                 _ => unreachable!(),
             };
             let helper = out.supports().memory_access[kind as usize][size_log2];
-            let uses_src = kind != MemoryAccessKind::StoreImm;
             load_next_insn_addr(out);
-            if dst == u8::MAX || (uses_src && src == u8::MAX) {
-                terminate(out, SIG_INVALID_INSN);
-            } else {
-                match kind {
-                    MemoryAccessKind::Load => x64asm!(out
-                        ; push Rq(src)
-                        ;; invoke_support(out, helper)
-                        ; pop Rq(dst)
-                    ),
-                    MemoryAccessKind::StoreImm => x64asm!(out
-                        ; push Rq(dst)
-                        ;; invoke_support(out, helper)
-                        ; pop RTEMP
-                    ),
-                    MemoryAccessKind::StoreReg => x64asm!(out
-                        ; push Rq(dst)
-                        ; push Rq(src)
-                        ;; invoke_support(out, helper)
-                        ; add rsp, 16
-                    ),
-                }
+            match kind {
+                MemoryAccessKind::Load => x64asm!(out
+                    ; push Rq(src)
+                    ;; invoke_support(out, helper)
+                    ; pop Rq(dst)
+                ),
+                MemoryAccessKind::StoreImm => x64asm!(out
+                    ; push Rq(dst)
+                    ;; invoke_support(out, helper)
+                    ; pop RTEMP
+                ),
+                MemoryAccessKind::StoreReg => x64asm!(out
+                    ; push Rq(dst)
+                    ; push Rq(src)
+                    ;; invoke_support(out, helper)
+                    ; add rsp, 16
+                ),
             }
         }
 
@@ -610,9 +647,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
         | 200..=203
         | 208..=211
         | 215..=219
-        | 223..=229
-        | 230..=237
-        | 238..=246
+        | 223..=246
         | 248..=255 => invalid_insn(out),
     }
 }
@@ -626,7 +661,7 @@ fn load_next_insn_addr<G: X64Generator + ?Sized>(out: &mut G) {
 }
 
 fn invoke_support<G: X64Generator + ?Sized>(out: &mut G, support_addr: *const u8) {
-    let support_dword = u32::try_from(support_addr as usize).unwrap() as i32;
+    let support_dword = i32::try_from(support_addr as usize).expect("supports in the first 2 GiB");
     x64asm!(out
         ; push DWORD support_dword
         ; call QWORD [rsp]
@@ -1001,11 +1036,11 @@ impl InterpreterGenerator {
                 supports: SupportingCode {
                     call_internal: std::ptr::null(),
                     syscall: std::ptr::null(),
-                    v0_call_imm: std::ptr::null(),
-                    v0_callx: std::ptr::null(),
+                    v0_call_imm: None,
+                    v0_callx: None,
                     memory_access: [[std::ptr::null(); 4]; 3],
                     entry_point: std::ptr::null(),
-                    divide: Vec::new(),
+                    divide: [[[std::ptr::null(); Reg::COUNT]; Reg::COUNT]; 4],
                 },
             };
             this.offset = Self::STEP_TABLE_SIZE;
@@ -1258,8 +1293,12 @@ pub fn enter<C: crate::vm::ContextObject>(
         }
     };
     let entry_point = interpreter(version).1.entry_point;
-    let meter = initial_meter(bpf, vm);
     let config = executable.get_config();
+    assert!(
+        config.enable_instruction_meter,
+        "the instruction meter cannot be disabled"
+    );
+    let meter = initial_meter(bpf, vm);
     let (max_call_depth, stack_frame_size) = (config.max_call_depth, config.stack_frame_size);
     let gaps = version.stack_frame_gaps() && config.enable_stack_frame_gaps;
     let frames_per_call = 1 + gaps as u64;

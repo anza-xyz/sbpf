@@ -314,6 +314,7 @@ macro_rules! test_interpreter_and_jit {
         $executable.verify::<RequisiteVerifier>().unwrap();
         let host_buffer = solana_sbpf::memory_region::HostMemoryObject::host($mem);
         let mut jit_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
+        #[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
         let original_input_mem = jit_input_mem.clone();
         let address_translation = $executable.get_config().enable_address_translation;
         let (interp_input_start, jit_input_start) = if !address_translation {
@@ -431,7 +432,8 @@ macro_rules! test_interpreter_and_jit {
                 }
             }
         }
-        // dynasm variants
+        // dynasm variants, which have to allocate memory in the lower 2 GiB of the address space.
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
             use solana_sbpf::memory_region::HostBuffer;
             for (mode_name, mode) in [

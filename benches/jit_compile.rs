@@ -5,6 +5,7 @@
 // copied, modified, or distributed except according to those terms.
 
 #![feature(test)]
+#![cfg(target_arch = "x86_64")]
 
 extern crate solana_sbpf;
 extern crate test;
@@ -42,7 +43,7 @@ fn bench_init_vm(bencher: &mut Bencher) {
     });
 }
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows")))]
 #[bench]
 fn bench_jit_compile(bencher: &mut Bencher) {
     let mut file = File::open("tests/elfs/relative_call_sbpfv0.so").unwrap();
@@ -59,7 +60,7 @@ fn bench_jit_compile(bencher: &mut Bencher) {
         .machine_code_length() as u64;
 }
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows")))]
 #[bench]
 fn bench_jit_compile_sbpfv3(bencher: &mut Bencher) {
     let mut file = File::open("tests/elfs/relative_call.so").unwrap();
@@ -77,7 +78,6 @@ fn bench_jit_compile_sbpfv3(bencher: &mut Bencher) {
 }
 
 /// The text section of an SBPFv3 program, repeated `repeat` times.
-#[cfg(target_arch = "x86_64")]
 fn sbpfv3_text(repeat: usize) -> Vec<u8> {
     let mut file = File::open("tests/elfs/relative_call.so").unwrap();
     let mut elf = Vec::new();
@@ -102,7 +102,6 @@ const SMALLEST_INSN: [u8; 8] = [0xb4, 0x01, 0, 0, 1, 0, 0, 0];
 /// The most machine code, with three kinds of relocations: `jsle64 r1, 1, -1`.
 const LARGEST_INSN: [u8; 8] = [0xd5, 0x01, 0xff, 0xff, 1, 0, 0, 0];
 
-#[cfg(target_arch = "x86_64")]
 fn bench_dynasm_jit_compile_impl(bencher: &mut Bencher, text: Vec<u8>) {
     let templates = solana_sbpf::codegen::x64::jit_templates(SBPFVersion::V3);
     let executable = sbpfv3_executable(&text);
@@ -111,37 +110,31 @@ fn bench_dynasm_jit_compile_impl(bencher: &mut Bencher, text: Vec<u8>) {
     bencher.iter(|| templates.compile(&executable));
 }
 
-#[cfg(target_arch = "x86_64")]
 #[bench]
 fn bench_dynasm_jit_compile(bencher: &mut Bencher) {
     bench_dynasm_jit_compile_impl(bencher, sbpfv3_text(1));
 }
 
-#[cfg(target_arch = "x86_64")]
 #[bench]
 fn bench_dynasm_jit_compile_large(bencher: &mut Bencher) {
     bench_dynasm_jit_compile_impl(bencher, sbpfv3_text(4096));
 }
 
-#[cfg(target_arch = "x86_64")]
 #[bench]
 fn bench_dynasm_jit_compile_10mib_empty(bencher: &mut Bencher) {
     bench_dynasm_jit_compile_impl(bencher, filled_text(EMPTY_INSN));
 }
 
-#[cfg(target_arch = "x86_64")]
 #[bench]
 fn bench_dynasm_jit_compile_10mib_smallest(bencher: &mut Bencher) {
     bench_dynasm_jit_compile_impl(bencher, filled_text(SMALLEST_INSN));
 }
 
-#[cfg(target_arch = "x86_64")]
 #[bench]
 fn bench_dynasm_jit_compile_10mib_largest(bencher: &mut Bencher) {
     bench_dynasm_jit_compile_impl(bencher, filled_text(LARGEST_INSN));
 }
 
-#[cfg(target_arch = "x86_64")]
 #[bench]
 fn bench_dynasm_jit_compile_10mib_random(bencher: &mut Bencher) {
     use rand::{rngs::SmallRng, Rng, SeedableRng};
@@ -156,7 +149,6 @@ fn bench_dynasm_jit_compile_10mib_random(bencher: &mut Bencher) {
 }
 
 /// An unverified SBPFv3 executable of `text`, compiled without no-ops.
-#[cfg(target_arch = "x86_64")]
 fn sbpfv3_executable(text: &[u8]) -> Executable<TestContextObject> {
     let config = Config {
         noop_instruction_rate: 0,
@@ -171,7 +163,7 @@ fn sbpfv3_executable(text: &[u8]) -> Executable<TestContextObject> {
     .unwrap()
 }
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows")))]
 fn bench_jit_compile_impl(bencher: &mut Bencher, text: Vec<u8>) {
     let executable = sbpfv3_executable(&text);
     bencher.iter(|| executable.jit_compile().unwrap());
@@ -181,19 +173,19 @@ fn bench_jit_compile_impl(bencher: &mut Bencher, text: Vec<u8>) {
         .machine_code_length() as u64;
 }
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows")))]
 #[bench]
 fn bench_jit_compile_10mib_empty(bencher: &mut Bencher) {
     bench_jit_compile_impl(bencher, filled_text(EMPTY_INSN));
 }
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows")))]
 #[bench]
 fn bench_jit_compile_10mib_smallest(bencher: &mut Bencher) {
     bench_jit_compile_impl(bencher, filled_text(SMALLEST_INSN));
 }
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(all(feature = "jit", not(target_os = "windows")))]
 #[bench]
 fn bench_jit_compile_10mib_largest(bencher: &mut Bencher) {
     bench_jit_compile_impl(bencher, filled_text(LARGEST_INSN));

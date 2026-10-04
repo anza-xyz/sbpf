@@ -41,10 +41,16 @@ const SIG_PROGRAM_RESULT: i8 = -7;
 fn initial_meter<C: ContextObject>(bpf: &[u8], vm: &EbpfVm<C>) -> u64 {
     let pc = vm.registers[11];
     let budget = vm.previous_instruction_meter;
+    assert!(
+        budget <= u32::MAX as u64,
+        "the instruction budget is nonsensical"
+    );
     (bpf.as_ptr() as u64).wrapping_add(pc.wrapping_add(budget).wrapping_mul(ebpf::INSN_SIZE as u64))
 }
 
 /// Update `vm` after the generated code has terminated with `code`, leaving `meter` behind.
+// FIXME: this does not store the final pc into `vm.registers[11]`, which the old JIT does: the pc
+// of the `exit`, or of the instruction that failed.
 fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) {
     let remaining = if code == SIG_EXCEEDED_MAX_INSTRUCTIONS || (meter as i64) < 0 {
         0
@@ -100,6 +106,33 @@ enum MemoryAccessKind {
     StoreReg,
 }
 
+/// A BPF register.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Reg(u8);
+
+impl Reg {
+    /// The number of the BPF registers.
+    const COUNT: usize = 11;
+    const ALL: [Reg; Self::COUNT] = const {
+        let mut out = [Reg(0); Self::COUNT];
+        let mut i = 0;
+        while i < Self::COUNT {
+            out[i] = Reg(i as u8);
+            i += 1;
+        }
+        out
+    };
+
+    /// `None` if there's no such register.
+    const fn new(number: u8) -> Option<Self> {
+        if (number as usize) < Self::COUNT {
+            Some(Reg(number))
+        } else {
+            None
+        }
+    }
+}
+
 /// 16 bits of a BPF instruction: the opcode and registers.
 ///
 /// The JIT templates and the interpreter steps use this part of the instruction to dispatch to the
@@ -110,33 +143,27 @@ struct TemplateOpcode(u16);
 
 impl TemplateOpcode {
     const COUNT: usize = 1 + u16::MAX as usize;
-
     /// Of the instruction `insn`.
-    fn of(insn: u64) -> Self {
+    const fn of(insn: u64) -> Self {
         Self(insn as u16)
     }
-
     /// Iterator over all instructions in order of the dispatch table.
     fn all() -> impl Iterator<Item = Self> {
         (0..=u16::MAX).map(Self)
     }
-
-    fn index(self) -> usize {
-        usize::from(self.0)
+    const fn index(self) -> usize {
+        self.0 as usize
     }
-
-    fn op(self) -> u8 {
+    const fn op(self) -> u8 {
         self.0 as u8
     }
-
-    /// The BPF register number.
-    fn dst(self) -> u8 {
-        (self.0 >> 8 & 0xf) as u8
+    /// The destination register field.
+    const fn dst(self) -> Option<Reg> {
+        Reg::new((self.0 >> 8 & 0xf) as u8)
     }
-
-    /// The BPF register number.
-    fn src(self) -> u8 {
-        (self.0 >> 12) as u8
+    /// The source register field.
+    const fn src(self) -> Option<Reg> {
+        Reg::new((self.0 >> 12) as u8)
     }
 }
 
@@ -358,10 +385,11 @@ impl TemplateRelocation {
                 let target_pc = (pc as isize)
                     .checked_add(1 + off)
                     .and_then(|target_pc| usize::try_from(target_pc).ok());
-                // FIXME: the verifier should have rejected these.
-                let target = *target_pc
+                // The verifier rejects invalid jump offsets…
+                let target = target_pc
                     .and_then(|target_pc| pc_section.get(target_pc))
-                    .expect("branch target out of bounds");
+                    .copied()
+                    .unwrap_or(JitTemplates::<SIZE>::INVALID_JUMP_TARGET);
                 ((target & !PADDING_DUE) as usize).wrapping_sub(template_start)
             }
         };
@@ -370,7 +398,7 @@ impl TemplateRelocation {
             i32::try_from(value as isize).is_ok(),
             "impossible relocation"
         );
-        // Never clamps (see `new`), but lets the bounds checks go.
+        // Never clamps (see `new`), but `min` elides a bounds check.
         debug_assert!(usize::from(self.field) <= SIZE - 4);
         let field = usize::from(self.field).min(SIZE - 4);
         template[field..field + 4].write_copy_of_slice(&(value as u32).to_le_bytes());
@@ -451,6 +479,9 @@ pub struct JitProgram {
 }
 
 impl<const SIZE: usize> JitTemplates<SIZE> {
+    /// Offset of the `AuxTemplate::InvalidJumpTarget` in the output, which is emitted first.
+    const INVALID_JUMP_TARGET: u32 = 0;
+
     fn empty() -> Self {
         let layout = TemplateLayout {
             bytes: 0,
@@ -493,11 +524,9 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
 
     /// First pass analysis of the program to be compiled.
     ///
-    /// This gathers
-    pub fn analyze<C: ContextObject>(
-        &self,
-        executable: &Executable<C>,
-    ) -> (Vec<u32>, usize, usize) {
+    /// This gathers the offsets at which corresponding instructions would have their machine code
+    /// placed.
+    fn analyze<C: ContextObject>(&self, executable: &Executable<C>) -> (Vec<u32>, usize, usize) {
         let bpf = executable.get_text_bytes().1;
         let config = executable.get_config();
         let noop_instruction_rate = config.noop_instruction_rate;
@@ -506,6 +535,8 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         assert!(rest.is_empty());
         // The no-ops diversify the output to make the locations of specific code slightly less
         // predictable.
+        // FIXME: Unlike the old JIT, which counts the host instructions, the rate counts the
+        // BPF instructions, so there are fewer no-ops inserted for the same rate.
         let mut rng =
             SmallRng::from_rng(thread_rng()).expect("failed to seed the JIT diversification");
         let noop_threshold = u32::MAX.checked_div(noop_instruction_rate).unwrap_or(0);
@@ -514,7 +545,6 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
 
         let mut pc_sec = Vec::with_capacity(program.len());
         let mut position = 0;
-        let invalid_jump_target_loc = position as u32;
         position += self.aux_layout(AuxTemplate::InvalidJumpTarget).len();
         position += start_padding * self.aux_layout(AuxTemplate::Noop).len();
         // Introduce checkpoints at certain points in the code; the instruction meter is otherwise
@@ -547,7 +577,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             position += layout.len();
             for _ in 0..layout.extra_bpf_insns {
                 program_iter.next();
-                pc_sec.push(invalid_jump_target_loc);
+                pc_sec.push(Self::INVALID_JUMP_TARGET);
             }
         }
         position += self.aux_layout(AuxTemplate::ExecutionOverrun).len();

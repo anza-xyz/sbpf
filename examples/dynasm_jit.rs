@@ -1,14 +1,15 @@
-use solana_sbpf::{
-    elf::Executable,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
-    vm::{Config, EbpfVm},
-};
-use std::sync::Arc;
-use test_utils::TestContextObject;
-
-const BUDGET: u64 = 10_000_000;
-
+#[cfg(target_arch = "x86_64")]
 fn main() {
+    use solana_sbpf::{
+        elf::Executable,
+        program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        vm::{Config, EbpfVm},
+    };
+    use std::sync::Arc;
+    use test_utils::TestContextObject;
+
+    const BUDGET: u64 = 10_000_000;
+
     let bpf = Vec::from([
         191, 33, 0, 0, 0, 0, 0, 0, 87, 1, 0, 0, 255, 3, 0, 0, 7, 2, 0, 0, 1, 0, 0, 0, 165, 2, 252,
         255, 0x00, 0x00, 0x20, 0x00, 149, 0, 0, 0, 0, 0, 0, 0,
@@ -58,3 +59,6 @@ fn main() {
     }
     println!("{:?}, remaining budget: {remaining}", duration / iters);
 }
+
+#[cfg(not(target_arch = "x86_64"))]
+fn main() {}

@@ -13,18 +13,18 @@ pub(super) struct SupportingCode {
     pub(super) syscall: *const u8,
     /// For SBPFv0 `CALL_IMM`, which is a syscall or an internal call depending on the immediate:
     /// invoked like `call_internal` is, only with the immediate in `temp`. It performs a syscall
-    /// itself, and tail calls `call_internal` otherwise. Null for the other versions.
-    pub(super) v0_call_imm: *const u8,
+    /// itself, and tail calls `call_internal` otherwise. `None` for the other versions.
+    pub(super) v0_call_imm: Option<*const u8>,
     /// For SBPFv0 `CALL_REG`, which takes the register from the immediate: invoked like
     /// `call_internal` is, only with the number of the register in `temp`, and tail calls it.
-    /// Null for the other versions.
-    pub(super) v0_callx: *const u8,
+    /// `None` for the other versions.
+    pub(super) v0_callx: Option<*const u8>,
     /// Memory access helpers, by `MemoryAccessKind` and log2 of the access size. See
     /// `SupportingCode::memory_access`.
     pub(super) memory_access: [[*const u8; 4]; 3],
     pub(super) entry_point: *const u8,
     /// See `SupportingCode::divide`.
-    pub(super) divide: Vec<*const u8>,
+    pub(super) divide: [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4],
 }
 
 unsafe impl Send for SupportingCode {}
@@ -34,27 +34,10 @@ impl SupportingCode {
     /// Buffer space needed to generate this supporting code.
     pub(super) const LEN: usize = 64 * 1024;
 
-    /// `dst` and `src` are physical registers. `None` if either isn't a BPF register.
-    fn divide_index(is_div: bool, is_64: bool, is_reg: bool, dst: u8, src: u8) -> Option<usize> {
-        let bpf_reg = |reg| GPREG_MAP.iter().position(|&r| r == reg);
-        let kind = is_div as usize | (is_64 as usize) << 1 | (is_reg as usize) << 2;
-        let src = if is_reg { bpf_reg(src)? } else { 0 };
-        Some((kind * GPREG_MAP.len() + bpf_reg(dst)?) * GPREG_MAP.len() + src)
-    }
-
-    /// Helper performing the division in place on the physical registers `dst` and `src` (or the
-    /// immediate.) Expects the address of the instruction following the division in `temp`.
-    pub(super) fn divide(
-        &self,
-        is_div: bool,
-        is_64: bool,
-        is_reg: bool,
-        dst: u8,
-        src: u8,
-    ) -> Option<*const u8> {
-        let helper = self.divide[Self::divide_index(is_div, is_64, is_reg, dst, src)?];
-        assert!(!helper.is_null());
-        Some(helper)
+    /// Helper performing the division in place on the registers `dst` and `src`. Expects the
+    /// address of the instruction following the division in `temp`.
+    pub(super) fn divide(&self, is_div: bool, is_64: bool, dst: Reg, src: Reg) -> *const u8 {
+        self.divide[is_div as usize | (is_64 as usize) << 1][dst.0 as usize][src.0 as usize]
     }
 
     // FIXME: use an independent generator for the supports, so that a regular dynasm assembler with
@@ -63,11 +46,11 @@ impl SupportingCode {
     pub(super) fn generate_into(out: &mut InterpreterGenerator) -> SupportingCode {
         let call_internal = Self::call_internal(out);
         let (v0_call_imm, v0_callx) = if out.version().static_syscalls() {
-            (std::ptr::null(), std::ptr::null())
+            (None, None)
         } else {
             (
-                Self::v0_call_imm(out, call_internal),
-                Self::callx_target(out, call_internal),
+                Some(Self::v0_call_imm(out, call_internal)),
+                Some(Self::callx_target(out, call_internal)),
             )
         };
         Self {
@@ -91,6 +74,9 @@ impl SupportingCode {
             ; push RTEMP
             ; mov RTEMP, [rsp + 24]
             ;; bpf_validate_meter(out)
+            // FIXME: with `max_call_depth = 0` this wraps around and the depth is never exceeded,
+            // whereas the old JIT raises `CallDepthExceeded` at the first call and the old
+            // interpreter panics.
             ; sub QWORD rbp => Frame[BYTE -1].calls_remaining, 1
             ; jnz =>within_depth
             ;; terminate(out, SIG_CALL_DEPTH_EXCEEDED)
@@ -178,32 +164,20 @@ impl SupportingCode {
     }
 
     /// The helpers for `divide`.
-    fn divides(out: &mut InterpreterGenerator) -> Vec<*const u8> {
-        let last_reg = *GPREG_MAP.last().unwrap();
-        let mut divide = vec![
-            std::ptr::null();
-            Self::divide_index(true, true, true, last_reg, last_reg).unwrap() + 1
-        ];
+    fn divides(out: &mut InterpreterGenerator) -> [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4] {
+        let mut divide = [[[std::ptr::null(); Reg::COUNT]; Reg::COUNT]; 4];
         for is_div in [false, true] {
             for is_64 in [false, true] {
-                for is_reg in [false, true] {
-                    for &dst_reg in &GPREG_MAP {
-                        let src_regs = if is_reg {
-                            &GPREG_MAP[..]
-                        } else {
-                            &GPREG_MAP[..1]
-                        };
-                        for &src_reg in src_regs {
-                            let index = Self::divide_index(is_div, is_64, is_reg, dst_reg, src_reg)
-                                .unwrap();
-                            divide[index] = unsafe { out.buffer.add(out.offset()) };
-                            Self::div_mod(out, is_div, is_64, is_reg, dst_reg, src_reg);
-                        }
+                let kind = &mut divide[is_div as usize | (is_64 as usize) << 1];
+                for dst in Reg::ALL {
+                    for src in Reg::ALL {
+                        kind[dst.0 as usize][src.0 as usize] =
+                            unsafe { out.buffer.add(out.offset()) };
+                        Self::div_mod(out, is_div, is_64, dst, src);
                     }
                 }
             }
         }
-
         divide
     }
 
@@ -334,7 +308,7 @@ impl SupportingCode {
         );
         let start = unsafe { out.buffer.add(out.offset()) };
         let invalid = out.new_dynamic_label();
-        let stubs = u32::try_from(stubs as usize).unwrap() as i32;
+        let stubs = i32::try_from(stubs as usize).expect("supports in the first 2 GiB");
         x64asm!(out
             ; cmp RTEMP, GPREG_MAP.len() as i32 - 1
             ; ja =>invalid
@@ -343,6 +317,7 @@ impl SupportingCode {
             ; =>invalid
             // `invoke_support`'s target and the return address are on top.
             ; mov RTEMP, [rsp + 16]
+            ;; bpf_validate_meter(out)
             ;; terminate(out, SIG_INVALID_INSN)
         );
         start
@@ -464,34 +439,19 @@ impl SupportingCode {
         start
     }
 
-    fn div_mod(
-        out: &mut InterpreterGenerator,
-        is_div: bool,
-        is_64: bool,
-        is_reg: bool,
-        dst: u8,
-        src: u8,
-    ) {
-        if is_reg {
-            // FIXME: there might be a better way to test this...
-            if is_64 {
-                x64asm!(out; test Rq(src), Rq(src));
-            } else {
-                x64asm!(out; test Rd(src), Rd(src));
-            }
-            let non_zero = out.new_dynamic_label();
-            x64asm!(out
-                ; jnz =>non_zero
-                ;; bpf_validate_meter(out)
-                ;; terminate(out, SIG_DIVIDE_BY_ZERO)
-                ; =>non_zero
-                ; mov RTEMP, Rq(src)
-            );
+    fn div_mod(out: &mut InterpreterGenerator, is_div: bool, is_64: bool, dst: Reg, src: Reg) {
+        if is_64 {
+            x64asm!(out; test Rq(src), Rq(src));
         } else {
-            // The verifier rejects zero immediates, so there's no need to check those.
-            x64asm!(out; movsxd RTEMP, DWORD [RTEMP - 4]);
+            x64asm!(out; test Rd(src), Rd(src));
         }
+        let non_zero = out.new_dynamic_label();
         x64asm!(out
+            ; jnz =>non_zero
+            ;; bpf_validate_meter(out)
+            ;; terminate(out, SIG_DIVIDE_BY_ZERO)
+            ; =>non_zero
+            ; mov RTEMP, Rq(src)
             ; push rax
             ; push rdx
             ; xor edx, edx
@@ -686,6 +646,9 @@ const CALL_SYSCALL: u64 = 1;
 const CALL_FAILED: u64 = 2;
 
 /// The SBPFv0 `CALL_IMM`: syscalls are looked up first, then `internal_functions`.
+///
+/// A key in both only runs the syscall, whereas the old JIT and interpreter run the syscall and then
+/// the internal function too. Loading an ELF rejects such collisions.
 extern "sysv64" fn dispatch_call<C: crate::vm::ContextObject>(
     vm: &mut crate::vm::EbpfVm<C>,
     key: u32,
