@@ -78,7 +78,6 @@ macro_rules! x64asm {
             ; .alias RINSN, rax
             ; .alias RTEMP, rcx
             ; .alias WTEMP, ecx
-            ; .alias BTEMP, cl
             ; .alias RMETER, rdx
             $($acc)* $($curr)*
         )
@@ -512,15 +511,12 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
                     ;; invoke_support(out, out.supports().v0_call_imm)
                     ; pop RTEMP
                 ),
-                // FIXME: the old JIT reports `UnsupportedInstruction` when the target is out of the
-                // text section, whereas `call_internal` reports `CallOutsideTextSegment` like it
-                // does for `callx`.
                 (true, 1) => x64asm!(out
                     ; push RTEMP
                     ; movsxd RTEMP, DWORD REL32_IMM
                     ; lea RTEMP, [ DWORD 0i32 + RINSN + RTEMP * 8 ]
                     ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
-                    ;; invoke_support(out, out.supports().call_internal)
+                    ;; invoke_support(out, out.supports().call_imm)
                     ; pop RTEMP
                 ),
                 (true, 0) => invoke_support(out, out.supports().syscall),
@@ -558,7 +554,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
             bpf_validate_meter(out);
             x64asm!(out
                 ; sub RMETER, RTEMP
-                ; xor WTEMP, WTEMP
+                ; xor eax, eax
                 ; ret
             );
         }
@@ -678,20 +674,21 @@ fn invoke_support<G: X64Generator + ?Sized>(out: &mut G, support_addr: *const u8
 
 /// Terminate execution with the specified code.
 ///
-/// Unless `code` is `SIG_EXCEEDED_MAX_INSTRUCTIONS`, `temp` must contain the address of the
+/// Unless `code` is `SIG_EXCEEDED_MAX_INSTRUCTIONS`, `RTEMP` must contain the address of the
 /// BPF instruction following the one terminating the execution.
 ///
-/// This will discard the guest code stack and return the exit code in `temp` and the
-/// remaining instruction budget in `meter`.
+/// This will discard the guest code stack, return the exit code in `al` and the
+/// remaining budget in `RMETER`. `RTEMP` will contain the faulting instruction offset.
 fn terminate<G: X64Generator + ?Sized>(out: &mut G, code: i8) {
-    if code != SIG_EXCEEDED_MAX_INSTRUCTIONS {
-        // Update `meter` only when we don't know that the remainder is already 0. Callers can
-        // check the return code and determine if they need to interpret the remainder without
-        // cluttering every point in generated JIT code.
+    if code == SIG_EXCEEDED_MAX_INSTRUCTIONS {
+        // If we did exceed the budget, the faulting instruction is actually the limit rather than
+        // the address of whatever meter validation point we hit.
+        x64asm!(out; lea RTEMP, [RMETER + 8]);
+    } else {
         x64asm!(out; sub RMETER, RTEMP);
     }
     x64asm!(out
-        ; mov BTEMP, code
+        ; mov al, code
         ; jmp QWORD rbp => Frame[BYTE -1].exit
     );
 }
@@ -1284,8 +1281,10 @@ pub fn enter<C: crate::vm::ContextObject>(
         calls_remaining: max_call_depth as u64,
         stack_frame_bump: (stack_frame_size as u64).wrapping_mul(frames_per_call),
     };
-    let code: u64;
+    let exit_code: u64;
+    let last_pc_address: u64;
     let remaining: u64;
+    let r0: u64;
     // SAFETY:
     //
     // Contract from `asm!`: every register the code changes must be declared or restored, the
@@ -1299,10 +1298,10 @@ pub fn enter<C: crate::vm::ContextObject>(
             "push rbx",
             "call r8",
             "pop rbx",
-            inout("rsi") &raw mut frame => _,
+            inout("rsi") &raw mut frame => r0,
             inout("r8") entry_point => _,
-            inout("rax") insn => _,
-            lateout("rcx") code,
+            inout("rax") insn => exit_code,
+            lateout("rcx") last_pc_address,
             inout("rdx") meter => remaining,
             lateout("rdi") _,
             lateout("r9") _,
@@ -1317,7 +1316,9 @@ pub fn enter<C: crate::vm::ContextObject>(
             clobber_abi("sysv64")
         );
     }
-    finish_execution(vm, code as i8, remaining);
+    let last_pc = last_pc_address.wrapping_sub(bpf.as_ptr() as u64)
+        / const { NonZeroU64::new(ebpf::INSN_SIZE as u64).unwrap() };
+    finish_execution(vm, exit_code as i8, remaining, r0, last_pc);
 }
 
 #[cfg(test)]

@@ -53,11 +53,16 @@ fn initial_meter<C: ContextObject>(bpf: &[u8], vm: &EbpfVm<C>) -> u64 {
     (bpf.as_ptr() as u64).wrapping_add(pc.wrapping_add(budget).wrapping_mul(ebpf::INSN_SIZE as u64))
 }
 
-/// Update `vm` after the generated code has terminated with `code`, leaving `meter` behind.
-// FIXME: this does not store the final pc into `vm.registers[11]`, which the old JIT does: the pc
-// of the `exit`, or of the instruction that failed.
-fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) {
-    let remaining = if code == SIG_EXCEEDED_MAX_INSTRUCTIONS || (meter as i64) < 0 {
+/// Finalize `vm` fields after the generated code has terminated with `code`.
+fn finish_execution<C: ContextObject>(
+    vm: &mut EbpfVm<C>,
+    exit_code: i8,
+    meter: u64,
+    r0: u64,
+    last_pc: u64,
+) {
+    vm.registers[11] = last_pc.wrapping_sub(1);
+    let remaining = if exit_code == SIG_EXCEEDED_MAX_INSTRUCTIONS || (meter as i64) < 0 {
         0
     } else {
         meter / const { NonZeroU64::new(ebpf::INSN_SIZE as u64).unwrap() }
@@ -65,8 +70,8 @@ fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) 
     // Syscalls consume the budget used up to them and update `previous_instruction_meter`.
     vm.due_insn_count = vm.previous_instruction_meter.saturating_sub(remaining);
     use EbpfError::*;
-    match code {
-        0 => vm.program_result = ProgramResult::Ok(vm.registers[0]),
+    match exit_code {
+        0 => vm.program_result = ProgramResult::Ok(r0),
         // Calls into Rust store their errors into `vm.program_result` themselves.
         SIG_PROGRAM_RESULT => {}
         SIG_EXCEEDED_MAX_INSTRUCTIONS => {
@@ -79,7 +84,7 @@ fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) 
         SIG_CALL_OUTSIDE_TEXT_SEGMENT => {
             vm.program_result = ProgramResult::Err(CallOutsideTextSegment)
         }
-        _ => unreachable!("unexpected exit code {}", code),
+        _ => unreachable!("unexpected exit code {}", exit_code),
     }
 }
 
@@ -103,7 +108,6 @@ impl JitProgram {
         )
     }
 }
-
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MemoryAccessKind {

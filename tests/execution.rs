@@ -4796,8 +4796,17 @@ fn test_max_call_depth_zero() {
         Arc::new(BuiltinProgram::new_loader(config)),
     )
     .unwrap();
-    executable.jit_compile().unwrap();
-    {
+    for (name, mode) in [
+        ("jit", ExecutionMode::Jit),
+        ("dynasm jit", ExecutionMode::Jit),
+        ("dynasm interpreter", ExecutionMode::DynasmInterpreted),
+    ] {
+        match name {
+            "jit" => executable.jit_compile().unwrap(),
+            "dynasm jit" => executable.dynasm_compile().unwrap(),
+            "dynasm interpreter" => {}
+            _ => unreachable!(),
+        }
         let mut context_object = TestContextObject::new(10);
         create_vm!(
             vm,
@@ -4808,11 +4817,11 @@ fn test_max_call_depth_zero() {
             vec![],
             None
         );
+        let mut mode = mode;
         let mut call_frames = vec![CallFrame::default(); 1];
-        let (_, result) =
-            vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut call_frames);
+        let (_, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
         let expected = ProgramResult::Err(EbpfError::CallDepthExceeded);
-        assert_eq!(format!("{result:?}"), format!("{expected:?}"));
-        assert_eq!(vm.registers[11], 0);
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "{name}");
+        assert_eq!(vm.registers[11], 0, "{name}");
     }
 }

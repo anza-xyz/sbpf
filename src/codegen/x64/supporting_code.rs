@@ -7,23 +7,20 @@ use dynasmrt::{DynasmApi, DynasmLabelApi, VecAssembler};
 
 pub(super) struct SupportingCode {
     /// Internal call trampoline, invoked (see `invoke_support`) with the host address of the
-    /// target instruction in `temp`, and the address of the instruction to return to pushed
+    /// target instruction in `RTEMP`, and the address of the BPF instruction to return to pushed
     /// beforehand.
     pub(super) call_internal: *const u8,
-    /// Syscall trampoline, invoked with the address of the instruction following the `CALL_IMM`
-    /// in `temp`.
+    /// `CALL_IMM` SBPFv3 onwards.
+    pub(super) call_imm: *const u8,
+    /// Syscall trampoline.
     pub(super) syscall: *const u8,
-    /// Appends the registers and the pc of the instruction preceding the address in `temp` to
-    /// `vm.register_trace`, invoked like `syscall` is. Preserves all the registers, except that
-    /// they are stored into `vm.registers` too.
+    /// Appends the registers and the pc of the instruction preceding the address in `TEMP` to
+    /// `vm.register_trace`.
     #[cfg(feature = "tracer")]
     pub(super) trace: *const u8,
-    /// For SBPFv0 `CALL_IMM`, which is a syscall or an internal call depending on the immediate:
-    /// invoked like `call_internal` is, only with the immediate in `temp`. It performs a syscall
-    /// itself, and tail calls `call_internal` otherwise.
+    /// SBPFv0 `CALL_IMM`, which is a syscall or an internal call depending on the immediate.
     pub(super) v0_call_imm: *const u8,
-    /// For SBPFv0 `CALL_REG`, which takes the register from the immediate: invoked like
-    /// `call_internal` is, only with the number of the register in `temp`, and tail calls it.
+    /// SBPFv0 `CALL_REG`, which computes the register from the immediate.
     pub(super) v0_callx: *const u8,
     /// Memory access helpers, by `MemoryAccessKind` and log2 of the access size. See
     /// `SupportingCode::memory_access`.
@@ -92,9 +89,12 @@ impl SupportingCode {
     fn assemble(base: usize) -> (SupportingCode, Vec<u8>) {
         let mut out = Asm::new(base);
         let call_internal_label = out.new_dynamic_label();
-        let call_internal = Self::call_internal(&mut out, base, call_internal_label);
+        let target_checked = out.new_dynamic_label();
+        let call_internal =
+            Self::call_internal(&mut out, base, call_internal_label, target_checked);
         let supports = Self {
             call_internal,
+            call_imm: Self::call_imm(&mut out, base, target_checked),
             v0_call_imm: Self::v0_call_imm(&mut out, base, call_internal_label),
             v0_callx: Self::callx_target(&mut out, base, call_internal_label),
             syscall: Self::syscall(&mut out, base),
@@ -110,28 +110,25 @@ impl SupportingCode {
         (supports, code)
     }
 
-    fn call_internal(out: &mut Asm, base: usize, label: DynamicLabel) -> *const u8 {
-        // `[rsp + 32]` is the address of the instruction following the call, once `insn` and the
-        // target are pushed.
+    /// `target_checked` is where `call_imm` continues, once the target is checked to be within
+    /// the text section and is in `TEMP` as an offset into it.
+    fn call_internal(
+        out: &mut Asm,
+        base: usize,
+        label: DynamicLabel,
+        target_checked: DynamicLabel,
+    ) -> *const u8 {
         let start = address(out, base);
         x64asm!(out; =>label);
         let within_depth = out.new_dynamic_label();
         let in_bounds = out.new_dynamic_label();
         let insn_mask = (ebpf::INSN_SIZE as i32).checked_neg().unwrap();
         x64asm!(out
-            // `insn` is restored after the call: the JIT's never changes, and the interpreter's
-            // is the instruction following the call.
             ; push RINSN
             ; push RTEMP
+            // `[rsp + 32]` is the address of the BPF instruction following the call.
             ; mov RTEMP, [rsp + 32]
             ;; validate_meter(out)
-            // FIXME: with `max_call_depth = 0` this wraps around and the depth is never exceeded,
-            // whereas the old JIT raises `CallDepthExceeded` at the first call and the old
-            // interpreter panics.
-            ; sub QWORD rbp => Frame[BYTE -1].calls_remaining, 1
-            ; jnz =>within_depth
-            ;; terminate(out, SIG_CALL_DEPTH_EXCEEDED)
-            ; =>within_depth
             ; mov RTEMP, [rsp]
             ; sub RTEMP, rbp => Frame[BYTE -1].text_section
             ; cmp RTEMP, rbp => Frame[BYTE -1].text_section_len
@@ -140,10 +137,17 @@ impl SupportingCode {
             ;; terminate(out, SIG_CALL_OUTSIDE_TEXT_SEGMENT)
             ; =>in_bounds
             ; and RTEMP, insn_mask
+            ; =>target_checked
+            ; sub QWORD rbp => Frame[BYTE -1].calls_remaining, 1
+            // This cc code is load-bearing for when `calls_remaining == 0`.
+            ; ja =>within_depth
+            ; mov RTEMP, [rsp + 32]
+            ;; terminate(out, SIG_CALL_DEPTH_EXCEEDED)
+            ; =>within_depth
         );
 
         // In the JIT, the machine code to call is found via `jit_pc_section`. Otherwise this is the
-        // interpreter, and `insn` needs to point past the target instead.
+        // interpreter, and `RINSN` needs to point past the target instead.
         let translated = out.new_dynamic_label();
         let resolved = out.new_dynamic_label();
         x64asm!(out
@@ -162,15 +166,15 @@ impl SupportingCode {
             ; movzx RTEMP, WORD [RTEMP]
             ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
         );
-        // `temp` is the offset within `code` to call, `[rsp]` the target instruction.
+        // `RTEMP` is the offset within `code` to call, `[rsp]` the target instruction.
         x64asm!(out
             ; =>resolved
             ; add RTEMP, rbp => Frame[BYTE -1].code
-            // Like a taken branch, from the instruction following the call to the target.
+            // Meter adjustments mirror the logic of the taken branch instruction.
             ; add RMETER, [rsp]
             ; sub RMETER, [rsp + 32]
             ; push RTEMP
-            // The callee gets the address of the instruction following it in `temp`, as
+            // The callee gets the address of the instruction following it in `RTEMP`, as
             // `load_next_insn` would produce it.
             ; mov RTEMP, [rsp + 8]
             ; add RTEMP, ebpf::INSN_SIZE as i32
@@ -188,12 +192,30 @@ impl SupportingCode {
             ; pop R6
             ; add rsp, 16
             ; pop RINSN
-            // `EXIT` leaves the remaining budget in `meter`, convert back to the instruction limit.
+            // `EXIT` leaves the remaining budget in `RMETER`, convert back to the instruction
+            // limit.
             ; add RMETER, [rsp + 16]
             ; add QWORD rbp => Frame[BYTE -1].calls_remaining, 1
             ; ret
         );
 
+        start
+    }
+
+    fn call_imm(out: &mut Asm, base: usize, target_checked: DynamicLabel) -> *const u8 {
+        let start = address(out, base);
+        x64asm!(out
+            ; push RINSN
+            ; push RTEMP
+            ; mov RTEMP, [rsp + 32]
+            ;; validate_meter(out)
+            ; mov RTEMP, [rsp]
+            ; sub RTEMP, rbp => Frame[BYTE -1].text_section
+            ; cmp RTEMP, rbp => Frame[BYTE -1].text_section_len
+            ; jb =>target_checked
+            ; mov RTEMP, [rsp + 32]
+            ;; terminate(out, SIG_INVALID_INSN)
+        );
         start
     }
 
@@ -243,29 +265,11 @@ impl SupportingCode {
             ; lea rdi, [ => after_dispatch ]
             ; mov rbp => Frame[BYTE -1].exit, rdi
             ; mov rsi, rbp => Frame[BYTE -1].vm
-        );
-        // `rsi` is one of the BPF registers, but temporarily holds the `EbpfVm` right now, so it is
-        // overwritten last.
-        const { assert!(GPREG_MAP[0] == RSI) };
-        for (i, &reg) in GPREG_MAP.iter().enumerate().rev() {
-            let offset = (RuntimeEnvironmentSlot::Registers as i32)
-                .checked_add((i as i32).checked_mul(8).unwrap())
-                .unwrap();
-            x64asm!(out; mov Rq(reg), [rsi + offset]);
-        }
-
-        x64asm!(out
+            ;; load_bpf_registers(out, RSI, reg_mask(&GPREG_MAP))
             ; call QWORD rbp => Frame[BYTE -1].start
+            // `terminate` and exit leave the exit code in `al`, the address of the instruction
+            // following the last one executed in `RTEMP`, and r0 is in, well, `rsi`.
             ;=>after_dispatch
-            ; mov rax, rbp => Frame[BYTE -1].vm
-        );
-        for (i, &reg) in GPREG_MAP.iter().enumerate() {
-            let offset = (RuntimeEnvironmentSlot::Registers as i32)
-                .checked_add((i as i32).checked_mul(8).unwrap())
-                .unwrap();
-            x64asm!(out; mov [rax + offset], Rq(reg));
-        }
-        x64asm!(out
             ; mov rsp, rbp
             ; pop rbp
             ; ret
@@ -316,7 +320,7 @@ impl SupportingCode {
         x64asm!(out
             ; test rax, rax
             ; jnz =>not_internal
-            // The target for `call_internal`, which is a host address, replaces `temp`.
+            // The target for `call_internal`, which is a host address, replaces `RTEMP`.
             ; shl rdx, 3
             ; add rdx, rbp => Frame[BYTE -1].text_section
             ; mov [rsp + 8], rdx
@@ -423,19 +427,11 @@ impl SupportingCode {
     fn trace(out: &mut Asm, base: usize) -> *const u8 {
         let start = address(out, base);
         let pushed = clobber_for_sysv64_call(out);
-        // This recopies a bunch of registers that `clobber` might have already populated and that
-        // is okay.
-        for (i, &reg) in GPREG_MAP.iter().enumerate() {
-            let offset = (RuntimeEnvironmentSlot::Registers as i32)
-                .checked_add((i as i32).checked_mul(8).unwrap())
-                .unwrap();
-            x64asm!(out; mov [rax + offset], Rq(reg));
-        }
+        store_bpf_registers(out, RAX, !SYSV64_CLOBBERED);
         let pc_slot = (RuntimeEnvironmentSlot::Registers as i32)
             .checked_add((GPREG_MAP.len() as i32).checked_mul(8).unwrap())
             .unwrap();
         x64asm!(out
-            // `temp` is the address of the instruction following the traced one.
             ; sub RTEMP, rbp => Frame[BYTE -1].text_section
             ; shr RTEMP, 3
             ; dec RTEMP
@@ -613,9 +609,11 @@ fn address(out: &Asm, base: usize) -> *const u8 {
 fn terminate(out: &mut Asm, code: i8) {
     if code != SIG_EXCEEDED_MAX_INSTRUCTIONS {
         x64asm!(out; sub RMETER, RTEMP);
+    } else {
+        x64asm!(out; lea RTEMP, [RMETER + 8]);
     }
     x64asm!(out
-        ; mov BTEMP, code
+        ; mov al, code
         ; jmp QWORD rbp => Frame[BYTE -1].exit
     );
 }
@@ -637,6 +635,34 @@ fn validate_meter(out: &mut Asm) {
 ///
 /// Returns the number of bytes pushed. The stack is not aligned for the call, see
 /// `sysv64_call_needs_stack_alignment`. Does not touch the flags.
+/// Store the BPF registers in `mask` into `vm.registers`, with the `EbpfVm` at `vm`.
+fn store_bpf_registers(out: &mut Asm, vm: u8, mask: u16) {
+    for (i, &reg) in GPREG_MAP.iter().enumerate() {
+        if mask & 1 << reg != 0 {
+            let offset = (RuntimeEnvironmentSlot::Registers as i32)
+                .checked_add((i as i32).checked_mul(8).unwrap())
+                .unwrap();
+            x64asm!(out; mov [Rq(vm) + offset], Rq(reg));
+        }
+    }
+}
+
+/// Load the BPF registers in `mask` from `vm.registers`, with the `EbpfVm` address in register
+/// named by `vm`.
+///
+/// Only some of the registers may be used to store VM.
+fn load_bpf_registers(out: &mut Asm, vm: u8, mask: u16) {
+    assert!(vm == GPREG_MAP[0] || vm == RINSN || vm == RTEMP || vm == RMETER);
+    for (i, &reg) in GPREG_MAP.iter().enumerate().rev() {
+        if mask & 1 << reg != 0 {
+            let offset = (RuntimeEnvironmentSlot::Registers as i32)
+                .checked_add((i as i32).checked_mul(8).unwrap())
+                .unwrap();
+            x64asm!(out; mov Rq(reg), [Rq(vm) + offset]);
+        }
+    }
+}
+
 fn clobber_for_sysv64_call(out: &mut Asm) -> i32 {
     for reg in 0..16 {
         if SYSV64_PUSHED & 1 << reg != 0 {
@@ -645,14 +671,7 @@ fn clobber_for_sysv64_call(out: &mut Asm) -> i32 {
     }
     const { assert!(SYSV64_PUSHED & 1 << RAX != 0) };
     x64asm!(out; mov rax, rbp => Frame[BYTE -1].vm);
-    for (i, &reg) in GPREG_MAP.iter().enumerate() {
-        if SYSV64_CLOBBERED & 1 << reg != 0 {
-            let offset = (RuntimeEnvironmentSlot::Registers as i32)
-                .checked_add((i as i32).checked_mul(8).unwrap())
-                .unwrap();
-            x64asm!(out; mov [rax + offset], Rq(reg));
-        }
-    }
+    store_bpf_registers(out, RAX, SYSV64_CLOBBERED);
     (SYSV64_PUSHED.count_ones() as i32).checked_mul(8).unwrap()
 }
 
@@ -681,14 +700,7 @@ fn debug_assert_sysv64_call_stack_alignment(out: &mut Asm) {
 /// Restore the registers saved by `clobber_for_sysv64_call`. Does not touch the flags.
 fn restore_from_sysv64_call(out: &mut Asm) {
     x64asm!(out; mov rax, rbp => Frame[BYTE -1].vm);
-    for (i, &reg) in GPREG_MAP.iter().enumerate() {
-        if SYSV64_CLOBBERED & 1 << reg != 0 {
-            let offset = (RuntimeEnvironmentSlot::Registers as i32)
-                .checked_add((i as i32).checked_mul(8).unwrap())
-                .unwrap();
-            x64asm!(out; mov Rq(reg), [rax + offset]);
-        }
-    }
+    load_bpf_registers(out, RAX, SYSV64_CLOBBERED);
     for reg in (0..16).rev() {
         if SYSV64_PUSHED & 1 << reg != 0 {
             x64asm!(out; pop Rq(reg));

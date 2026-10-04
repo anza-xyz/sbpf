@@ -406,8 +406,7 @@ macro_rules! test_interpreter_and_jit {
                         );
                         diverged = true;
                     }
-                    // FIXME: the dynasm JIT does not store the final pc.
-                    if !dynasm && interpreter_final_pc != vm.registers[11] {
+                    if interpreter_final_pc != vm.registers[11] {
                         println!(
                             "[{mode_name}] Final PC of interpreter ({:?}) and JIT ({:?}) result diverged",
                             interpreter_final_pc, vm.registers[11],
@@ -491,6 +490,13 @@ macro_rules! test_interpreter_and_jit {
                     println!(
                         "[{mode_name}] Instruction meter of interpreter ({:?}) and dynasm ({:?}) diverged",
                         instruction_count_interpreter, instruction_count_dynasm,
+                    );
+                    diverged = true;
+                }
+                if interpreter_final_pc != vm.registers[11] {
+                    println!(
+                        "[{mode_name}] Final PC of interpreter ({:?}) and dynasm ({:?}) diverged",
+                        interpreter_final_pc, vm.registers[11],
                     );
                     diverged = true;
                 }
