@@ -132,9 +132,6 @@ trait X64Generator {
     fn push(&mut self, byte: u8);
     fn push_i8(&mut self, value: i8);
     fn push_i32(&mut self, value: i32);
-    fn push_i64(&mut self, value: i64) {
-        self.extend(&value.to_le_bytes());
-    }
     fn global_reloc(
         &mut self,
         name: &'static str,
@@ -506,7 +503,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
                 (false, _) => x64asm!(out
                     ; push RTEMP
                     ; mov WTEMP, DWORD REL32_IMM
-                    ;; invoke_support(out, out.supports().v0_call_imm.unwrap())
+                    ;; invoke_support(out, out.supports().v0_call_imm)
                     ; pop RTEMP
                 ),
                 // FIXME: the old JIT reports `UnsupportedInstruction` when the target is out of the
@@ -537,7 +534,7 @@ fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
                 x64asm!(out
                     ; push RTEMP
                     ; mov WTEMP, DWORD REL32_IMM
-                    ;; invoke_support(out, out.supports().v0_callx.unwrap())
+                    ;; invoke_support(out, out.supports().v0_callx)
                     ; pop RTEMP
                 );
             } else {
@@ -734,7 +731,7 @@ impl<'a> JITGenerator<'a> {
             template,
             opcode,
             relocs: LabelRelocs::new(),
-            supports: &interpreter(version).1,
+            supports: SupportingCode::get(),
         }
     }
 
@@ -920,7 +917,7 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
 /// `version`.
 fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
     let offset = InterpreterGenerator::step_offset(opcode);
-    unsafe { interpreter(version).0.buffer.add(offset) }
+    unsafe { interpreter(version).buffer.add(offset) }
 }
 
 struct Interpreter {
@@ -938,7 +935,7 @@ unsafe impl Sync for Interpreter {}
 struct InterpreterGenerator {
     buffer: *mut u8,
     relocs: LabelRelocs<SimpleRelocation>,
-    supports: SupportingCode,
+    supports: &'static SupportingCode,
     offset: usize,
     version: SBPFVersion,
     /// Of the step being generated.
@@ -952,7 +949,6 @@ struct InterpreterGenerator {
 impl InterpreterGenerator {
     const STEP_SIZE_LOG2: u8 = 7; // 128 bytes
     const STEP_TABLE_SIZE: usize = 0x1_0000 * (1 << Self::STEP_SIZE_LOG2);
-    const STEPS_SIZE: usize = Self::STEP_TABLE_SIZE + SupportingCode::LEN;
 
     /// Offset into the `buffer` for this opcode.
     fn step_offset(opcode: TemplateOpcode) -> usize {
@@ -960,32 +956,17 @@ impl InterpreterGenerator {
     }
 
     fn new(version: SBPFVersion) -> Self {
-        unsafe {
-            // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
-            let buffer = allocate_pages_low(Self::STEPS_SIZE)
-                .expect("failed to allocate memory for the interpreter");
-            let mut this = Self {
-                version,
-                buffer,
-                relocs: LabelRelocs::new(),
-                offset: 0,
-                opcode: TemplateOpcode(0),
-                terminal: false,
-                supports: SupportingCode {
-                    call_internal: std::ptr::null(),
-                    syscall: std::ptr::null(),
-                    v0_call_imm: None,
-                    v0_callx: None,
-                    memory_access: [[std::ptr::null(); 4]; 3],
-                    entry_point: std::ptr::null(),
-                    divide: [[[std::ptr::null(); Reg::COUNT]; Reg::COUNT]; 4],
-                },
-            };
-            this.offset = Self::STEP_TABLE_SIZE;
-            let supporting_code = SupportingCode::generate_into(&mut this);
-            this.offset = 0;
-            this.supports = supporting_code;
-            this
+        // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
+        let buffer = unsafe { allocate_pages_low(Self::STEP_TABLE_SIZE) }
+            .expect("failed to allocate memory for the interpreter");
+        Self {
+            version,
+            buffer,
+            relocs: LabelRelocs::new(),
+            offset: 0,
+            opcode: TemplateOpcode(0),
+            terminal: false,
+            supports: SupportingCode::get(),
         }
     }
 }
@@ -995,13 +976,10 @@ impl X64Generator for InterpreterGenerator {
 
     fn extend(&mut self, buffer: &[u8]) {
         assert!(!self.terminal);
-        assert!(self.offset.saturating_add(buffer.len()) < InterpreterGenerator::STEPS_SIZE);
-        // `SupportingCode` lives past the dispatch table and isn't split into steps.
-        if self.offset < Self::STEP_TABLE_SIZE {
-            let step_capacity = 1 << Self::STEP_SIZE_LOG2;
-            let remaining_capacity = step_capacity - self.offset % step_capacity;
-            assert!(buffer.len() <= remaining_capacity, "step is too long!");
-        }
+        let step_capacity = 1 << Self::STEP_SIZE_LOG2;
+        let remaining_capacity = step_capacity - self.offset % step_capacity;
+        assert!(buffer.len() <= remaining_capacity, "step is too long!");
+        assert!(self.offset.saturating_add(buffer.len()) <= Self::STEP_TABLE_SIZE);
         unsafe {
             std::ptr::copy_nonoverlapping(
                 buffer.as_ptr(),
@@ -1072,7 +1050,7 @@ impl X64Generator for InterpreterGenerator {
     }
 
     fn supports(&self) -> &SupportingCode {
-        &self.supports
+        self.supports
     }
 
     fn bpf_taken_branch(&mut self) {
@@ -1088,7 +1066,7 @@ impl X64Generator for InterpreterGenerator {
     }
 }
 
-static INTERPRETERS: [LazyLock<(Interpreter, SupportingCode)>; 5] = [
+static INTERPRETERS: [LazyLock<Interpreter>; 5] = [
     LazyLock::new(|| generate_interpreter(SBPFVersion::V0)),
     LazyLock::new(|| panic!("dynasm for v1 unlikely to be implemented")),
     LazyLock::new(|| panic!("dynasm for v2 unlikely to be implemented")),
@@ -1096,12 +1074,12 @@ static INTERPRETERS: [LazyLock<(Interpreter, SupportingCode)>; 5] = [
     LazyLock::new(|| generate_interpreter(SBPFVersion::V4)),
 ];
 
-/// The interpreter and the supporting code for the SBPF `version`.
-fn interpreter(version: SBPFVersion) -> &'static (Interpreter, SupportingCode) {
+/// The interpreter for the SBPF `version`.
+fn interpreter(version: SBPFVersion) -> &'static Interpreter {
     &INTERPRETERS[version as usize]
 }
 
-fn generate_interpreter(version: SBPFVersion) -> (Interpreter, SupportingCode) {
+fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     let mut generator = InterpreterGenerator::new(version);
     let base_addr = i32::try_from(generator.buffer as usize).expect("interpreter in first 2GB");
     for opcode in TemplateOpcode::all() {
@@ -1146,7 +1124,7 @@ fn generate_interpreter(version: SBPFVersion) -> (Interpreter, SupportingCode) {
     }
 
     let buffer = unsafe {
-        std::slice::from_raw_parts_mut(generator.buffer, InterpreterGenerator::STEPS_SIZE)
+        std::slice::from_raw_parts_mut(generator.buffer, InterpreterGenerator::STEP_TABLE_SIZE)
     };
     generator.relocs.resolve(buffer, Some(base_addr as usize));
 
@@ -1157,23 +1135,20 @@ fn generate_interpreter(version: SBPFVersion) -> (Interpreter, SupportingCode) {
     super::write_perf_jitdump(
         &format!("interpreter {:?}", version),
         generator.buffer,
-        InterpreterGenerator::STEPS_SIZE,
+        InterpreterGenerator::STEP_TABLE_SIZE,
         62,
     );
     unsafe {
         protect_pages(
             generator.buffer,
-            InterpreterGenerator::STEPS_SIZE,
+            InterpreterGenerator::STEP_TABLE_SIZE,
             PagePermissions::ReadExecute,
         )
     }
     .expect("failed to make the interpreter executable");
-    (
-        Interpreter {
-            buffer: generator.buffer,
-        },
-        generator.supports,
-    )
+    Interpreter {
+        buffer: generator.buffer,
+    }
 }
 
 /// The state of an execution. `SupportingCode::entry_point` copies it right below its frame
@@ -1196,8 +1171,8 @@ struct Frame {
     /// For the JIT output: offset in `jit_text_section` of the machine code for each instruction
     /// of `text_section`. Null for the interpreter.
     jit_pc_section: *const u32,
-    /// For the JIT output: the machine code being executed.
-    jit_text_section: *const u8,
+    /// Code being executed. For JIT the generated machine code, for interpreter the steps base.
+    code: *const u8,
     /// See `supporting_code::call_dispatcher`.
     call_dispatcher: *const u8,
     /// The `FunctionRegistry<usize>` of the executable, for the dispatcher of SBPFv0.
@@ -1221,7 +1196,7 @@ pub fn enter<C: crate::vm::ContextObject>(
     let version = executable.get_sbpf_version();
     let (bpf_vm_addr, bpf) = executable.get_text_bytes();
     let pc = vm.registers[11] as usize;
-    let (start_addr, insn, jit_pc_section, jit_text_section) = match jit {
+    let (start_addr, insn, jit_pc_section, code) = match jit {
         Some((pc_section, text_section)) => (
             text_section as usize + pc_section[pc] as usize,
             bpf.as_ptr().wrapping_add(ebpf::INSN_SIZE),
@@ -1235,11 +1210,11 @@ pub fn enter<C: crate::vm::ContextObject>(
                 interpreter_step(version, opcode) as usize,
                 bpf.as_ptr().wrapping_add((pc + 1) * ebpf::INSN_SIZE),
                 std::ptr::null(),
-                std::ptr::null(),
+                interpreter(version).buffer.cast_const(),
             )
         }
     };
-    let entry_point = interpreter(version).1.entry_point;
+    let entry_point = SupportingCode::get().entry_point;
     let config = executable.get_config();
     assert!(
         config.enable_instruction_meter,
@@ -1258,7 +1233,7 @@ pub fn enter<C: crate::vm::ContextObject>(
         text_section_limit: bpf.as_ptr_range().end,
         text_section_host_to_vm: bpf_vm_addr.wrapping_sub(bpf.as_ptr() as u64),
         jit_pc_section,
-        jit_text_section,
+        code,
         call_dispatcher: supporting_code::call_dispatcher::<C>(version),
         function_registry: std::ptr::from_ref(executable.get_function_registry()).cast(),
         calls_remaining: max_call_depth as u64,

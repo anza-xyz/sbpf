@@ -1,7 +1,9 @@
-//! Code shared by the JIT and the interpreter, generated once into the interpreter's buffer, and
-//! the host functions it calls into.
+//! Code shared by the JIT and the interpreters of all SBPF versions, generated once into its own
+//! executable memory, and the host functions it calls into.
 
 use super::*;
+use dynasmrt::x64::X64Relocation;
+use dynasmrt::{DynasmApi, DynasmLabelApi, VecAssembler};
 
 pub(super) struct SupportingCode {
     /// Internal call trampoline, invoked (see `invoke_support`) with the host address of the
@@ -13,12 +15,11 @@ pub(super) struct SupportingCode {
     pub(super) syscall: *const u8,
     /// For SBPFv0 `CALL_IMM`, which is a syscall or an internal call depending on the immediate:
     /// invoked like `call_internal` is, only with the immediate in `temp`. It performs a syscall
-    /// itself, and tail calls `call_internal` otherwise. `None` for the other versions.
-    pub(super) v0_call_imm: Option<*const u8>,
+    /// itself, and tail calls `call_internal` otherwise.
+    pub(super) v0_call_imm: *const u8,
     /// For SBPFv0 `CALL_REG`, which takes the register from the immediate: invoked like
     /// `call_internal` is, only with the number of the register in `temp`, and tail calls it.
-    /// `None` for the other versions.
-    pub(super) v0_callx: Option<*const u8>,
+    pub(super) v0_callx: *const u8,
     /// Memory access helpers, by `MemoryAccessKind` and log2 of the access size. See
     /// `SupportingCode::memory_access`.
     pub(super) memory_access: [[*const u8; 4]; 3],
@@ -30,9 +31,19 @@ pub(super) struct SupportingCode {
 unsafe impl Send for SupportingCode {}
 unsafe impl Sync for SupportingCode {}
 
+type Asm = VecAssembler<X64Relocation>;
+
+/// The supporting code of all SBPF versions, which the JIT output and the interpreters of all of
+/// them share.
+static SUPPORTING_CODE: LazyLock<SupportingCode> = LazyLock::new(SupportingCode::generate);
+
 impl SupportingCode {
-    /// Buffer space needed to generate this supporting code.
-    pub(super) const LEN: usize = 64 * 1024;
+    /// Size of the executable memory the supporting code is generated into.
+    const LEN: usize = 64 * 1024;
+
+    pub(super) fn get() -> &'static SupportingCode {
+        &SUPPORTING_CODE
+    }
 
     /// Helper performing the division in place on the registers `dst` and `src`. Expects the
     /// address of the instruction following the division in `temp`.
@@ -40,34 +51,50 @@ impl SupportingCode {
         self.divide[is_div as usize | (is_64 as usize) << 1][dst.0 as usize][src.0 as usize]
     }
 
-    // FIXME: use an independent generator for the supports, so that a regular dynasm assembler with
-    // full relocation support can be used, for easier code authoring (e.g. `jump_to` and the
-    // addresses of other supports would not need special handling.)
-    pub(super) fn generate_into(out: &mut InterpreterGenerator) -> SupportingCode {
-        let call_internal = Self::call_internal(out);
-        let (v0_call_imm, v0_callx) = if out.version().static_syscalls() {
-            (None, None)
-        } else {
-            (
-                Some(Self::v0_call_imm(out, call_internal)),
-                Some(Self::callx_target(out, call_internal)),
-            )
-        };
-        Self {
-            call_internal,
-            syscall: Self::syscall(out),
-            v0_call_imm,
-            v0_callx,
-            memory_access: Self::memory_accesses(out),
-            entry_point: Self::entry_point(out),
-            divide: Self::divides(out),
+    fn generate() -> SupportingCode {
+        // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
+        let buffer = unsafe { allocate_pages_low(Self::LEN) }
+            .expect("failed to allocate memory for the supporting code");
+        let (supports, code) = Self::assemble(buffer as usize);
+        assert!(code.len() <= Self::LEN, "supporting code is too long!");
+        unsafe {
+            std::ptr::copy_nonoverlapping(code.as_ptr(), buffer, code.len());
+            #[cfg(feature = "codegen_debug")]
+            std::fs::write("supporting-code.bin", &code).unwrap();
+            #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
+            // EM_X86_64
+            super::super::write_perf_jitdump("supporting code", buffer, code.len(), 62);
+            protect_pages(buffer, Self::LEN, PagePermissions::ReadExecute)
         }
+        .expect("failed to make the supporting code executable");
+        supports
     }
 
-    fn call_internal(out: &mut InterpreterGenerator) -> *const u8 {
+    /// Assemble the supporting code to run from the address `base`.
+    fn assemble(base: usize) -> (SupportingCode, Vec<u8>) {
+        let mut out = Asm::new(base);
+        let call_internal_label = out.new_dynamic_label();
+        let call_internal = Self::call_internal(&mut out, base, call_internal_label);
+        let supports = Self {
+            call_internal,
+            v0_call_imm: Self::v0_call_imm(&mut out, base, call_internal_label),
+            v0_callx: Self::callx_target(&mut out, base, call_internal_label),
+            syscall: Self::syscall(&mut out, base),
+            memory_access: Self::memory_accesses(&mut out, base),
+            entry_point: Self::entry_point(&mut out, base),
+            divide: Self::divides(&mut out, base),
+        };
+        let code = out
+            .finalize()
+            .expect("failed to resolve the supporting code");
+        (supports, code)
+    }
+
+    fn call_internal(out: &mut Asm, base: usize, label: DynamicLabel) -> *const u8 {
         // `[rsp + 32]` is the address of the instruction following the call, once `insn` and the
         // target are pushed.
-        let start = unsafe { out.buffer.add(out.offset()) };
+        let start = address(out, base);
+        x64asm!(out; =>label);
         let within_depth = out.new_dynamic_label();
         let in_bounds = out.new_dynamic_label();
         x64asm!(out
@@ -76,7 +103,7 @@ impl SupportingCode {
             ; push RINSN
             ; push RTEMP
             ; mov RTEMP, [rsp + 32]
-            ;; bpf_validate_meter(out)
+            ;; validate_meter(out)
             // FIXME: with `max_call_depth = 0` this wraps around and the depth is never exceeded,
             // whereas the old JIT raises `CallDepthExceeded` at the first call and the old
             // interpreter panics.
@@ -96,7 +123,6 @@ impl SupportingCode {
 
         // In the JIT, the machine code to call is found via `jit_pc_section`. Otherwise this is the
         // interpreter, and `insn` needs to point past the target instead.
-        let base_addr = i32::try_from(out.buffer as usize).expect("interpreter in first 2GB");
         let translated = out.new_dynamic_label();
         let resolved = out.new_dynamic_label();
         x64asm!(out
@@ -109,17 +135,16 @@ impl SupportingCode {
             ; shr RTEMP, 1
             ; add RTEMP, rbp => Frame[BYTE -1].jit_pc_section
             ; mov WTEMP, [RTEMP]
-            ; add RTEMP, rbp => Frame[BYTE -1].jit_text_section
             ; jmp =>resolved
             ; =>translated
             ; lea RINSN, [RTEMP + 8]
             ; movzx RTEMP, WORD [RTEMP]
             ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
-            ; lea RTEMP, [ DWORD base_addr + RTEMP ]
         );
-        // `temp` is the code to call, `[rsp]` the target instruction.
+        // `temp` is the offset within `code` to call, `[rsp]` the target instruction.
         x64asm!(out
             ; =>resolved
+            ; add RTEMP, rbp => Frame[BYTE -1].code
             // Like a taken branch, from the instruction following the call to the target.
             ; add RMETER, [rsp]
             ; sub RMETER, [rsp + 32]
@@ -152,25 +177,26 @@ impl SupportingCode {
     }
 
     /// The helpers by `MemoryAccessKind` and log2 of the access size.
-    fn memory_accesses(out: &mut InterpreterGenerator) -> [[*const u8; 4]; 3] {
+    fn memory_accesses(out: &mut Asm, base: usize) -> [[*const u8; 4]; 3] {
         let kinds = [
             MemoryAccessKind::Load,
             MemoryAccessKind::StoreImm,
             MemoryAccessKind::StoreReg,
         ];
-        kinds.map(|kind| std::array::from_fn(|size_log2| Self::memory_access(out, kind, size_log2)))
+        kinds.map(|kind| {
+            std::array::from_fn(|size_log2| Self::memory_access(out, base, kind, size_log2))
+        })
     }
 
     /// The helpers for `divide`.
-    fn divides(out: &mut InterpreterGenerator) -> [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4] {
+    fn divides(out: &mut Asm, base: usize) -> [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4] {
         let mut divide = [[[std::ptr::null(); Reg::COUNT]; Reg::COUNT]; 4];
         for is_div in [false, true] {
             for is_64 in [false, true] {
                 let kind = &mut divide[is_div as usize | (is_64 as usize) << 1];
                 for dst in Reg::ALL {
                     for src in Reg::ALL {
-                        kind[dst.0 as usize][src.0 as usize] =
-                            unsafe { out.buffer.add(out.offset()) };
+                        kind[dst.0 as usize][src.0 as usize] = address(out, base);
                         Self::div_mod(out, is_div, is_64, dst, src);
                     }
                 }
@@ -179,10 +205,10 @@ impl SupportingCode {
         divide
     }
 
-    fn entry_point(out: &mut InterpreterGenerator) -> *const u8 {
+    fn entry_point(out: &mut Asm, base: usize) -> *const u8 {
         // Expects `rsi` to point at the `Frame`, and `RINSN` and `RMETER` to be initialized to
         // their namesakes.
-        let start = unsafe { out.buffer.add(out.offset()) };
+        let start = address(out, base);
         let after_dispatch = out.new_dynamic_label();
         let frame_size = std::mem::size_of::<Frame>();
         x64asm!(out
@@ -222,15 +248,15 @@ impl SupportingCode {
     }
 
     /// SBPFv0 `CALL_IMM`: the immediate is the key of either a syscall or an internal function.
-    fn v0_call_imm(out: &mut InterpreterGenerator, call_internal: *const u8) -> *const u8 {
-        let start = unsafe { out.buffer.add(out.offset()) };
+    fn v0_call_imm(out: &mut Asm, base: usize, call_internal: DynamicLabel) -> *const u8 {
+        let start = address(out, base);
         let (within_budget, not_internal, failed) = (
             out.new_dynamic_label(),
             out.new_dynamic_label(),
             out.new_dynamic_label(),
         );
         x64asm!(out
-            // `bpf_validate_meter`, with the address of the next instruction below the return
+            // `validate_meter`, with the address of the next instruction below the return
             // address and `invoke_support`'s target, as `temp` has the key.
             ; cmp [rsp + 16], RMETER
             ; jbe BYTE =>within_budget
@@ -267,7 +293,7 @@ impl SupportingCode {
             ; add rdx, rbp => Frame[BYTE -1].text_section
             ; mov [rsp + 8], rdx
             ;; restore_from_sysv64_call(out)
-            ;; jump_to(out, call_internal)
+            ; jmp =>call_internal
             ; =>not_internal
             // As in `syscall`, `rdx` is the budget remaining.
             ;; const { assert!(SYSV64_PUSHED >> RTEMP == 1 | 1 << (RMETER - RTEMP)) }
@@ -286,25 +312,25 @@ impl SupportingCode {
     }
 
     /// SBPFv0 `CALL_REG`: the immediate is the number of the register with the target.
-    fn callx_target(out: &mut InterpreterGenerator, call_internal: *const u8) -> *const u8 {
+    fn callx_target(out: &mut Asm, base: usize, call_internal: DynamicLabel) -> *const u8 {
         // Each register's code takes the same space, which is what `lea` can scale by.
         const STUB_SIZE: usize = 8;
         let common = out.new_dynamic_label();
-        let stubs = unsafe { out.buffer.add(out.offset()) };
+        let stubs = address(out, base);
         for &reg in &GPREG_MAP {
-            let stub_start = out.offset();
+            let stub_start = out.offset().0;
             x64asm!(out
                 ; mov RTEMP, Rq(reg)
                 ; jmp =>common
             );
-            assert_eq!(out.offset() - stub_start, STUB_SIZE);
+            assert_eq!(out.offset().0 - stub_start, STUB_SIZE);
         }
         x64asm!(out
             ; =>common
             ; sub RTEMP, rbp => Frame[BYTE -1].text_section_host_to_vm
-            ;; jump_to(out, call_internal)
+            ; jmp =>call_internal
         );
-        let start = unsafe { out.buffer.add(out.offset()) };
+        let start = address(out, base);
         let invalid = out.new_dynamic_label();
         let stubs = i32::try_from(stubs as usize).expect("supports in the first 2 GiB");
         x64asm!(out
@@ -315,15 +341,15 @@ impl SupportingCode {
             ; =>invalid
             // `invoke_support`'s target and the return address are on top.
             ; mov RTEMP, [rsp + 16]
-            ;; bpf_validate_meter(out)
+            ;; validate_meter(out)
             ;; terminate(out, SIG_INVALID_INSN)
         );
         start
     }
 
-    fn syscall(out: &mut InterpreterGenerator) -> *const u8 {
-        let start = unsafe { out.buffer.add(out.offset()) };
-        bpf_validate_meter(out);
+    fn syscall(out: &mut Asm, base: usize) -> *const u8 {
+        let start = address(out, base);
+        validate_meter(out);
         // `vm.invoke_function` takes the arguments from `vm.registers`, where
         // `clobber_for_sysv64_call` spills them.
         let pushed = clobber_for_sysv64_call(out);
@@ -366,11 +392,12 @@ impl SupportingCode {
     /// Expects the base address and, for `MemoryAccessKind::StoreReg`, the value to store pushed
     /// (in that order.) Loads replace the base address with the loaded value.
     fn memory_access(
-        out: &mut InterpreterGenerator,
+        out: &mut Asm,
+        base: usize,
         kind: MemoryAccessKind,
         size_log2: usize,
     ) -> *const u8 {
-        let start = unsafe { out.buffer.add(out.offset()) };
+        let start = address(out, base);
         let function = match (kind, size_log2) {
             (MemoryAccessKind::Load, 0) => load::<u8> as *const u8,
             (MemoryAccessKind::Load, 1) => load::<u16> as *const u8,
@@ -431,13 +458,13 @@ impl SupportingCode {
             ; ret
             ; =>failed
             // Running out of budget takes precedence over the error.
-            ;; bpf_validate_meter(out)
+            ;; validate_meter(out)
             ;; terminate(out, SIG_PROGRAM_RESULT)
         );
         start
     }
 
-    fn div_mod(out: &mut InterpreterGenerator, is_div: bool, is_64: bool, dst: Reg, src: Reg) {
+    fn div_mod(out: &mut Asm, is_div: bool, is_64: bool, dst: Reg, src: Reg) {
         if is_64 {
             x64asm!(out; test Rq(src), Rq(src));
         } else {
@@ -446,7 +473,7 @@ impl SupportingCode {
         let non_zero = out.new_dynamic_label();
         x64asm!(out
             ; jnz =>non_zero
-            ;; bpf_validate_meter(out)
+            ;; validate_meter(out)
             ;; terminate(out, SIG_DIVIDE_BY_ZERO)
             ; =>non_zero
             ; mov RTEMP, Rq(src)
@@ -499,12 +526,31 @@ const SYSV64_CLOBBERED: u16 = reg_mask(&[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R
 /// The registers `clobber_for_sysv64_call` pushes, rather than spills into `vm.registers`.
 const SYSV64_PUSHED: u16 = SYSV64_CLOBBERED & !reg_mask(&GPREG_MAP);
 
-/// Jump to `target`, which is also in the buffer.
-fn jump_to(out: &mut InterpreterGenerator, target: *const u8) {
-    const JMP_SIZE: isize = 5;
-    let next = out.buffer as isize + out.offset() as isize + JMP_SIZE;
-    let displacement = i32::try_from(target as isize - next).unwrap();
-    x64asm!(out; jmp displacement);
+/// Where the code generated next in `out`, based at `base`, is going to run from.
+fn address(out: &Asm, base: usize) -> *const u8 {
+    base.wrapping_add(out.offset().0) as *const u8
+}
+
+/// Like the JIT templates' `terminate`.
+fn terminate(out: &mut Asm, code: i8) {
+    if code != SIG_EXCEEDED_MAX_INSTRUCTIONS {
+        x64asm!(out; sub RMETER, RTEMP);
+    }
+    x64asm!(out
+        ; mov BTEMP, code
+        ; jmp QWORD rbp => Frame[BYTE -1].exit
+    );
+}
+
+/// Like the JIT templates' `bpf_validate_meter`.
+fn validate_meter(out: &mut Asm) {
+    let within_budget = out.new_dynamic_label();
+    x64asm!(out
+        ; cmp RTEMP, RMETER
+        ; jbe BYTE =>within_budget
+        ;; terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS)
+        ; =>within_budget
+    );
 }
 
 /// Save the registers that a `sysv64` host function call would clobber: the rest are pushed in
@@ -513,7 +559,7 @@ fn jump_to(out: &mut InterpreterGenerator, target: *const u8) {
 ///
 /// Returns the number of bytes pushed. The stack is not aligned for the call, see
 /// `sysv64_call_needs_stack_alignment`. Does not touch the flags.
-fn clobber_for_sysv64_call(out: &mut InterpreterGenerator) -> i32 {
+fn clobber_for_sysv64_call(out: &mut Asm) -> i32 {
     for reg in 0..16 {
         if SYSV64_PUSHED & 1 << reg != 0 {
             x64asm!(out; push Rq(reg));
@@ -536,7 +582,7 @@ const fn sysv64_call_needs_stack_alignment(pushed: i32) -> bool {
 }
 
 /// Trap if the stack is not aligned for a host function call.
-fn debug_assert_sysv64_call_stack_alignment(out: &mut InterpreterGenerator) {
+fn debug_assert_sysv64_call_stack_alignment(out: &mut Asm) {
     #[cfg(feature = "codegen_debug")]
     {
         let aligned = out.new_dynamic_label();
@@ -552,7 +598,7 @@ fn debug_assert_sysv64_call_stack_alignment(out: &mut InterpreterGenerator) {
 }
 
 /// Restore the registers saved by `clobber_for_sysv64_call`. Does not touch the flags.
-fn restore_from_sysv64_call(out: &mut InterpreterGenerator) {
+fn restore_from_sysv64_call(out: &mut Asm) {
     x64asm!(out; mov rax, rbp => Frame[BYTE -1].vm);
     for (i, &reg) in GPREG_MAP.iter().enumerate() {
         if SYSV64_CLOBBERED & 1 << reg != 0 {
@@ -719,5 +765,49 @@ fn invoke_syscall<C: crate::vm::ContextObject>(
     HostCallResult {
         value: vm.previous_instruction_meter,
         is_err,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn contains_address(code: &[u8], address: *const u8) -> bool {
+        let push = [&[0x68][..], &(address as u32).to_le_bytes()].concat();
+        code.windows(push.len()).any(|window| window == push)
+    }
+
+    fn template_opcode(op: u8, dst: u8, src: u8) -> TemplateOpcode {
+        TemplateOpcode(op as u16 | (dst as u16) << 8 | (src as u16) << 12)
+    }
+
+    #[test]
+    fn shared_by_all_versions() {
+        let supports = SupportingCode::get();
+        let divide = template_opcode(ebpf::DIV64_REG, 1, 2);
+        let call_imm = template_opcode(ebpf::CALL_IMM, 0, 0);
+        let divide_helper = supports.divide(true, true, Reg(1), Reg(2));
+        for (version, call_imm_helper) in [
+            (SBPFVersion::V0, supports.v0_call_imm),
+            (SBPFVersion::V3, supports.syscall),
+            (SBPFVersion::V4, supports.syscall),
+        ] {
+            let templates = jit_templates(version);
+            let template = |opcode: TemplateOpcode| {
+                let len = templates.insn_layout(opcode).len();
+                &templates.code[opcode.index()][..len]
+            };
+            assert!(contains_address(template(divide), divide_helper));
+            assert!(contains_address(template(call_imm), call_imm_helper));
+
+            let step = |opcode| unsafe {
+                std::slice::from_raw_parts(
+                    interpreter_step(version, opcode),
+                    1 << InterpreterGenerator::STEP_SIZE_LOG2,
+                )
+            };
+            assert!(contains_address(step(divide), divide_helper));
+            assert!(contains_address(step(call_imm), call_imm_helper));
+        }
     }
 }
