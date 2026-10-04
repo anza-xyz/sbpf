@@ -1337,6 +1337,8 @@ pub fn enter<C: crate::vm::ContextObject>(
             lateout("r13") _,
             lateout("r14") _,
             lateout("r15") _,
+            lateout("xmm0") _,
+            lateout("xmm1") _,
         );
     }
     finish_execution(vm, code as i8, remaining);
