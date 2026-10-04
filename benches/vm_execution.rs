@@ -59,6 +59,24 @@ fn bench_backends(
     {
         executable.jit_compile().unwrap();
         bench("jit", ExecutionMode::Jit, &mut []);
+        if !matches!(
+            executable.get_sbpf_version(),
+            SBPFVersion::V1 | SBPFVersion::V2
+        ) {
+            executable.dynasm_compile().unwrap();
+            bench("dynasm_jit", ExecutionMode::Jit, &mut []);
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    if !matches!(
+        executable.get_sbpf_version(),
+        SBPFVersion::V1 | SBPFVersion::V2
+    ) {
+        bench(
+            "dynasm_interpreter",
+            ExecutionMode::DynasmInterpreted,
+            &mut call_frames,
+        );
     }
     group.finish();
 }
