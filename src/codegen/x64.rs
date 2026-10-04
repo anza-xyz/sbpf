@@ -4,6 +4,7 @@ use dynasmrt::relocations::SimpleRelocation;
 use dynasmrt::DynamicLabel;
 
 use super::*;
+use crate::memory_management::{allocate_pages_low, protect_pages, PagePermissions};
 use crate::vm::RuntimeEnvironmentSlot;
 use std::convert::TryFrom;
 use std::sync::LazyLock;
@@ -929,64 +930,6 @@ struct Interpreter {
 unsafe impl Send for Interpreter {}
 unsafe impl Sync for Interpreter {}
 
-/// Memory for the interpreter, which is addressed with absolute 32-bit addresses, so it has to be
-/// within the first 2 GiB of the address space.
-#[cfg(target_os = "linux")]
-mod maps {
-    /// Read-write, until `make_exec`. With `codegen_debug`, backed by the file `interpreter-{name}.bin`
-    /// to inspect.
-    pub(super) unsafe fn map(len: usize, name: &str) -> *mut u8 {
-        #[cfg(not(feature = "codegen_debug"))]
-        let _ = name;
-        #[cfg(feature = "codegen_debug")]
-        let file = {
-            let file = std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(true)
-                .open(format!("interpreter-{name}.bin"))
-                .unwrap();
-            file.set_len(len as u64).unwrap();
-            file
-        };
-        #[cfg(feature = "codegen_debug")]
-        let (flags, fd) = (libc::MAP_SHARED, std::os::fd::AsRawFd::as_raw_fd(&file));
-        #[cfg(not(feature = "codegen_debug"))]
-        let (flags, fd) = (libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1);
-        let buffer = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                len,
-                libc::PROT_READ | libc::PROT_WRITE,
-                flags | libc::MAP_32BIT,
-                fd,
-                0,
-            )
-        };
-        if buffer == libc::MAP_FAILED {
-            panic!("libc::mmap failed to allocate executable memory for the interpreter");
-        }
-        buffer.cast()
-    }
-
-    pub(super) unsafe fn make_exec(buffer: *mut u8, len: usize) {
-        unsafe { libc::mprotect(buffer.cast(), len, libc::PROT_READ | libc::PROT_EXEC) };
-    }
-}
-
-// TODO: e.g. `VirtualAlloc` with an address hint on Windows.
-#[cfg(not(target_os = "linux"))]
-mod maps {
-    pub(super) unsafe fn map(_len: usize, _name: &str) -> *mut u8 {
-        unimplemented!("allocating memory within the first 2 GiB on this OS")
-    }
-
-    pub(super) unsafe fn make_exec(_buffer: *mut u8, _len: usize) {
-        unreachable!()
-    }
-}
-
 /// Generates the interpreter.
 ///
 /// This interpreter uses a dispatch table with one step of `1 << STEP_SIZE_LOG2` bytes per
@@ -1018,7 +961,9 @@ impl InterpreterGenerator {
 
     fn new(version: SBPFVersion) -> Self {
         unsafe {
-            let buffer = maps::map(Self::STEPS_SIZE, &format!("{:?}", version));
+            // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
+            let buffer = allocate_pages_low(Self::STEPS_SIZE)
+                .expect("failed to allocate memory for the interpreter");
             let mut this = Self {
                 version,
                 buffer,
@@ -1205,6 +1150,8 @@ fn generate_interpreter(version: SBPFVersion) -> (Interpreter, SupportingCode) {
     };
     generator.relocs.resolve(buffer, Some(base_addr as usize));
 
+    #[cfg(feature = "codegen_debug")]
+    std::fs::write(format!("interpreter-{:?}.bin", version), &*buffer).unwrap();
     #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
     // EM_X86_64
     super::write_perf_jitdump(
@@ -1213,7 +1160,14 @@ fn generate_interpreter(version: SBPFVersion) -> (Interpreter, SupportingCode) {
         InterpreterGenerator::STEPS_SIZE,
         62,
     );
-    unsafe { maps::make_exec(generator.buffer, InterpreterGenerator::STEPS_SIZE) };
+    unsafe {
+        protect_pages(
+            generator.buffer,
+            InterpreterGenerator::STEPS_SIZE,
+            PagePermissions::ReadExecute,
+        )
+    }
+    .expect("failed to make the interpreter executable");
     (
         Interpreter {
             buffer: generator.buffer,

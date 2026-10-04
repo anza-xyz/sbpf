@@ -11,6 +11,10 @@ pub mod x64;
 use crate::ebpf;
 use crate::elf::Executable;
 use crate::error::{EbpfError, ProgramResult};
+use crate::memory_management::{
+    allocate_pages_pooled, free_pages_pooled, get_system_page_size, protect_pages,
+    round_to_page_size, PagePermissions,
+};
 use crate::program::SBPFVersion;
 use crate::vm::{ContextObject, EbpfVm};
 use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
@@ -19,7 +23,7 @@ use dynasmrt::{AssemblyOffset, DynamicLabel};
 use rand::rngs::SmallRng;
 use rand::{thread_rng, Rng, RngCore, SeedableRng};
 use std::convert::{TryFrom, TryInto};
-use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 
 /// Size of the instruction with the opcode `op`, in bytes.
 const fn insn_size(op: u8) -> usize {
@@ -85,16 +89,14 @@ fn finish_execution<C: ContextObject>(vm: &mut EbpfVm<C>, code: i8, meter: u64) 
 #[cfg(target_arch = "x86_64")]
 /// Compile `executable` and execute it, starting at `vm.registers[11]`.
 pub fn jit_and_run<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
-    let program = x64::jit_templates(executable.get_sbpf_version()).compile(executable);
-    let code = &program.text_section;
-    let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len())
-        .expect("failed to allocate executable memory for the JIT output");
-    buffer.set_len(code.len());
-    buffer.copy_from_slice(code);
-    let buffer = buffer
-        .make_exec()
-        .expect("failed to make the JIT output executable");
-    x64::enter(executable, Some((&program.pc_section, buffer.as_ptr())), vm)
+    let program = x64::jit_templates(executable.get_sbpf_version())
+        .compile(executable)
+        .expect("failed to compile the JIT output");
+    x64::enter(
+        executable,
+        Some((program.pc_section(), program.text_section().as_ptr())),
+        vm,
+    )
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -373,7 +375,7 @@ impl TemplateRelocation {
     #[inline(always)]
     fn apply<const SIZE: usize>(
         &self,
-        template: &mut [MaybeUninit<u8>; SIZE],
+        template: &mut [u8; SIZE],
         template_start: usize,
         pc: usize,
         insn: u64,
@@ -405,7 +407,7 @@ impl TemplateRelocation {
         // Never clamps (see `new`), but `min` elides a bounds check.
         debug_assert!(usize::from(self.field) <= SIZE - 4);
         let field = usize::from(self.field).min(SIZE - 4);
-        template[field..field + 4].write_copy_of_slice(&(value as u32).to_le_bytes());
+        template[field..field + 4].copy_from_slice(&(value as u32).to_le_bytes());
     }
 }
 
@@ -474,12 +476,93 @@ const PADDING_DUE: u32 = CHECKPOINT_DUE | NOOP_DUE;
 /// Longest run of no-ops `JitTemplates::compile` may insert at the beginning.
 const MAX_START_PADDING_LENGTH: usize = 256;
 
-/// The JIT output for a program.
+/// The JIT output for a program, in a single pooled allocation.
 pub struct JitProgram {
+    /// Size of the pooled allocation: the page-rounded `pc_section`, then the `text_section`.
+    allocation_size: usize,
     /// Offset in `text_section` for each BPF instruction.
-    pub pc_section: Vec<u32>,
+    ///
+    /// Pointers rather than `&'static` slices, so that no borrow can outlive the allocation.
+    pc_section: NonNull<[u32]>,
     /// The machine code.
-    pub text_section: Vec<u8>,
+    ///
+    /// Before `seal` this is the whole capacity of the code pages.
+    text_section: NonNull<[u8]>,
+}
+
+// SAFETY: `JitProgram` owns its allocation like a `Box<[u8]>` would, and only `compile` writes to
+// it, before the program is shared.
+unsafe impl Send for JitProgram {}
+// SAFETY: see `Send`.
+unsafe impl Sync for JitProgram {}
+
+impl JitProgram {
+    /// Offset in `text_section` for each BPF instruction.
+    pub fn pc_section(&self) -> &[u32] {
+        // SAFETY:
+        //
+        // Contract from `NonNull::as_ref`: the pointer must be convertible to a reference, and the
+        // memory not mutated while the reference lives.
+        // Evidence: `pc_section` is within the allocation, which lives as long as `self`, and is
+        // only written to through `&mut self`.
+        unsafe { self.pc_section.as_ref() }
+    }
+
+    /// The machine code, which is executable.
+    pub fn text_section(&self) -> &[u8] {
+        // SAFETY: as for `pc_section`.
+        unsafe { self.text_section.as_ref() }
+    }
+
+    /// Make the pages read-only and read-execute, with `text_section` shrunk to the `used` length.
+    fn seal(&mut self, used: usize) -> Result<(), EbpfError> {
+        let page_size = get_system_page_size();
+        let pc_size = round_to_page_size(std::mem::size_of_val(self.pc_section()), page_size);
+        let code_size = round_to_page_size(used, page_size);
+        // SAFETY:
+        //
+        // Contract from `ptr::add` and `ptr::write_bytes`: the range written must be in bounds of
+        // one allocation and valid for writes.
+        // Evidence: `used` is at most the length of `text_section`, which is page-rounded, so
+        // `used..code_size` is within it. The pages are still read-write, as nothing has protected
+        // them yet.
+        //
+        // Contract from `protect_pages`: the range must be page aligned and be owned by the caller.
+        // Evidence: the pooled allocation is page aligned and `pc_section` is at its start,
+        // followed by `text_section` at the page-rounded `pc_size`. `pc_size` and `code_size` are
+        // page-rounded and within the allocation, which `self` owns until dropped.
+        //
+        // No reference into the pages is alive, as they are only created by borrowing `self`.
+        unsafe {
+            let text = self.text_section.as_ptr().cast::<u8>();
+            // Debugger traps in the unused tail of the last code page.
+            std::ptr::write_bytes(text.add(used), 0xcc, code_size - used);
+            protect_pages(
+                self.pc_section.as_ptr().cast::<u8>(),
+                pc_size,
+                PagePermissions::Read,
+            )?;
+            protect_pages(text, code_size, PagePermissions::ReadExecute)?;
+        }
+        self.text_section = NonNull::slice_from_raw_parts(self.text_section.cast::<u8>(), used);
+        Ok(())
+    }
+}
+
+impl Drop for JitProgram {
+    fn drop(&mut self) {
+        // SAFETY:
+        //
+        // Contract from `free_pages_pooled`: the pointer and size must identify a full allocation
+        // from `allocate_pages_pooled` that is not freed yet, and no references into it may be
+        // retained.
+        // Evidence: `pc_section` starts at the allocation and `allocation_size` is what
+        // `allocate_pages_pooled` returned with it, both set only by `compile`. This is the only
+        // place freeing them, and any reference into them borrows `self`.
+        unsafe {
+            free_pages_pooled(self.pc_section.as_ptr().cast::<u8>(), self.allocation_size);
+        }
+    }
 }
 
 impl<const SIZE: usize> JitTemplates<SIZE> {
@@ -595,18 +678,54 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
     /// The result is a two pass algorithm where the first pass determines ahead of time where
     /// each instruction's machine code will be, allowing for e.g. forward jump relocations to be
     /// resolved immediately during the emission.
-    pub fn compile<C: ContextObject>(&self, executable: &Executable<C>) -> JitProgram {
+    pub fn compile<C: ContextObject>(
+        &self,
+        executable: &Executable<C>,
+    ) -> Result<JitProgram, EbpfError> {
         let (mut pc_sec, output_len, start_padding) = self.analyze(executable);
-        // Templates are always written out in large chunks to employ SIMD and avoid memcpy calls.
-        let mut text = Vec::with_capacity(output_len + SIZE);
-        self.emit_aux(&mut text, &pc_sec, 0, AuxTemplate::InvalidJumpTarget);
+        let page_size = get_system_page_size();
+        let pc_size = round_to_page_size(std::mem::size_of_val(pc_sec.as_slice()), page_size);
+        // Templates are always written out in large chunks to employ SIMD and avoid memcpy calls,
+        // so the last one may extend past the output.
+        let text_capacity = round_to_page_size(output_len.saturating_add(SIZE), page_size);
+        let (raw, allocation_size) = allocate_pages_pooled(pc_size.saturating_add(text_capacity));
+        let raw = NonNull::new(raw).expect("the pooled allocation is never null");
+        // The allocation is page aligned, and the `pc_sec.len()` words fit within `pc_size`, so the
+        // sections are aligned and disjoint.
+        //
+        // SAFETY:
+        //
+        // Contract from `NonNull::add`: the result must be in bounds of the allocation.
+        // Evidence: the allocation has `pc_size + text_capacity` bytes.
+        let mut program = JitProgram {
+            allocation_size,
+            pc_section: NonNull::slice_from_raw_parts(raw.cast::<u32>(), pc_sec.len()),
+            text_section: NonNull::slice_from_raw_parts(unsafe { raw.add(pc_size) }, text_capacity),
+        };
+
+        let mut position = 0;
+        // SAFETY:
+        //
+        // Contract from `NonNull::as_mut`: the pointer must be convertible to a reference, and the
+        // memory not accessed through other pointers while the reference lives.
+        // Evidence: the section is read-write memory of the pool, which was mmapped, thus is
+        // initialized, and a reused block still holds bytes written before. `program` hands out no
+        // other references until `text` is last used.
+        let text = unsafe { program.text_section.as_mut() };
+        self.emit_aux(
+            text,
+            &mut position,
+            &pc_sec,
+            0,
+            AuxTemplate::InvalidJumpTarget,
+        );
         for _ in 0..start_padding {
-            self.emit_aux(&mut text, &pc_sec, 0, AuxTemplate::Noop);
+            self.emit_aux(text, &mut position, &pc_sec, 0, AuxTemplate::Noop);
         }
 
         let bpf = executable.get_text_bytes().1;
-        let (program, _) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
-        let mut program_iter = program.iter().zip(&pc_sec).enumerate();
+        let (program_insns, _) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
+        let mut program_iter = program_insns.iter().zip(&pc_sec).enumerate();
         while let Some((pc, (insn, &entry))) = program_iter.next() {
             let insn = u64::from_le_bytes(*insn);
             let opcode = TemplateOpcode::of(insn);
@@ -615,24 +734,38 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             }
             if entry & PADDING_DUE != 0 {
                 if entry & NOOP_DUE != 0 {
-                    self.emit_aux(&mut text, &pc_sec, pc, AuxTemplate::Noop);
+                    self.emit_aux(text, &mut position, &pc_sec, pc, AuxTemplate::Noop);
                 }
                 if entry & CHECKPOINT_DUE != 0 {
-                    self.emit_aux(&mut text, &pc_sec, pc, AuxTemplate::MeterCheckpoint);
+                    self.emit_aux(
+                        text,
+                        &mut position,
+                        &pc_sec,
+                        pc,
+                        AuxTemplate::MeterCheckpoint,
+                    );
                 }
             }
-            self.emit(&mut text, &pc_sec, pc, insn, opcode.index());
+            self.emit(text, &mut position, &pc_sec, pc, insn, opcode.index());
         }
-        let pc = program.len();
-        self.emit_aux(&mut text, &pc_sec, pc, AuxTemplate::ExecutionOverrun);
-        debug_assert_eq!(text.len(), output_len);
+        let pc = program_insns.len();
+        self.emit_aux(
+            text,
+            &mut position,
+            &pc_sec,
+            pc,
+            AuxTemplate::ExecutionOverrun,
+        );
+        debug_assert_eq!(position, output_len);
         for entry in &mut pc_sec {
             *entry &= !PADDING_DUE;
         }
-        JitProgram {
-            pc_section: pc_sec,
-            text_section: text,
-        }
+        // The emission looks the jump targets up in the `Vec`, which is also the only place
+        // the flags are in; it is small next to the machine code, so the copy is cheap.
+        // SAFETY: as for `text_section` above.
+        unsafe { program.pc_section.as_mut() }.copy_from_slice(&pc_sec);
+        program.seal(output_len)?;
+        Ok(program)
     }
 
     fn insn_layout(&self, opcode: TemplateOpcode) -> TemplateLayout {
@@ -643,22 +776,39 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         self.layouts[template.index()]
     }
 
-    /// Append the `template` instantiated for `pc` to `text`, see `emit`.
+    /// Write the `template` instantiated for `pc` at `position` in `text`, see `emit`.
     #[inline(always)]
-    fn emit_aux(&self, text: &mut Vec<u8>, pc_section: &[u32], pc: usize, template: AuxTemplate) {
-        self.emit(text, pc_section, pc, 0, template.index());
+    fn emit_aux(
+        &self,
+        text: &mut [u8],
+        position: &mut usize,
+        pc_section: &[u32],
+        pc: usize,
+        template: AuxTemplate,
+    ) {
+        self.emit(text, position, pc_section, pc, 0, template.index());
     }
 
-    /// Append the template at `index` instantiated for the instruction `insn` at `pc` to `text`,
-    /// which must have at least `SIZE` bytes of spare capacity.
+    /// Write the template at `index` instantiated for the instruction `insn` at `pc` at `position`
+    /// in `text`, and advance `position` past it.
+    ///
+    /// `text` must have at least `SIZE` bytes from `position` on.
     #[inline(always)]
-    fn emit(&self, text: &mut Vec<u8>, pc_section: &[u32], pc: usize, insn: u64, index: usize) {
+    fn emit(
+        &self,
+        text: &mut [u8],
+        position: &mut usize,
+        pc_section: &[u32],
+        pc: usize,
+        insn: u64,
+        index: usize,
+    ) {
         let layout = self.layouts[index];
         let len = layout.len();
-        let start = text.len();
+        let start = *position;
         let out = text
-            .spare_capacity_mut()
-            .first_chunk_mut::<SIZE>()
+            .get_mut(start..)
+            .and_then(|rest| rest.first_chunk_mut::<SIZE>())
             .expect("JIT output size miscalculated!");
         // Most of the templates are short, so they only get the first (fixed size) copy. The two
         // copies are disjoint so that they do not get merged into a single variable size memcpy.
@@ -666,16 +816,15 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         const { assert!(SIZE >= SHORT) };
         let (out_short, out_rest) = out.split_at_mut(SHORT);
         let (short, rest) = self.code[index].split_at(SHORT);
-        out_short.write_copy_of_slice(short);
+        out_short.copy_from_slice(short);
         if len > SHORT {
-            out_rest.write_copy_of_slice(rest);
+            out_rest.copy_from_slice(rest);
         }
         let relocations = &self.relocations[index][..usize::from(layout.num_relocations)];
         for relocation in relocations {
             relocation.apply(out, start, pc, insn, pc_section);
         }
-        // SAFETY: just initialized at least the template's length past the end.
-        unsafe { text.set_len(start + len) };
+        *position = start.saturating_add(len);
     }
 }
 

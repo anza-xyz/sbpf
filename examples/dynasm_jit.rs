@@ -28,17 +28,14 @@ fn main() {
         FunctionRegistry::default(),
     )
     .unwrap();
-    let program = solana_sbpf::codegen::x64::jit_templates(SBPFVersion::V3).compile(&executable);
-    let code = &program.text_section;
+    let program = solana_sbpf::codegen::x64::jit_templates(SBPFVersion::V3)
+        .compile(&executable)
+        .unwrap();
+    let code = program.text_section();
     for b in code {
         print!("{:02X}", b);
     }
     println!();
-
-    let mut buffer = dynasmrt::mmap::MutableBuffer::new(code.len()).unwrap();
-    buffer.set_len(code.len());
-    buffer.copy_from_slice(code);
-    let buffer = buffer.make_exec().unwrap();
 
     let mut duration = std::time::Duration::new(0, 0);
     let iters = 500;
@@ -48,7 +45,7 @@ fn main() {
         let mut vm = EbpfVm::new(loader.clone(), SBPFVersion::V3, &mut context, 0);
         vm.previous_instruction_meter = BUDGET;
         let start = std::time::Instant::now();
-        let jit = Some((&program.pc_section[..], buffer.as_ptr()));
+        let jit = Some((program.pc_section(), code.as_ptr()));
         std::hint::black_box(solana_sbpf::codegen::x64::enter(&executable, jit, &mut vm));
         remaining = BUDGET - vm.due_insn_count;
         duration += start.elapsed();
