@@ -321,7 +321,7 @@ macro_rules! test_interpreter_and_jit {
             (ebpf::MM_INPUT_START, ebpf::MM_INPUT_START)
         };
 
-        let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter) = {
+        let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter, due_insn_count_interpreter) = {
             let mem_region = MemoryRegion::new(host_buffer, ebpf::MM_INPUT_START);
             let mut call_frames = vec![
                 solana_sbpf::vm::CallFrame::default();
@@ -347,6 +347,7 @@ macro_rules! test_interpreter_and_jit {
                 result_interpreter,
                 vm.registers[11],
                 vm.register_trace.clone(),
+                vm.due_insn_count,
             )
         };
         #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
@@ -392,6 +393,13 @@ macro_rules! test_interpreter_and_jit {
                         println!(
                             "Instruction meter of interpreter ({:?}) and JIT ({:?}) diverged",
                             instruction_count_interpreter, instruction_count_jit,
+                        );
+                        diverged = true;
+                    }
+                    if vm.due_insn_count != due_insn_count_interpreter {
+                        println!(
+                            "due_insn_count of interpreter ({}) and JIT ({}) diverged",
+                            due_insn_count_interpreter, vm.due_insn_count,
                         );
                         diverged = true;
                     }
