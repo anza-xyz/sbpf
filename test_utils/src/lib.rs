@@ -489,6 +489,18 @@ macro_rules! test_interpreter_and_jit {
                     );
                     diverged = true;
                 }
+                if address_translation && !compare_register_trace(&_trace_interpreter, &vm.register_trace) {
+                    println!("[{mode_name}] register trace diverged");
+                    let analysis = Analysis::from_executable(&$executable).unwrap();
+                    let stdout = std::io::stdout();
+                    analysis
+                        .disassemble_register_trace(&mut stdout.lock(), &_trace_interpreter)
+                        .unwrap();
+                    analysis
+                        .disassemble_register_trace(&mut stdout.lock(), &vm.register_trace)
+                        .unwrap();
+                    diverged = true;
+                }
                 assert!(!diverged, "[{}] diverged from the interpreter", mode_name);
             }
         }

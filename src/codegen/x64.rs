@@ -249,8 +249,12 @@ fn invalid_insn<G: X64Generator + ?Sized>(out: &mut G) {
 }
 
 /// Produce a template for a single (currently processed) instruction.
-// FIXME: register tracing (`feature = "tracer"`) is not implemented.
 fn bpf_insn_template<G: X64Generator + ?Sized>(out: &mut G) {
+    #[cfg(feature = "tracer")]
+    {
+        load_next_insn_addr(out);
+        invoke_support(out, out.supports().trace);
+    }
     let opcode = out.opcode();
     let op = opcode.op();
     let (Some(dst), Some(src)) = (opcode.dst(), opcode.src()) else {
@@ -706,7 +710,7 @@ fn bpf_validate_meter<G: X64Generator + ?Sized>(out: &mut G) {
     );
 }
 
-const MAX_JIT_TEMPLATE_SIZE: usize = 48;
+const MAX_JIT_TEMPLATE_SIZE: usize = if cfg!(feature = "tracer") { 64 } else { 48 };
 
 struct JITGenerator<'a> {
     version: SBPFVersion,
@@ -901,6 +905,8 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
             // `temp` the address of the instruction following the target, as
             // `load_next_insn_addr` would.
             bpf_validate_meter(generator);
+            #[cfg(feature = "tracer")]
+            invoke_support(generator, generator.supports().trace);
             terminate(generator, SIG_INVALID_INSN);
         },
     );

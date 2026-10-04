@@ -176,7 +176,8 @@ impl TemplateOpcode {
 
 /// Every template reserves this many relocations, so keep it at the maximum that any template
 /// needs (`templates_fit_max_relocations` checks both directions).
-const MAX_RELOCATIONS: usize = 3;
+/// The tracer's prelude takes another one.
+const MAX_RELOCATIONS: usize = if cfg!(feature = "tracer") { 4 } else { 3 };
 
 /// Generates a template into the parts of `JitTemplates`.
 struct TemplateBuilder<'a, const SIZE: usize> {

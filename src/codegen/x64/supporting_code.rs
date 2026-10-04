@@ -13,6 +13,11 @@ pub(super) struct SupportingCode {
     /// Syscall trampoline, invoked with the address of the instruction following the `CALL_IMM`
     /// in `temp`.
     pub(super) syscall: *const u8,
+    /// Appends the registers and the pc of the instruction preceding the address in `temp` to
+    /// `vm.register_trace`, invoked like `syscall` is. Preserves all the registers, except that
+    /// they are stored into `vm.registers` too.
+    #[cfg(feature = "tracer")]
+    pub(super) trace: *const u8,
     /// For SBPFv0 `CALL_IMM`, which is a syscall or an internal call depending on the immediate:
     /// invoked like `call_internal` is, only with the immediate in `temp`. It performs a syscall
     /// itself, and tail calls `call_internal` otherwise.
@@ -93,6 +98,8 @@ impl SupportingCode {
             v0_call_imm: Self::v0_call_imm(&mut out, base, call_internal_label),
             v0_callx: Self::callx_target(&mut out, base, call_internal_label),
             syscall: Self::syscall(&mut out, base),
+            #[cfg(feature = "tracer")]
+            trace: Self::trace(&mut out, base),
             memory_access: Self::memory_accesses(&mut out, base),
             entry_point: Self::entry_point(&mut out, base),
             divide: Self::divides(&mut out, base),
@@ -412,6 +419,45 @@ impl SupportingCode {
         start
     }
 
+    #[cfg(feature = "tracer")]
+    fn trace(out: &mut Asm, base: usize) -> *const u8 {
+        let start = address(out, base);
+        let pushed = clobber_for_sysv64_call(out);
+        // This recopies a bunch of registers that `clobber` might have already populated and that
+        // is okay.
+        for (i, &reg) in GPREG_MAP.iter().enumerate() {
+            let offset = (RuntimeEnvironmentSlot::Registers as i32)
+                .checked_add((i as i32).checked_mul(8).unwrap())
+                .unwrap();
+            x64asm!(out; mov [rax + offset], Rq(reg));
+        }
+        let pc_slot = (RuntimeEnvironmentSlot::Registers as i32)
+            .checked_add((GPREG_MAP.len() as i32).checked_mul(8).unwrap())
+            .unwrap();
+        x64asm!(out
+            // `temp` is the address of the instruction following the traced one.
+            ; sub RTEMP, rbp => Frame[BYTE -1].text_section
+            ; shr RTEMP, 3
+            ; dec RTEMP
+            ; mov [rax + pc_slot], RTEMP
+            ; mov rdi, rax
+            ; mov rax, QWORD push_register_trace as *const u8 as i64
+        );
+        let needs_stack_alignment =
+            sysv64_call_needs_stack_alignment(pushed.checked_add(16).unwrap());
+        if needs_stack_alignment {
+            x64asm!(out; sub rsp, 8);
+        }
+        debug_assert_sysv64_call_stack_alignment(out);
+        x64asm!(out; call rax);
+        if needs_stack_alignment {
+            x64asm!(out; add rsp, 8);
+        }
+        restore_from_sysv64_call(out);
+        x64asm!(out; ret);
+        start
+    }
+
     /// Expects the base address and, for `MemoryAccessKind::StoreReg`, the value to store pushed
     /// (in that order.) Loads replace the base address with the loaded value.
     fn memory_access(
@@ -677,6 +723,13 @@ impl HostCallResult {
             }
         }
     }
+}
+
+#[cfg(feature = "tracer")]
+extern "sysv64" fn push_register_trace(
+    vm: &mut crate::vm::EbpfVm<crate::static_analysis::DummyContextObject>,
+) {
+    vm.register_trace.push(vm.registers);
 }
 
 extern "sysv64" fn load<T: crate::aligned_memory::Pod + Into<u64>>(
