@@ -174,7 +174,9 @@ impl TemplateOpcode {
     }
 }
 
-const MAX_RELOCATIONS: usize = 8;
+/// Every template reserves this many relocations, so keep it at the maximum that any template
+/// needs (`templates_fit_max_relocations` checks both directions).
+const MAX_RELOCATIONS: usize = 3;
 
 /// Generates a template into the parts of `JitTemplates`.
 struct TemplateBuilder<'a, const SIZE: usize> {
@@ -189,7 +191,11 @@ impl<const SIZE: usize> TemplateBuilder<'_, SIZE> {
     }
 
     fn add_relocation(&mut self, relocation: TemplateRelocation) {
-        self.relocations[usize::from(self.layout.num_relocations)] = relocation;
+        let slot = self
+            .relocations
+            .get_mut(usize::from(self.layout.num_relocations))
+            .expect("template needs more relocations than MAX_RELOCATIONS");
+        *slot = relocation;
         self.layout.num_relocations = self.layout.num_relocations.checked_add(1).unwrap();
     }
 

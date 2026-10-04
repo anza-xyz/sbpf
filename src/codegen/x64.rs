@@ -178,17 +178,19 @@ trait X64Generator {
 
 /// Set the flags for the comparison of the 64 bit registers (or the immediate) of the conditional
 /// jump being generated.
+///
+/// `RTEMP` expected to hold address of the next BPF instruction (from `load_next_insn_addr`.)
 fn compare_64<G: X64Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
     let op = out.opcode().op();
     let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
     let is_jset = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
     match (is_imm, is_jset) {
         (true, false) => x64asm!(out
-            ; movsxd RTEMP, DWORD REL32_IMM
+            ; movsxd RTEMP, DWORD [ RTEMP - 4i8 ]
             ; cmp Rq(dst), RTEMP
         ),
         (true, true) => x64asm!(out
-            ; movsxd RTEMP, DWORD REL32_IMM
+            ; movsxd RTEMP, DWORD [ RTEMP - 4i8 ]
             ; test Rq(dst), RTEMP
         ),
         (false, false) => x64asm!(out; cmp Rq(dst), Rq(src)),
@@ -202,8 +204,8 @@ fn compare_32<G: X64Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
     let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
     let is_jset = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
     match (is_imm, is_jset) {
-        (true, false) => x64asm!(out; cmp Rd(dst), DWORD REL32_IMM),
-        (true, true) => x64asm!(out; test Rd(dst), DWORD REL32_IMM),
+        (true, false) => x64asm!(out; cmp Rd(dst), DWORD [ RTEMP - 4i8 ]),
+        (true, true) => x64asm!(out; test Rd(dst), DWORD [ RTEMP - 4i8 ]),
         (false, false) => x64asm!(out; cmp Rd(dst), Rd(src)),
         (false, true) => x64asm!(out; test Rd(dst), Rd(src)),
     }
@@ -1310,4 +1312,22 @@ pub fn enter<C: crate::vm::ContextObject>(
         );
     }
     finish_execution(vm, code as i8, remaining);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Generating the templates panics if any of them needs more than `MAX_RELOCATIONS`, but we
+    /// want this number to also be the lowest possible as well.
+    #[test]
+    fn templates_fit_max_relocations() {
+        for version in [SBPFVersion::V0, SBPFVersion::V3, SBPFVersion::V4] {
+            let templates = jit_templates(version);
+            assert!(templates
+                .layouts
+                .iter()
+                .any(|layout| usize::from(layout.num_relocations) == MAX_RELOCATIONS));
+        }
+    }
 }
