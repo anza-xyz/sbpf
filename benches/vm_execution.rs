@@ -118,14 +118,15 @@ fn bench_address_translation(c: &mut Criterion) {
     bench_assembly(
         c,
         "address_translation",
-        "
-    add64 r10, 0
-    ldxb r0, [r1]
-    add r1, 1
-    mov r0, r1
-    and r0, 0xFFFFFF
-    jlt r0, 0x20000, -5
-    exit",
+        r#"
+        add64 r10, 0
+        ldxb r0, [r1]
+        add r1, 1
+        mov r0, r1
+        and r0, 0xFFFFFF
+        jlt r0, 0x20000, -5
+        exit
+        "#,
         Config::default(),
         655362,
         &mut [0; 0x20000],
@@ -173,13 +174,14 @@ fn bench_empty_for_loop(c: &mut Criterion) {
     bench_assembly(
         c,
         "empty_for_loop",
-        "
-    add64 r10, 0
-    mov r1, r2
-    and r1, 1023
-    add r2, 1
-    jlt r2, 0x10000, -4
-    exit",
+        r#"
+        add64 r10, 0
+        mov r1, r2
+        and r1, 1023
+        add r2, 1
+        jlt r2, 0x10000, -4
+        exit
+        "#,
         Config::default(),
         262146,
         &mut [0; 0],
@@ -190,22 +192,23 @@ fn bench_call_depth_fixed(c: &mut Criterion) {
     bench_assembly(
         c,
         "call_depth_fixed",
-        "
-    mov r6, 0
-    add r6, 1
-    mov r1, 18
-    call function_foo
-    jlt r6, 1024, -4
-    exit
-    function_foo:
-    stw [r10-4], 0x11223344
-    mov r6, r1
-    jgt r6, 0, +1
-    exit
-    mov r1, r6
-    add r1, -1
-    call function_foo
-    exit",
+        r#"
+        mov r6, 0
+        add r6, 1
+        mov r1, 18
+        call function_foo
+        jlt r6, 1024, -4
+        exit
+        function_foo:
+        stw [r10-4], 0x11223344
+        mov r6, r1
+        jgt r6, 0, +1
+        exit
+        mov r1, r6
+        add r1, -1
+        call function_foo
+        exit
+        "#,
         Config {
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
             ..Config::default()
@@ -219,23 +222,24 @@ fn bench_call_depth_dynamic(c: &mut Criterion) {
     bench_assembly(
         c,
         "call_depth_dynamic",
-        "
-    add64 r10, 0
-    mov r6, 0
-    add r6, 1
-    mov r1, 18
-    call function_foo
-    jlt r6, 1024, -4
-    exit
-    function_foo:
-    add r10, 64
-    stw [r10-4], 0x11223344
-    mov r6, r1
-    jeq r6, 0, +3
-    mov r1, r6
-    add r1, -1
-    call function_foo
-    exit",
+        r#"
+        add64 r10, 0
+        mov r6, 0
+        add r6, 1
+        mov r1, 18
+        call function_foo
+        jlt r6, 1024, -4
+        exit
+        function_foo:
+        add r10, 64
+        stw [r10-4], 0x11223344
+        mov r6, r1
+        jeq r6, 0, +3
+        mov r1, r6
+        add r1, -1
+        call function_foo
+        exit
+        "#,
         Config::default(),
         156675,
         &mut [],
@@ -317,32 +321,33 @@ fn bench_compute(c: &mut Criterion, name: &str, assembly: &str, mem: *mut [u8]) 
 fn bench_compute_alu_imm(c: &mut Criterion) {
     for (name, suffix) in [("alu64_imm", ""), ("alu32_imm", "32")] {
         let assembly = format!(
-            "
-    mov r9, 0x8000
-    loop:
-    add{s} r1, 0x1234
-    xor{s} r2, 0x5a5a5a5a
-    lsh{s} r3, 3
-    rsh{s} r4, 1
-    or{s} r5, 0x100
-    and{s} r1, 0x7fffffff
-    sub{s} r2, 77
-    arsh{s} r3, 2
-    mul{s} r4, 3
-    add{s} r5, -9
-    xor{s} r1, -1
-    or{s} r2, 0x10
-    rsh{s} r3, 5
-    add{s} r4, 0x7fff
-    and{s} r5, 0xffff
-    add r9, -1
-    jne r9, 0, loop
-    mov r0, r1
-    add r0, r2
-    add r0, r3
-    add r0, r4
-    add r0, r5
-    exit",
+            r#"
+            mov r9, 0x8000
+            loop:
+            add{s} r1, 0x1234
+            xor{s} r2, 0x5a5a5a5a
+            lsh{s} r3, 3
+            rsh{s} r4, 1
+            or{s} r5, 0x100
+            and{s} r1, 0x7fffffff
+            sub{s} r2, 77
+            arsh{s} r3, 2
+            mul{s} r4, 3
+            add{s} r5, -9
+            xor{s} r1, -1
+            or{s} r2, 0x10
+            rsh{s} r3, 5
+            add{s} r4, 0x7fff
+            and{s} r5, 0xffff
+            add r9, -1
+            jne r9, 0, loop
+            mov r0, r1
+            add r0, r2
+            add r0, r3
+            add r0, r4
+            add r0, r5
+            exit
+            "#,
             s = suffix
         );
         bench_compute(c, name, &assembly, &mut []);
@@ -354,35 +359,36 @@ fn bench_compute_alu64_reg(c: &mut Criterion) {
     bench_compute(
         c,
         "alu64_reg",
-        "
-    mov r6, 0x1234
-    mov r7, 3
-    mov r8, 0x5a5a5a5a
-    mov r9, 0x8000
-    loop:
-    add r1, r6
-    xor r2, r8
-    lsh r3, r7
-    rsh r4, r7
-    or r5, r6
-    and r1, r8
-    sub r2, r7
-    arsh r3, r7
-    mul r4, r7
-    add r5, r8
-    xor r1, r2
-    or r2, r6
-    rsh r3, r7
-    add r4, r5
-    and r5, r8
-    add r9, -1
-    jne r9, 0, loop
-    mov r0, r1
-    add r0, r2
-    add r0, r3
-    add r0, r4
-    add r0, r5
-    exit",
+        r#"
+        mov r6, 0x1234
+        mov r7, 3
+        mov r8, 0x5a5a5a5a
+        mov r9, 0x8000
+        loop:
+        add r1, r6
+        xor r2, r8
+        lsh r3, r7
+        rsh r4, r7
+        or r5, r6
+        and r1, r8
+        sub r2, r7
+        arsh r3, r7
+        mul r4, r7
+        add r5, r8
+        xor r1, r2
+        or r2, r6
+        rsh r3, r7
+        add r4, r5
+        and r5, r8
+        add r9, -1
+        jne r9, 0, loop
+        mov r0, r1
+        add r0, r2
+        add r0, r3
+        add r0, r4
+        add r0, r5
+        exit
+        "#,
         &mut [],
     );
 }
@@ -392,29 +398,30 @@ fn bench_compute_div_mod(c: &mut Criterion) {
     bench_compute(
         c,
         "div_mod",
-        "
-    mov r9, 0x8000
-    loop:
-    mov r1, r9
-    lsh r1, 20
-    mov r2, r1
-    div r2, 7
-    mov r3, r1
-    mod r3, 13
-    mov r4, r9
-    or r4, 1
-    mov r5, r1
-    div r5, r4
-    mod r1, r4
-    div32 r2, 3
-    mod32 r3, 5
-    add r0, r1
-    add r0, r2
-    add r0, r3
-    add r0, r5
-    add r9, -1
-    jne r9, 0, loop
-    exit",
+        r#"
+        mov r9, 0x8000
+        loop:
+        mov r1, r9
+        lsh r1, 20
+        mov r2, r1
+        div r2, 7
+        mov r3, r1
+        mod r3, 13
+        mov r4, r9
+        or r4, 1
+        mov r5, r1
+        div r5, r4
+        mod r1, r4
+        div32 r2, 3
+        mod32 r3, 5
+        add r0, r1
+        add r0, r2
+        add r0, r3
+        add r0, r5
+        add r9, -1
+        jne r9, 0, loop
+        exit
+        "#,
         &mut [],
     );
 }
@@ -424,29 +431,30 @@ fn bench_compute_splitmix64(c: &mut Criterion) {
     bench_compute(
         c,
         "splitmix64",
-        "
-    lddw r6, 0x9e3779b97f4a7c15
-    lddw r7, 0xbf58476d1ce4e5b9
-    lddw r8, 0x94d049bb133111eb
-    mov r9, 0x8000
-    loop:
-    add r1, r6
-    mov r2, r1
-    mov r3, r2
-    rsh r3, 30
-    xor r2, r3
-    mul r2, r7
-    mov r3, r2
-    rsh r3, 27
-    xor r2, r3
-    mul r2, r8
-    mov r3, r2
-    rsh r3, 31
-    xor r2, r3
-    xor r0, r2
-    add r9, -1
-    jne r9, 0, loop
-    exit",
+        r#"
+        lddw r6, 0x9e3779b97f4a7c15
+        lddw r7, 0xbf58476d1ce4e5b9
+        lddw r8, 0x94d049bb133111eb
+        mov r9, 0x8000
+        loop:
+        add r1, r6
+        mov r2, r1
+        mov r3, r2
+        rsh r3, 30
+        xor r2, r3
+        mul r2, r7
+        mov r3, r2
+        rsh r3, 27
+        xor r2, r3
+        mul r2, r8
+        mov r3, r2
+        rsh r3, 31
+        xor r2, r3
+        xor r0, r2
+        add r9, -1
+        jne r9, 0, loop
+        exit
+        "#,
         &mut [],
     );
 }
@@ -456,38 +464,39 @@ fn bench_compute_branches(c: &mut Criterion) {
     bench_compute(
         c,
         "branches",
-        "
-    mov r1, 0x12345678
-    mov r9, 0x8000
-    loop:
-    mov r2, r1
-    lsh r2, 13
-    xor r1, r2
-    mov r2, r1
-    rsh r2, 7
-    xor r1, r2
-    mov r2, r1
-    lsh r2, 17
-    xor r1, r2
-    mov r3, r1
-    and r3, 3
-    jeq r3, 0, case0
-    jeq r3, 1, case1
-    jsgt r1, 0, case2
-    add r0, 7
-    ja next
-    case0:
-    add r0, 1
-    ja next
-    case1:
-    xor r0, 0x55
-    ja next
-    case2:
-    lsh r0, 1
-    next:
-    add r9, -1
-    jne r9, 0, loop
-    exit",
+        r#"
+        mov r1, 0x12345678
+        mov r9, 0x8000
+        loop:
+        mov r2, r1
+        lsh r2, 13
+        xor r1, r2
+        mov r2, r1
+        rsh r2, 7
+        xor r1, r2
+        mov r2, r1
+        lsh r2, 17
+        xor r1, r2
+        mov r3, r1
+        and r3, 3
+        jeq r3, 0, case0
+        jeq r3, 1, case1
+        jsgt r1, 0, case2
+        add r0, 7
+        ja next
+        case0:
+        add r0, 1
+        ja next
+        case1:
+        xor r0, 0x55
+        ja next
+        case2:
+        lsh r0, 1
+        next:
+        add r9, -1
+        jne r9, 0, loop
+        exit
+        "#,
         &mut [],
     );
 }
@@ -497,33 +506,34 @@ fn bench_compute_stack_offsets(c: &mut Criterion) {
     bench_compute(
         c,
         "stack_offsets",
-        "
-    mov r9, 0x8000
-    loop:
-    stxdw [r10-8], r9
-    stxdw [r10-16], r0
-    stxw [r10-20], r9
-    stxh [r10-22], r9
-    stxb [r10-23], r9
-    stdw [r10-32], 0x1234
-    stw [r10-36], -1
-    ldxdw r1, [r10-16]
-    ldxdw r2, [r10-8]
-    ldxw r3, [r10-20]
-    ldxh r4, [r10-22]
-    ldxb r5, [r10-23]
-    ldxdw r6, [r10-32]
-    ldxw r7, [r10-36]
-    add r1, r2
-    add r1, r3
-    add r1, r4
-    add r1, r5
-    add r1, r6
-    add r1, r7
-    mov r0, r1
-    add r9, -1
-    jne r9, 0, loop
-    exit",
+        r#"
+        mov r9, 0x8000
+        loop:
+        stxdw [r10-8], r9
+        stxdw [r10-16], r0
+        stxw [r10-20], r9
+        stxh [r10-22], r9
+        stxb [r10-23], r9
+        stdw [r10-32], 0x1234
+        stw [r10-36], -1
+        ldxdw r1, [r10-16]
+        ldxdw r2, [r10-8]
+        ldxw r3, [r10-20]
+        ldxh r4, [r10-22]
+        ldxb r5, [r10-23]
+        ldxdw r6, [r10-32]
+        ldxw r7, [r10-36]
+        add r1, r2
+        add r1, r3
+        add r1, r4
+        add r1, r5
+        add r1, r6
+        add r1, r7
+        mov r0, r1
+        add r9, -1
+        jne r9, 0, loop
+        exit
+        "#,
         &mut [],
     );
 }
@@ -537,35 +547,36 @@ fn bench_compute_sum_input(c: &mut Criterion) {
     bench_compute(
         c,
         "sum_input",
-        "
-    mov r6, r1
-    mov r9, 64
-    outer:
-    mov r1, r6
-    mov r2, r6
-    add r2, 4096
-    inner:
-    ldxdw r3, [r1+0]
-    add r0, r3
-    ldxdw r3, [r1+8]
-    add r0, r3
-    ldxdw r3, [r1+16]
-    add r0, r3
-    ldxdw r3, [r1+24]
-    add r0, r3
-    ldxdw r3, [r1+32]
-    add r0, r3
-    ldxdw r3, [r1+40]
-    add r0, r3
-    ldxdw r3, [r1+48]
-    add r0, r3
-    ldxdw r3, [r1+56]
-    add r0, r3
-    add r1, 64
-    jlt r1, r2, inner
-    add r9, -1
-    jne r9, 0, outer
-    exit",
+        r#"
+        mov r6, r1
+        mov r9, 64
+        outer:
+        mov r1, r6
+        mov r2, r6
+        add r2, 4096
+        inner:
+        ldxdw r3, [r1+0]
+        add r0, r3
+        ldxdw r3, [r1+8]
+        add r0, r3
+        ldxdw r3, [r1+16]
+        add r0, r3
+        ldxdw r3, [r1+24]
+        add r0, r3
+        ldxdw r3, [r1+32]
+        add r0, r3
+        ldxdw r3, [r1+40]
+        add r0, r3
+        ldxdw r3, [r1+48]
+        add r0, r3
+        ldxdw r3, [r1+56]
+        add r0, r3
+        add r1, 64
+        jlt r1, r2, inner
+        add r9, -1
+        jne r9, 0, outer
+        exit
+        "#,
         &mut mem,
     );
 }

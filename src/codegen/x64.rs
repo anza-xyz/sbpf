@@ -134,6 +134,7 @@ trait X64Generator {
     fn push(&mut self, byte: u8);
     fn push_i8(&mut self, value: i8);
     fn push_i32(&mut self, value: i32);
+    fn push_i64(&mut self, value: i64);
     fn global_reloc(
         &mut self,
         name: &'static str,
@@ -521,24 +522,13 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             out.bpf_taken_branch();
         }
 
+        // The supports read what they need from the instruction.
         ebpf::CALL_IMM => {
             load_next_insn_addr(out);
             out.meter_checked();
             match (out.version().static_syscalls(), src.0) {
-                (false, _) => x64asm!(out
-                    ; push RTEMP
-                    ; mov WTEMP, DWORD REL32_IMM
-                    ;; invoke_support(out, out.supports().v0_call_imm)
-                    ; pop RTEMP
-                ),
-                (true, 1) => x64asm!(out
-                    ; push RTEMP
-                    ; movsxd RTEMP, DWORD REL32_IMM
-                    ; lea RTEMP, [ DWORD 0i32 + RINSN + RTEMP * 8 ]
-                    ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
-                    ;; invoke_support(out, out.supports().call_imm)
-                    ; pop RTEMP
-                ),
+                (false, _) => invoke_support(out, out.supports().v0_call_imm),
+                (true, 1) => invoke_support(out, out.supports().call_imm),
                 (true, 0) => invoke_support(out, out.supports().syscall),
                 (true, _) => {
                     bpf_validate_meter(out);
@@ -549,24 +539,10 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::CALL_REG => {
             load_next_insn_addr(out);
             out.meter_checked();
-            if !out.version().callx_uses_dst_reg() {
-                // The register containing the destination is named by the immediate. We will use an
-                // additional support to resolve this to a real register as the jump table inline
-                // would otherwise be pretty nasty.
-                x64asm!(out
-                    ; push RTEMP
-                    ; mov WTEMP, DWORD REL32_IMM
-                    ;; invoke_support(out, out.supports().v0_callx)
-                    ; pop RTEMP
-                );
+            if out.version().callx_uses_dst_reg() {
+                invoke_support(out, out.supports().callx[usize::from(dst.0)]);
             } else {
-                x64asm!(out
-                    ; push RTEMP
-                    ; mov RTEMP, Rq(dst)
-                    ; sub RTEMP, rbp => Frame[BYTE -1].text_section_host_to_vm
-                    ;; invoke_support(out, out.supports().call_internal)
-                    ; pop RTEMP
-                );
+                invoke_support(out, out.supports().v0_callx);
             }
         }
         ebpf::EXIT => {
@@ -666,12 +642,15 @@ fn load_next_insn_addr<G: X64Generator + ?Sized>(out: &mut G) {
     );
 }
 
+/// Call the support at `support_addr`, which finds `RINSN` above its return address.
 fn invoke_support<G: X64Generator + ?Sized>(out: &mut G, support_addr: *const u8) {
-    let support_dword = i32::try_from(support_addr as usize).expect("supports in the first 2 GiB");
+    // Every other register holds something, so `RINSN` makes room for the target. The JIT code
+    // need not be within reach of a 32-bit displacement from the supports.
     x64asm!(out
-        ; push DWORD support_dword
-        ; call QWORD [rsp]
-        ; add rsp, BYTE 8
+        ; push RINSN
+        ; mov rax, QWORD support_addr as i64
+        ; call rax
+        ; pop RINSN
     );
 }
 
@@ -777,6 +756,10 @@ impl X64Generator for JITGenerator<'_> {
     }
 
     fn push_i32(&mut self, value: i32) {
+        self.template.extend(&value.to_le_bytes());
+    }
+
+    fn push_i64(&mut self, value: i64) {
         self.template.extend(&value.to_le_bytes());
     }
 
@@ -901,9 +884,11 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
         &mut templates,
         AuxTemplate::InvalidJumpTarget,
         |generator| {
-            // Reached through `callx` only (the verifier rejects the jumps), which leaves in
-            // `temp` the address of the instruction following the target, as
-            // `load_next_insn_addr` would.
+            // Reached through `call_internal` only (the verifier rejects the jumps), which leaves
+            // on the stack the address of the instruction following the target, as
+            // `load_next_insn_addr` would compute it.
+            let next_insn = supporting_code::CALLEE_NEXT_INSN;
+            x64asm!(generator; mov RTEMP, [rsp + next_insn]);
             bpf_validate_meter(generator);
             #[cfg(feature = "tracer")]
             invoke_support(generator, generator.supports().trace);
@@ -1034,6 +1019,10 @@ impl X64Generator for InterpreterGenerator {
     }
 
     fn push_i32(&mut self, value: i32) {
+        self.extend(&value.to_le_bytes());
+    }
+
+    fn push_i64(&mut self, value: i64) {
         self.extend(&value.to_le_bytes());
     }
 

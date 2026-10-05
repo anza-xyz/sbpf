@@ -11,6 +11,8 @@
 
 //! Virtual machine for SBPF programs.
 #![warn(missing_docs)]
+// For the long `x64asm!` blocks of `codegen`.
+#![recursion_limit = "1024"]
 #![allow(clippy::literal_string_with_formatting_args)]
 #![deny(clippy::arithmetic_side_effects)]
 #![deny(clippy::ptr_as_ptr)]
