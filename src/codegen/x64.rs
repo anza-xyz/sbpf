@@ -5,7 +5,6 @@ use dynasmrt::DynamicLabel;
 
 use super::*;
 use crate::memory_management::{allocate_pages_low, protect_pages, PagePermissions};
-use crate::vm::RuntimeEnvironmentSlot;
 use std::convert::TryFrom;
 use std::sync::LazyLock;
 
@@ -603,12 +602,6 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
         | ebpf::ST_H_REG
         | ebpf::ST_W_REG
         | ebpf::ST_DW_REG => {
-            let kind = match op & ebpf::BPF_CLS_MASK {
-                ebpf::BPF_LDX => MemoryAccessKind::Load,
-                ebpf::BPF_ST => MemoryAccessKind::StoreImm,
-                ebpf::BPF_STX => MemoryAccessKind::StoreReg,
-                _ => unreachable!(),
-            };
             let size_log2 = match op & ebpf::BPF_SIZE_MASK {
                 ebpf::BPF_B => 0,
                 ebpf::BPF_H => 1,
@@ -616,26 +609,15 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
                 ebpf::BPF_DW => 3,
                 _ => unreachable!(),
             };
-            let helper = out.supports().memory_access[kind as usize][size_log2];
+            let (d, s) = (usize::from(dst.0), usize::from(src.0));
+            let helper = match op & ebpf::BPF_CLS_MASK {
+                ebpf::BPF_LDX => out.supports().load[size_log2][d][s],
+                ebpf::BPF_ST => out.supports().store_imm[size_log2][d],
+                ebpf::BPF_STX => out.supports().store_reg[size_log2][d][s],
+                _ => unreachable!(),
+            };
             load_next_insn_addr(out);
-            match kind {
-                MemoryAccessKind::Load => x64asm!(out
-                    ; push Rq(src)
-                    ;; invoke_support(out, helper)
-                    ; pop Rq(dst)
-                ),
-                MemoryAccessKind::StoreImm => x64asm!(out
-                    ; push Rq(dst)
-                    ;; invoke_support(out, helper)
-                    ; pop RTEMP
-                ),
-                MemoryAccessKind::StoreReg => x64asm!(out
-                    ; push Rq(dst)
-                    ; push Rq(src)
-                    ;; invoke_support(out, helper)
-                    ; add rsp, 16
-                ),
-            }
+            invoke_support(out, helper);
         }
 
         0..=3
