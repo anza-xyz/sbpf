@@ -123,7 +123,7 @@ macro_rules! x64asm {
     };
 }
 
-mod supporting_code;
+pub(super) mod supporting_code;
 use supporting_code::SupportingCode;
 
 trait X64Generator {
@@ -935,8 +935,11 @@ fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
     unsafe { interpreter(version).buffer.add(offset) }
 }
 
-struct Interpreter {
-    buffer: *mut u8,
+pub(super) struct Interpreter {
+    pub(super) buffer: *mut u8,
+    /// The length of the code of each step, which is followed by padding to the size of the step.
+    #[cfg(feature = "codegen_debug")]
+    pub(super) step_lens: Box<[u8]>,
 }
 
 // SAFETY: `buffer` is only ever used for its address, as the memory is read-execute and is never
@@ -950,7 +953,7 @@ unsafe impl Sync for Interpreter {}
 /// This interpreter uses a dispatch table with one step of `1 << STEP_SIZE_LOG2` bytes per
 /// `TemplateOpcode`, each running its instruction and then threading execution to the next one
 /// directly, thus implementing a technique known as direct threading.
-struct InterpreterGenerator {
+pub(super) struct InterpreterGenerator {
     buffer: *mut u8,
     relocs: LabelRelocs<SimpleRelocation>,
     supports: &'static SupportingCode,
@@ -965,8 +968,8 @@ struct InterpreterGenerator {
 }
 
 impl InterpreterGenerator {
-    const STEP_SIZE_LOG2: u8 = 7; // 128 bytes
-    const STEP_TABLE_SIZE: usize = 0x1_0000 * (1 << Self::STEP_SIZE_LOG2);
+    pub(super) const STEP_SIZE_LOG2: u8 = 7; // 128 bytes
+    pub(super) const STEP_TABLE_SIZE: usize = 0x1_0000 * (1 << Self::STEP_SIZE_LOG2);
 
     /// Offset into the `buffer` for this opcode.
     fn step_offset(opcode: TemplateOpcode) -> usize {
@@ -1103,13 +1106,44 @@ static INTERPRETERS: [LazyLock<Interpreter>; 5] = [
 ];
 
 /// The interpreter for the SBPF `version`.
-fn interpreter(version: SBPFVersion) -> &'static Interpreter {
+pub(super) fn interpreter(version: SBPFVersion) -> &'static Interpreter {
     &INTERPRETERS[version as usize]
 }
 
 fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     let mut generator = InterpreterGenerator::new(version);
     let base_addr = i32::try_from(generator.buffer as usize).expect("interpreter in first 2GB");
+    #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
+    // SAFETY:
+    //
+    // Contract from `CodeFile::map`: the range must be page aligned, owned by the caller, not
+    // accessed meanwhile, and without content that is needed.
+    // Evidence: it is the fresh allocation of `allocate_pages_low`, which is page aligned, and
+    // `STEP_TABLE_SIZE` is a multiple of the page size. Nothing was written to it, and nothing else
+    // refers to it. The mapping stays, as the interpreter is never freed.
+    let code_file = unsafe {
+        super::debug::CodeFile::map(
+            &format!("interpreter-{version:?}").to_lowercase(),
+            generator.buffer as usize,
+            InterpreterGenerator::STEP_TABLE_SIZE,
+        )
+    };
+    // The space after the code of a step traps if it is ever executed.
+    //
+    // SAFETY:
+    //
+    // Contract from `ptr::write_bytes`: the range must be valid for writes.
+    // Evidence: `generator.buffer` has `STEP_TABLE_SIZE` bytes of read-write memory, and nothing
+    // refers to it yet.
+    unsafe {
+        std::ptr::write_bytes(
+            generator.buffer,
+            0xcc,
+            InterpreterGenerator::STEP_TABLE_SIZE,
+        )
+    };
+    #[cfg(feature = "codegen_debug")]
+    let mut step_lens = vec![0; TemplateOpcode::COUNT];
     for opcode in TemplateOpcode::all() {
         let step_start = InterpreterGenerator::step_offset(opcode);
         generator.opcode = opcode;
@@ -1145,12 +1179,16 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
             ; lea RTEMP, [ BYTE size + RINSN ]
             ;; terminate(&mut generator, SIG_EXECUTION_OVERRUN)
         );
+        let step_len = generator.offset.checked_sub(step_start).unwrap();
         assert!(
-            generator.offset.checked_sub(step_start).unwrap()
-                <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
+            step_len <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
             "step for {:#x} is too long",
             opcode.0
         );
+        #[cfg(feature = "codegen_debug")]
+        {
+            step_lens[opcode.index()] = u8::try_from(step_len).unwrap();
+        }
     }
 
     // SAFETY:
@@ -1165,15 +1203,10 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     generator.relocs.resolve(buffer, Some(base_addr as usize));
 
     #[cfg(feature = "codegen_debug")]
-    std::fs::write(format!("interpreter-{:?}.bin", version), &*buffer).unwrap();
+    let step_lens = step_lens.into_boxed_slice();
     #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
-    // EM_X86_64
-    super::write_perf_jitdump(
-        &format!("interpreter {:?}", version),
-        generator.buffer,
-        buffer,
-        62,
-    );
+    super::debug::finish_interpreter(code_file, version, generator.buffer, &step_lens);
+
     // SAFETY:
     //
     // Contract from `protect_pages`: the range must be whole pages of a mapping that the caller
@@ -1191,6 +1224,8 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     .expect("failed to make the interpreter executable");
     Interpreter {
         buffer: generator.buffer,
+        #[cfg(feature = "codegen_debug")]
+        step_lens,
     }
 }
 

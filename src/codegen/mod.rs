@@ -5,6 +5,8 @@
 // Everything here is used by the architecture specific backends, of which there may be none.
 #![cfg_attr(not(target_arch = "x86_64"), allow(dead_code, unused_imports))]
 
+#[cfg(all(feature = "codegen_debug", target_arch = "x86_64"))]
+pub mod debug;
 #[cfg(target_arch = "x86_64")]
 pub mod x64;
 
@@ -615,6 +617,8 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         // `output_len` is below `NOOP_DUE`, see `analyze`, and the sizes are far from `usize::MAX`.
         let mut program = JitProgram::new(pc_sec.len(), output_len.wrapping_add(SIZE));
         program.dynasm = true;
+        #[cfg(all(feature = "codegen_debug", target_arch = "x86_64", target_os = "linux"))]
+        debug::map_jit_text(&mut program);
 
         let mut position = 0;
         let text = program.text_section_mut();
@@ -670,6 +674,8 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         // the flags are in; it is small next to the machine code, so the copy is cheap.
         program.pc_section_mut().copy_from_slice(&pc_sec);
         program.seal(output_len)?;
+        #[cfg(all(feature = "codegen_debug", target_arch = "x86_64", target_os = "linux"))]
+        debug::finish_jit(self, executable, &mut program);
         Ok(program)
     }
 
@@ -731,99 +737,4 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         }
         *position = start.wrapping_add(len);
     }
-}
-
-#[cfg(all(feature = "codegen_debug", target_os = "linux"))]
-/// Add `code`, which runs from `address`, called `name` to the perf jitdump
-/// (`/tmp/jit-<pid>.dump`).
-fn write_perf_jitdump(name: &str, address: *const u8, code: &[u8], elf_machine: u32) {
-    use std::io::Write as _;
-    use std::os::fd::AsRawFd as _;
-    use std::sync::{Mutex, OnceLock};
-
-    fn now() -> u64 {
-        let mut ts = libc::timespec {
-            tv_sec: 0,
-            tv_nsec: 0,
-        };
-        // SAFETY:
-        //
-        // Contract from `clock_gettime`: the pointer must be valid for writing a `timespec`.
-        // Evidence: it points at the local `ts`.
-        unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-        (ts.tv_sec as u64)
-            .wrapping_mul(1_000_000_000)
-            .wrapping_add(ts.tv_nsec as u64)
-    }
-
-    // The header is only written once, then each of the code regions is a record of the same file,
-    // and its index is the number of records before.
-    static JITDUMP: OnceLock<Mutex<(std::fs::File, u64)>> = OnceLock::new();
-    let pid = std::process::id();
-    // SAFETY:
-    //
-    // Contract from `syscall`: the arguments must be what the system call expects.
-    // Evidence: `gettid` takes none.
-    let tid = unsafe { libc::syscall(libc::SYS_gettid) } as u32;
-
-    let dump = JITDUMP.get_or_init(|| {
-        let mut f = std::fs::File::create(format!("/tmp/jit-{pid}.dump")).unwrap();
-        // 1. JIT Header (40 bytes)
-        f.write_all(&0x4A495444u32.to_le_bytes()).unwrap(); // Magic: "JITD"
-        f.write_all(&1u32.to_le_bytes()).unwrap(); // Version
-        f.write_all(&40u32.to_le_bytes()).unwrap(); // Header size
-        f.write_all(&elf_machine.to_le_bytes()).unwrap();
-        f.write_all(&0u32.to_le_bytes()).unwrap(); // Pad
-        f.write_all(&pid.to_le_bytes()).unwrap();
-        f.write_all(&now().to_le_bytes()).unwrap();
-        f.write_all(&0u64.to_le_bytes()).unwrap(); // Flags
-
-        // Triggers perf record's MMAP detection
-        //
-        // SAFETY:
-        //
-        // Contract from `mmap`: without `MAP_FIXED` it may not replace existing mappings, and the
-        // file descriptor must be open.
-        // Evidence: the hint is null and no flags beyond `MAP_PRIVATE` are given, and `f` is open.
-        let m = unsafe {
-            libc::mmap(
-                std::ptr::null_mut(),
-                4096,
-                libc::PROT_READ | libc::PROT_EXEC,
-                libc::MAP_PRIVATE,
-                f.as_raw_fd(),
-                0,
-            )
-        };
-        if m != libc::MAP_FAILED {
-            // SAFETY:
-            //
-            // Contract from `munmap`: nothing may access the range afterwards.
-            // Evidence: it is exactly the mapping just created, which nothing references.
-            unsafe { libc::munmap(m, 4096) };
-        }
-        Mutex::new((f, 0))
-    });
-    let (f, records) = &mut *dump.lock().unwrap();
-
-    // 2. JIT_CODE_LOAD Record Header (56 bytes, then the name and its NUL)
-    let rec_size = 56usize
-        .wrapping_add(name.len())
-        .wrapping_add(1)
-        .wrapping_add(code.len()) as u32;
-    f.write_all(&0u32.to_le_bytes()).unwrap(); // ID: JIT_CODE_LOAD
-    f.write_all(&rec_size.to_le_bytes()).unwrap();
-    f.write_all(&now().to_le_bytes()).unwrap();
-    f.write_all(&pid.to_le_bytes()).unwrap();
-    f.write_all(&tid.to_le_bytes()).unwrap();
-    f.write_all(&(address as u64).to_le_bytes()).unwrap(); // VMA
-    f.write_all(&(address as u64).to_le_bytes()).unwrap(); // Code Address
-    f.write_all(&(code.len() as u64).to_le_bytes()).unwrap(); // Code Size
-    f.write_all(&records.wrapping_add(1).to_le_bytes()).unwrap(); // Index
-    f.write_all(name.as_bytes()).unwrap();
-    f.write_all(&[0]).unwrap();
-    *records = records.wrapping_add(1);
-
-    // 3. Raw Code Bytes
-    f.write_all(code).unwrap();
 }

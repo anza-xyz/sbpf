@@ -50,10 +50,13 @@ tracer = []
 debugger = ["dep:gdbstub"]
 shuttle-test = ["dep:shuttle"]
 conf-stack-frame-size = []
-# Dump the generated interpreter and emit additional runtime checks into the generated code.
+# Generate the code of `codegen` into mapped ELF files with its symbols (on Linux, in
+# `$SBPF_CODEGEN_DIR` or the temporary directory) and register it with the GDB JIT interface, expose
+# it in `codegen::debug`, and emit additional runtime checks into the generated code.
 codegen_debug = []
 
 [dev-dependencies]
+clap = { version = "4", features = ["derive"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 elf = "0.0.10"
 json = "0.12"
@@ -75,3 +78,7 @@ harness = false
 [[bench]]
 name = "vm_execution"
 harness = false
+
+[[example]]
+name = "dynasm_tool"
+required-features = ["codegen_debug"]

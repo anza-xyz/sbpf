@@ -5,7 +5,7 @@ use super::*;
 use dynasmrt::x64::X64Relocation;
 use dynasmrt::{DynasmApi, DynasmLabelApi, VecAssembler};
 
-pub(super) struct SupportingCode {
+pub(in crate::codegen) struct SupportingCode {
     /// Internal call trampoline, invoked (see `invoke_support`) with the host address of the
     /// target instruction in `RTEMP`, and the address of the BPF instruction to return to pushed
     /// beforehand.
@@ -31,6 +31,12 @@ pub(super) struct SupportingCode {
     pub(super) store_imm: [[*const u8; Reg::COUNT]; 4],
     /// Stores of a register, by log2 of the access size, destination and source register.
     pub(super) store_reg: [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4],
+    /// The jump stubs `v0_callx` dispatches to, which precede it.
+    #[cfg(feature = "codegen_debug")]
+    callx_stubs: *const u8,
+    /// The addresses of all the generated code.
+    #[cfg(feature = "codegen_debug")]
+    code_range: std::ops::Range<usize>,
 }
 
 // SAFETY: the pointers are only used for their addresses, as the memory they point into is
@@ -49,8 +55,52 @@ impl SupportingCode {
     /// Size of the executable memory the supporting code is generated into.
     const LEN: usize = 256 * 1024;
 
-    pub(super) fn get() -> &'static SupportingCode {
+    pub(in crate::codegen) fn get() -> &'static SupportingCode {
         &SUPPORTING_CODE
+    }
+
+    /// The generated code, and the address of each of its routines.
+    #[cfg(feature = "codegen_debug")]
+    pub(in crate::codegen) fn debug_symbols(
+        &self,
+    ) -> (std::ops::Range<usize>, Vec<(String, usize)>) {
+        let mut symbols = vec![
+            ("call_internal".to_string(), self.call_internal as usize),
+            ("call_imm".to_string(), self.call_imm as usize),
+            ("v0_call_imm".to_string(), self.v0_call_imm as usize),
+            ("v0_callx_stubs".to_string(), self.callx_stubs as usize),
+            ("v0_callx".to_string(), self.v0_callx as usize),
+            ("syscall".to_string(), self.syscall as usize),
+            ("entry_point".to_string(), self.entry_point as usize),
+        ];
+        #[cfg(feature = "tracer")]
+        symbols.push(("trace".to_string(), self.trace as usize));
+        for size_log2 in 0..4 {
+            let bits = 8usize << size_log2;
+            for dst in 0..Reg::COUNT {
+                let store_imm = self.store_imm[size_log2][dst] as usize;
+                symbols.push((format!("store_imm_u{bits}_r{dst}"), store_imm));
+                for src in 0..Reg::COUNT {
+                    let load = self.load[size_log2][dst][src] as usize;
+                    symbols.push((format!("load_u{bits}_r{dst}_r{src}"), load));
+                    let store_reg = self.store_reg[size_log2][dst][src] as usize;
+                    symbols.push((format!("store_reg_u{bits}_r{dst}_r{src}"), store_reg));
+                }
+            }
+        }
+        // Indexed like `SupportingCode::divide`.
+        let operations = ["mod32", "div32", "mod64", "div64"];
+        for (operation, helpers) in operations.iter().zip(&self.divide) {
+            for (dst, row) in helpers.iter().enumerate() {
+                for (src, helper) in row.iter().enumerate() {
+                    symbols.push((
+                        format!("divide_{operation}_r{dst}_r{src}"),
+                        *helper as usize,
+                    ));
+                }
+            }
+        }
+        (self.code_range.clone(), symbols)
     }
 
     /// Helper performing the division in place on the registers `dst` and `src`. Expects the
@@ -63,6 +113,16 @@ impl SupportingCode {
         // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
         let buffer = allocate_pages_low(Self::LEN)
             .expect("failed to allocate memory for the supporting code");
+        #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
+        // SAFETY:
+        //
+        // Contract from `CodeFile::map`: the range must be page aligned, owned by the caller, not
+        // accessed meanwhile, and without content that is needed.
+        // Evidence: it is the fresh allocation of `allocate_pages_low`, which is page aligned, and
+        // `LEN` is a multiple of the page size. Nothing was written to it, and nothing else refers
+        // to it. The mapping stays, as the supporting code is never freed.
+        let code_file =
+            unsafe { super::super::debug::CodeFile::map("supports", buffer as usize, Self::LEN) };
         let (supports, code) = Self::assemble(buffer as usize);
         assert!(code.len() <= Self::LEN, "supporting code is too long!");
         // SAFETY:
@@ -72,11 +132,8 @@ impl SupportingCode {
         // Evidence: `code.len()` was asserted to fit the `LEN` bytes of the fresh read-write
         // allocation, which `code`, a `Vec`, cannot overlap.
         unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), buffer, code.len()) };
-        #[cfg(feature = "codegen_debug")]
-        std::fs::write("supporting-code.bin", &code).unwrap();
         #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
-        // EM_X86_64
-        super::super::write_perf_jitdump("supporting code", buffer, &code, 62);
+        super::super::debug::finish_supporting_code(code_file, &supports);
         // SAFETY:
         //
         // Contract from `protect_pages`: the range must be whole pages of a mapping that the
@@ -95,12 +152,16 @@ impl SupportingCode {
         let target_checked = out.new_dynamic_label();
         let call_internal =
             Self::call_internal(&mut out, base, call_internal_label, target_checked);
+        let call_imm = Self::call_imm(&mut out, base, target_checked);
+        let v0_call_imm = Self::v0_call_imm(&mut out, base, call_internal_label);
+        #[cfg_attr(not(feature = "codegen_debug"), allow(unused_variables))]
+        let (v0_callx, callx_stubs) = Self::callx_target(&mut out, base, call_internal_label);
         let (load, store_imm, store_reg) = Self::memory_accesses(&mut out, base);
         let supports = Self {
             call_internal,
-            call_imm: Self::call_imm(&mut out, base, target_checked),
-            v0_call_imm: Self::v0_call_imm(&mut out, base, call_internal_label),
-            v0_callx: Self::callx_target(&mut out, base, call_internal_label),
+            call_imm,
+            v0_call_imm,
+            v0_callx,
             syscall: Self::syscall(&mut out, base),
             #[cfg(feature = "tracer")]
             trace: Self::trace(&mut out, base),
@@ -109,6 +170,10 @@ impl SupportingCode {
             store_reg,
             entry_point: Self::entry_point(&mut out, base),
             divide: Self::divides(&mut out, base),
+            #[cfg(feature = "codegen_debug")]
+            callx_stubs,
+            #[cfg(feature = "codegen_debug")]
+            code_range: base..base.wrapping_add(out.offset().0),
         };
         let code = out
             .finalize()
@@ -379,7 +444,12 @@ impl SupportingCode {
     }
 
     /// SBPFv0 `CALL_REG`: the immediate is the number of the register with the target.
-    fn callx_target(out: &mut Asm, base: usize, call_internal: DynamicLabel) -> *const u8 {
+    /// Returns the routine and the stubs it jumps to.
+    fn callx_target(
+        out: &mut Asm,
+        base: usize,
+        call_internal: DynamicLabel,
+    ) -> (*const u8, *const u8) {
         // Each register's code takes the same space, which is what `lea` can scale by.
         const STUB_SIZE: usize = 8;
         let common = out.new_dynamic_label();
@@ -400,6 +470,7 @@ impl SupportingCode {
         );
         let start = address(out, base, true);
         let invalid = out.new_dynamic_label();
+        let stubs_start = stubs;
         let stubs = i32::try_from(stubs as usize).expect("supports in the first 2 GiB");
         let last_register = (GPREG_MAP.len() as i32).checked_sub(1).unwrap();
         x64asm!(out
@@ -413,7 +484,7 @@ impl SupportingCode {
             ;; validate_meter(out)
             ;; terminate(out, SIG_INVALID_INSN)
         );
-        start
+        (start, stubs_start)
     }
 
     fn syscall(out: &mut Asm, base: usize) -> *const u8 {
@@ -689,12 +760,6 @@ fn call_host_sysv64_function(out: &mut Asm, pushed: i32, function: *const u8) {
     }
 }
 
-/// Save the registers that a `sysv64` host function call would clobber: the rest are pushed in
-/// the order of their register numbers (for the internal registers that is `insn`, `temp`,
-/// `meter`), the BPF registers are spilled into `vm.registers`. Leaves the `EbpfVm` in `rax`.
-///
-/// Returns the number of bytes pushed. The stack is not aligned for the call, see
-/// `sysv64_call_needs_stack_alignment`. Does not touch the flags.
 /// Store the BPF registers in `mask` into `vm.registers`, with the `EbpfVm` at `vm`.
 fn store_bpf_registers(out: &mut Asm, vm: u8, mask: u16) {
     for (i, &reg) in GPREG_MAP.iter().enumerate() {
@@ -719,6 +784,12 @@ fn load_bpf_registers(out: &mut Asm, vm: u8, mask: u16) {
     }
 }
 
+/// Save the registers that a `sysv64` host function call would clobber: the rest are pushed in
+/// the order of their register numbers (for the internal registers that is `insn`, `temp`,
+/// `meter`), the BPF registers are spilled into `vm.registers`. Leaves the `EbpfVm` in `rax`.
+///
+/// Returns the number of bytes pushed. The stack is not aligned for the call, see
+/// `sysv64_call_needs_stack_alignment`. Does not touch the flags.
 fn clobber_for_sysv64_call(out: &mut Asm) -> i32 {
     for reg in 0..16 {
         if SYSV64_PUSHED & 1 << reg != 0 {
