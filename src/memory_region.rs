@@ -693,7 +693,6 @@ pub struct MemoryMapping {
     access_violation_handler: AccessViolationHandler,
     max_call_depth: i64,
     stack_frame_size: i64,
-    disable_address_translation: bool,
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
     initialized: bool,
@@ -775,7 +774,6 @@ impl MemoryMapping {
             access_violation_handler: Box::new(access_violation_handler),
             max_call_depth: config.max_call_depth as i64,
             stack_frame_size: config.stack_frame_size as i64,
-            disable_address_translation: !config.enable_address_translation,
             sbpf_version,
             initialized: false,
             ty,
@@ -810,16 +808,6 @@ impl MemoryMapping {
         len: u64,
     ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
-        if self.disable_address_translation {
-            // NOTE TRICKY: this pointer most likely did *not* get its provenance exposed in the
-            // Rust-land! This option in general is extremely unsafe and have us constructing
-            // pointers to no man's land. We acknowledge this and don't consider it to be a bug,
-            // given that the option isn't meant to be used for any serious applications of this
-            // crate.
-            let ptr = ptr::with_exposed_provenance_mut(vm_addr as usize);
-            let buffer = HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(ptr, len as usize));
-            return StableResult::Ok(buffer);
-        }
         if let Some((_index, region)) = self.find_region(vm_addr) {
             if region.host_buffer().is_mutable() || access_type != AccessType::Store {
                 if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
@@ -842,17 +830,6 @@ impl MemoryMapping {
         len: u64,
     ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
-        if self.disable_address_translation {
-            // NOTE TRICKY: this pointer most likely did *not* get its provenance exposed in the
-            // Rust-land! This option in general is extremely unsafe and have us constructing
-            // pointers to no man's land. We acknowledge this and don't consider it to be a bug,
-            // given that the option isn't meant to be used for any serious applications of this
-            // crate.
-            let ptr = ptr::with_exposed_provenance_mut(vm_addr as usize);
-            let buffer = HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(ptr, len as usize));
-            return StableResult::Ok(buffer);
-        }
-
         let index = match self.find_region(vm_addr) {
             Some((index, region)) => {
                 if region.host_buffer().is_mutable() || access_type != AccessType::Store {

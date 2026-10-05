@@ -314,12 +314,7 @@ macro_rules! test_interpreter_and_jit {
         $executable.verify::<RequisiteVerifier>().unwrap();
         let host_buffer = solana_sbpf::memory_region::HostMemoryObject::host($mem);
         let mut jit_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
-        let address_translation = $executable.get_config().enable_address_translation;
-        let (interp_input_start, jit_input_start) = if !address_translation {
-            (host_buffer.ptr().addr() as u64, jit_input_mem.as_ptr().addr() as u64)
-        } else {
-            (ebpf::MM_INPUT_START, ebpf::MM_INPUT_START)
-        };
+        let (interp_input_start, jit_input_start) = (ebpf::MM_INPUT_START, ebpf::MM_INPUT_START);
 
         let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter) = {
             let mem_region = MemoryRegion::new(host_buffer, ebpf::MM_INPUT_START);
@@ -412,7 +407,7 @@ macro_rules! test_interpreter_and_jit {
                             diverged = true;
                         }
                     }
-                    if address_translation && !compare_register_trace(&_trace_interpreter, trace_jit) {
+                    if !compare_register_trace(&_trace_interpreter, trace_jit) {
                         let analysis = Analysis::from_executable(&$executable).unwrap();
                         let stdout = std::io::stdout();
                         analysis
