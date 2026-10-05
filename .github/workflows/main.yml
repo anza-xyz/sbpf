@@ -65,8 +65,8 @@ jobs:
       if: matrix.rust == 'nightly' && matrix.os != 'windows-latest'
       shell: bash
     - name: Benchmark
-      run: RUSTFLAGS="-D warnings" cargo bench -- --nocapture
-      if: matrix.rust == 'nightly' && matrix.os != 'windows-latest'
+      run: RUSTFLAGS="-D warnings" cargo bench -- --quick
+      if: matrix.rust == 'stable' && matrix.os != 'windows-latest'
       shell: bash
 
   coverage:
