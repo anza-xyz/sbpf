@@ -23,7 +23,7 @@ use rand::{
     rngs::SmallRng,
     SeedableRng,
 };
-use std::{convert::TryFrom, fmt::Debug, mem, ptr};
+use std::{fmt::Debug, mem, ptr};
 
 use crate::{
     ebpf::{self, FIRST_SCRATCH_REG, FRAME_PTR_REG, INSN_SIZE, SCRATCH_REGS},
@@ -1221,20 +1221,18 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         debug_assert_ne!(dst.is_some(), value.is_some());
         let value_stack_slot = X86IndirectAccess::OffsetIndexShift(-96, RSP, 0);
 
-        if self.config.enable_address_translation {
-            match value {
-                Some(Value::Register(reg)) => {
-                    self.emit_ins(X86Instruction::store(OperandSize::S64, reg, RSP, value_stack_slot));
-                }
-                Some(Value::Constant64(constant, user_provided)) => {
-                    debug_assert!(user_provided);
-                    // First half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
-                    let lower_key = self.immediate_value_key as i32 as i64;
-                    self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, constant.wrapping_sub(lower_key)));
-                    self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, RSP, value_stack_slot));
-                }
-                _ => {}
+        match value {
+            Some(Value::Register(reg)) => {
+                self.emit_ins(X86Instruction::store(OperandSize::S64, reg, RSP, value_stack_slot));
             }
+            Some(Value::Constant64(constant, user_provided)) => {
+                debug_assert!(user_provided);
+                // First half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
+                let lower_key = self.immediate_value_key as i32 as i64;
+                self.emit_ins(X86Instruction::load_immediate(REGISTER_SCRATCH, constant.wrapping_sub(lower_key)));
+                self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, RSP, value_stack_slot));
+            }
+            _ => {}
         }
 
         match vm_addr {
@@ -1252,53 +1250,17 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             },
         }
 
-        if self.config.enable_address_translation {
-            let anchor_base = match value {
-                Some(Value::Register(_reg)) => 4,
-                Some(Value::Constant64(_constant, _user_provided)) => 8,
-                _ => 0,
-            };
-            let anchor = ANCHOR_TRANSLATE_MEMORY_ADDRESS + anchor_base + len.trailing_zeros() as usize;
-            // store self.pc in the first stack slot of the anchor
-            self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, RSP, X86IndirectAccess::OffsetIndexShift(-16, RSP, 0), self.pc as i64));
-            self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(anchor, 5)));
-            if let Some(dst) = dst {
-                self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_SCRATCH, dst));
-            }
-        } else if let Some(dst) = dst {
-            match len {
-                1 => self.emit_ins(X86Instruction::load(OperandSize::S8, REGISTER_SCRATCH, dst, X86IndirectAccess::Offset(0))),
-                2 => self.emit_ins(X86Instruction::load(OperandSize::S16, REGISTER_SCRATCH, dst, X86IndirectAccess::Offset(0))),
-                4 => self.emit_ins(X86Instruction::load(OperandSize::S32, REGISTER_SCRATCH, dst, X86IndirectAccess::Offset(0))),
-                8 => self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_SCRATCH, dst, X86IndirectAccess::Offset(0))),
-                _ => unreachable!(),
-            }
-        } else {
-            // address in r11, value either in register or a constant...
-            match value {
-                Some(Value::Register(reg)) => {
-                    match len {
-                        1 => self.emit_ins(X86Instruction::store(OperandSize::S8, reg, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                        2 => self.emit_ins(X86Instruction::store(OperandSize::S16, reg, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                        4 => self.emit_ins(X86Instruction::store(OperandSize::S32, reg, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                        8 => self.emit_ins(X86Instruction::store(OperandSize::S64, reg, REGISTER_SCRATCH, X86IndirectAccess::Offset(0))),
-                        _ => unreachable!(),
-                    }
-                }
-                Some(Value::Constant64(val, _)) => {
-                    match len {
-                        1 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S8,  REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
-                        2 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S16, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
-                        4 => self.emit_ins(X86Instruction::store_immediate(OperandSize::S32, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val)),
-                        8 => {
-                            assert!(i32::try_from(val).is_ok(), "current implementation of untranslated store does not expect to deal with imm64!");
-                            self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, REGISTER_SCRATCH, X86IndirectAccess::Offset(0), val))
-                        },
-                        _ => unreachable!(),
-                    }
-                }
-                _ => unreachable!(),
-            }
+        let anchor_base = match value {
+            Some(Value::Register(_reg)) => 4,
+            Some(Value::Constant64(_constant, _user_provided)) => 8,
+            _ => 0,
+        };
+        let anchor = ANCHOR_TRANSLATE_MEMORY_ADDRESS + anchor_base + len.trailing_zeros() as usize;
+        // store self.pc in the first stack slot of the anchor
+        self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, RSP, X86IndirectAccess::OffsetIndexShift(-16, RSP, 0), self.pc as i64));
+        self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(anchor, 5)));
+        if let Some(dst) = dst {
+            self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_SCRATCH, dst));
         }
     }
 

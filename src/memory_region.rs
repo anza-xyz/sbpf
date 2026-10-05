@@ -693,7 +693,6 @@ pub struct MemoryMapping {
     access_violation_handler: AccessViolationHandler,
     max_call_depth: i64,
     stack_frame_size: i64,
-    disable_address_translation: bool,
     /// Executable sbpf_version
     sbpf_version: SBPFVersion,
     initialized: bool,
@@ -775,7 +774,6 @@ impl MemoryMapping {
             access_violation_handler: Box::new(access_violation_handler),
             max_call_depth: config.max_call_depth as i64,
             stack_frame_size: config.stack_frame_size as i64,
-            disable_address_translation: !config.enable_address_translation,
             sbpf_version,
             initialized: false,
             ty,
@@ -810,16 +808,6 @@ impl MemoryMapping {
         len: u64,
     ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
-        if self.disable_address_translation {
-            // NOTE TRICKY: this pointer most likely did *not* get its provenance exposed in the
-            // Rust-land! This option in general is extremely unsafe and have us constructing
-            // pointers to no man's land. We acknowledge this and don't consider it to be a bug,
-            // given that the option isn't meant to be used for any serious applications of this
-            // crate.
-            let ptr = ptr::with_exposed_provenance_mut(vm_addr as usize);
-            let buffer = HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(ptr, len as usize));
-            return StableResult::Ok(buffer);
-        }
         if let Some((_index, region)) = self.find_region(vm_addr) {
             if region.host_buffer().is_mutable() || access_type != AccessType::Store {
                 if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
@@ -842,43 +830,67 @@ impl MemoryMapping {
         len: u64,
     ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
-        if self.disable_address_translation {
-            // NOTE TRICKY: this pointer most likely did *not* get its provenance exposed in the
-            // Rust-land! This option in general is extremely unsafe and have us constructing
-            // pointers to no man's land. We acknowledge this and don't consider it to be a bug,
-            // given that the option isn't meant to be used for any serious applications of this
-            // crate.
-            let ptr = ptr::with_exposed_provenance_mut(vm_addr as usize);
-            let buffer = HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(ptr, len as usize));
-            return StableResult::Ok(buffer);
-        }
-
-        if let Some((index, region)) = self.find_region(vm_addr) {
-            if region.host_buffer().is_mutable() || access_type != AccessType::Store {
-                if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                    return StableResult::Ok(host_buffer);
-                }
-            }
-            let mut region = (*region).clone();
-            let max_len = self
-                .get_regions()
-                .get(index.saturating_add(1))
-                .map_or(u64::MAX, |next_region| next_region.vm_addr)
-                .saturating_sub(region.vm_addr);
-            (self.access_violation_handler)(&mut region, max_len, access_type, vm_addr, len);
-            if region.host_buffer().is_mutable() || access_type != AccessType::Store {
-                if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                    if let Err(err) = unsafe { self.replace_region(index, region) } {
-                        return StableResult::Err(err);
+        let index = match self.find_region(vm_addr) {
+            Some((index, region)) => {
+                if region.host_buffer().is_mutable() || access_type != AccessType::Store {
+                    if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+                        return StableResult::Ok(host_buffer);
                     }
-                    return StableResult::Ok(host_buffer);
                 }
+                index
+            }
+            None => usize::MAX,
+        };
+        // The slow path is out of line, so that the code in there doesn't make the callers of the
+        // fast path save and restore registers they otherwise do not need to. Note, that a single
+        // call site for the cold path matters. Split it up and LLVM merges their results with the
+        // fast path's through the stack.
+        self.map_with_access_violation_handler_slow(index, access_type, vm_addr, len)
+    }
+
+    // `#[cold]`, `#[inline(never)]` have been experimentally determined to improve mapping function
+    // throughput.
+    // In the future using a `rust-cold` calling convention would help this further.
+    #[cold]
+    #[inline(never)]
+    fn map_with_access_violation_handler_slow(
+        &mut self,
+        region_index: usize,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+    ) -> StableResult<HostBuffer, EbpfError> {
+        let regions = self.get_regions();
+        let Some(region) = regions.get(region_index) else {
+            debug_assert!(self.find_region(vm_addr).is_none());
+            return StableResult::Err(self.generate_access_violation_for(
+                None,
+                access_type,
+                vm_addr,
+                len,
+            ));
+        };
+        let mut region = region.clone();
+        let max_len = regions
+            .get(region_index.saturating_add(1))
+            .map_or(u64::MAX, |next_region| next_region.vm_addr)
+            .saturating_sub(region.vm_addr);
+        (self.access_violation_handler)(&mut region, max_len, access_type, vm_addr, len);
+        if region.host_buffer().is_mutable() || access_type != AccessType::Store {
+            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+                if let Err(err) = unsafe { self.replace_region(region_index, region) } {
+                    return StableResult::Err(err);
+                }
+                return StableResult::Ok(host_buffer);
             }
         }
-        StableResult::Err(self.generate_access_violation(access_type, vm_addr, len))
+        // The handler did not change the region in the mapping, so the original one still applies.
+        let region = self.get_regions().get(region_index);
+        StableResult::Err(self.generate_access_violation_for(region, access_type, vm_addr, len))
     }
 
     /// Loads `size_of::<T>()` bytes at the given guest address.
+    #[inline]
     pub fn load<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> ProgramResult {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
@@ -901,6 +913,7 @@ impl MemoryMapping {
     }
 
     /// Store `value` at the given guest address.
+    #[inline]
     pub fn store<T: Pod>(&mut self, value: T, vm_addr: u64) -> ProgramResult {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
@@ -1002,6 +1015,23 @@ impl MemoryMapping {
         vm_addr: u64,
         len: u64,
     ) -> EbpfError {
+        self.generate_access_violation_for(
+            self.find_region(vm_addr).map(|(_, region)| region),
+            access_type,
+            vm_addr,
+            len,
+        )
+    }
+
+    /// Like [`Self::generate_access_violation`], with `region` being what
+    /// `find_region(vm_addr)` returns.
+    fn generate_access_violation_for(
+        &self,
+        region: Option<&MemoryRegion>,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+    ) -> EbpfError {
         let stack_frame = (vm_addr as i64)
             .saturating_sub(ebpf::MM_STACK_START as i64)
             .checked_div(self.stack_frame_size)
@@ -1011,9 +1041,8 @@ impl MemoryMapping {
         {
             EbpfError::StackAccessViolation(access_type, vm_addr, len, stack_frame)
         } else {
-            let region = self.find_region(vm_addr);
             let region_name = match vm_addr & (!ebpf::MM_BYTECODE_START.saturating_sub(1)) {
-                _ if region.map(|(_, r)| r.vm_addr_range().contains(&vm_addr)) != Some(true) => {
+                _ if region.map(|r| r.vm_addr_range().contains(&vm_addr)) != Some(true) => {
                     "unallocated"
                 }
                 ebpf::MM_BYTECODE_START => "program",

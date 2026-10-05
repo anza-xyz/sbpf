@@ -116,8 +116,6 @@ pub struct Config {
     pub max_call_depth: usize,
     /// Size of a stack frame in bytes, must match the size specified in the LLVM BPF backend
     pub stack_frame_size: usize,
-    /// Enables the use of MemoryMapping and MemoryRegion for address translation
-    pub enable_address_translation: bool,
     /// Enables gaps in VM address space between the stack frames
     pub enable_stack_frame_gaps: bool,
     /// Maximal pc distance after which a new instruction meter validation is emitted by the JIT
@@ -154,7 +152,6 @@ impl Default for Config {
         Self {
             max_call_depth: 64,
             stack_frame_size: defaults::get_stack_frame_size(),
-            enable_address_translation: true,
             enable_stack_frame_gaps: true,
             instruction_meter_checkpoint_distance: 10000,
             enable_instruction_meter: true,
