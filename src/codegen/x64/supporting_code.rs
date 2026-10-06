@@ -75,7 +75,7 @@ impl SupportingCode {
             symbols.push((format!("callx_r{reg}"), *callx as usize));
         }
         #[cfg(feature = "tracer")]
-        symbols.push(("trace".to_string(), self.trace));
+        symbols.push(("trace".to_string(), self.trace as usize));
         for size_log2 in 0..4 {
             let bits = 8usize << size_log2;
             for dst in 0..Reg::COUNT {
@@ -236,7 +236,7 @@ impl SupportingCode {
             ; add RTEMP, rbp => Frame[BYTE -1].jit_pc_section
             ; mov WTEMP, [RTEMP]
             ; add RTEMP, rbp => Frame[BYTE -1].code
-            ; add rax, ebpf::INSN_SIZE as i32
+            ; add rax, BYTE ebpf::INSN_SIZE as i8
             ; mov rbp => Frame[BYTE -1].next_insn, rax
             // The `RINSN` of the JIT code, which is above the return address of
             // `invoke_support`.
@@ -246,7 +246,7 @@ impl SupportingCode {
             ; movzx RTEMP, WORD [rax]
             ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
             ; add RTEMP, rbp => Frame[BYTE -1].code
-            ; add RINSN, ebpf::INSN_SIZE as i32
+            ; add RINSN, BYTE ebpf::INSN_SIZE as i8
             ; =>resolved
             ; push R6
             ; push R7
@@ -357,7 +357,7 @@ impl SupportingCode {
         x64asm!(out
             ; push rbp
             ; mov rbp, rsp
-            ; sub rsp, frame_size as i32
+            ; sub rsp, BYTE i8::try_from(frame_size).unwrap()
             ; push rcx
             ; lea rdi, rbp => Frame[BYTE -1]
             ; mov ecx, (frame_size / 8) as i32
@@ -407,9 +407,9 @@ impl SupportingCode {
             ; jmp =>meter_checked
             ; =>not_internal
             // As in `syscall`, `rax` is the budget remaining.
-            ; mov RTEMP, [rsp + SPILL_PUSHED_RTEMP]
+            ; mov RTEMP, [ BYTE SPILL_PUSHED_RTEMP + rsp ]
             ; lea RTEMP, [RTEMP + rax * 8]
-            ; mov [rsp + SPILL_PUSHED_RMETER], RTEMP
+            ; mov [ BYTE SPILL_PUSHED_RMETER + rsp ], RTEMP
             ; cmp dl, HostCallStatus::Ok as i8
             ;; reload_after_sysv64_call(out)
             ; jne =>failed
@@ -477,9 +477,9 @@ impl SupportingCode {
             ; mov rax, rbp => Frame[BYTE -1].call_dispatcher
             ; call rax
             // The syscall has consumed the budget even if it failed.
-            ; mov RTEMP, [rsp + SPILL_PUSHED_RTEMP]
+            ; mov RTEMP, [ BYTE SPILL_PUSHED_RTEMP + rsp ]
             ; lea RTEMP, [RTEMP + rax * 8]
-            ; mov [rsp + SPILL_PUSHED_RMETER], RTEMP
+            ; mov [ BYTE SPILL_PUSHED_RMETER + rsp ], RTEMP
             ; cmp dl, HostCallStatus::Ok as i8
             ;; reload_after_sysv64_call(out)
             ; jne =>failed
@@ -665,8 +665,8 @@ const SYSV64_CLOBBERED: u16 = reg_mask(&[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R
 /// The BPF registers among them.
 const BPF_SYSV64_CLOBBERED: u16 = SYSV64_CLOBBERED & reg_mask(&GPREG_MAP);
 /// Where `spill_for_sysv64_call` pushes `RTEMP` and `RMETER`, relative to `rsp` after it.
-const SPILL_PUSHED_RTEMP: i32 = 8;
-const SPILL_PUSHED_RMETER: i32 = 0;
+const SPILL_PUSHED_RTEMP: i8 = 8;
+const SPILL_PUSHED_RMETER: i8 = 0;
 
 /// Where the code generated next in `out`, based at `base`, is going to run from.
 fn address(out: &mut Asm, base: u32, align_for_call: bool) -> u32 {
@@ -990,8 +990,8 @@ mod tests {
     use super::*;
 
     fn contains_address(code: &[u8], address: u32) -> bool {
-        // `mov rax, imm64`, see `invoke_support`.
-        let mov = [&[0x48, 0xb8][..], &(address as u64).to_le_bytes()].concat();
+        // `mov eax, imm32`, see `invoke_support`.
+        let mov = [&[0xb8][..], &address.to_le_bytes()].concat();
         code.windows(mov.len()).any(|window| window == mov)
     }
 

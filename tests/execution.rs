@@ -4734,6 +4734,73 @@ fn test_jmp32_sbpfv0() {
 }
 
 #[test]
+fn test_lddw_exceeding_budget() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // `lddw` counts as one instruction over two slots, which the meter must not count until the
+    // instruction is within the budget: the pc of `ExceededMaxInstructions` is that of the first
+    // instruction past it.
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+        for source in [
+            "
+            lddw r0, 1
+            exit",
+            "
+            mov r0, 0
+            mov r1, 0
+            lddw r2, 1
+            exit",
+            "
+            mov r0, 0
+            lddw r1, 1
+            lddw r2, 2
+            exit",
+        ] {
+            let executable = assemble::<TestContextObject>(
+                source,
+                Arc::new(BuiltinProgram::new_loader(config.clone())),
+            )
+            .unwrap();
+            executable.verify::<RequisiteVerifier>().unwrap();
+            executable.dynasm_compile().unwrap();
+            for budget in 0..5 {
+                let mut results = Vec::new();
+                for (name, mode) in [
+                    ("interpreter", ExecutionMode::Interpreted),
+                    ("dynasm jit", ExecutionMode::Jit),
+                    ("dynasm interpreter", ExecutionMode::DynasmInterpreted),
+                ] {
+                    let mut context_object = TestContextObject::new(budget);
+                    create_vm!(
+                        vm,
+                        &executable,
+                        &mut context_object,
+                        stack,
+                        heap,
+                        vec![],
+                        None
+                    );
+                    let mut mode = mode;
+                    let mut call_frames =
+                        vec![CallFrame::default(); Config::default().max_call_depth];
+                    let (count, result) =
+                        vm.execute_program(&executable, &mut mode, &mut call_frames);
+                    results.push((count, format!("{result:?}"), vm.registers[11]));
+                    assert_eq!(
+                        results[0],
+                        results[results.len() - 1],
+                        "{name}, {sbpf_version:?}, budget {budget}:{source}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn test_entrypoint_in_lddw() {
     use solana_sbpf::vm::{CallFrame, ExecutionMode};
     // Nothing stops an entrypoint from pointing at the second half of an `lddw`, which the JITs

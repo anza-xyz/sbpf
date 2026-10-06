@@ -554,16 +554,24 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             );
         }
 
-        // The second half is another instruction with the more significant half of the immediate.
-        ebpf::LD_DW_IMM => x64asm!(out
-            ; mov Rd(dst), DWORD REL32_IMM
-            ; mov WTEMP, DWORD [ DWORD 4i32 + RINSN ]
-            ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 4, 4, 0)
-            ; shl RTEMP, 32
-            ; or Rq(dst), RTEMP
-            // Counts as a single instruction.
-            ; add RMETER, BYTE ebpf::INSN_SIZE as i8
-        ),
+        ebpf::LD_DW_IMM => {
+            // The second half is another instruction with the more significant half of the
+            // immediate.
+            //
+            // Counts as a single instruction, which moves the limit by one more slot. That's only
+            // right once the instruction is within the budget, which means we gotta spend
+            // additional code to check meter here.
+            load_next_insn_addr(out);
+            bpf_validate_meter(out);
+            x64asm!(out
+                ; add RMETER, BYTE ebpf::INSN_SIZE as i8
+                ; mov Rd(dst), DWORD REL32_IMM
+                ; mov WTEMP, DWORD [ DWORD 4i32 + RINSN ]
+                ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 4, 4, 0)
+                ; shl RTEMP, 32
+                ; or Rq(dst), RTEMP
+            )
+        }
 
         ebpf::LD_B_REG
         | ebpf::LD_H_REG
@@ -1148,7 +1156,7 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
             ; movzx RTEMP, WORD [ BYTE to_last + RINSN ]
             ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
             ; lea RTEMP, [ DWORD base_addr + RTEMP ]
-            ; add RINSN, size as i32
+            ; add RINSN, BYTE size
             ; jmp RTEMP
             ; =>exceeded
             ;; terminate(&mut generator, SIG_EXCEEDED_MAX_INSTRUCTIONS)
