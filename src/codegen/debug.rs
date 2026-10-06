@@ -250,8 +250,8 @@ fn supporting_code_region(supports: &SupportingCode) -> Region {
 /// The address range of the supporting code, and its symbols.
 fn supporting_code_symbols(supports: &SupportingCode) -> (std::ops::Range<usize>, Vec<Symbol>) {
     let (range, named) = supports.debug_symbols();
-    let symbols = sized_symbols(named, range.end);
-    (range, symbols)
+    let symbols = sized_symbols(named, range.end as usize);
+    (range.start as usize..range.end as usize, symbols)
 }
 
 fn version_name(version: SBPFVersion) -> String {

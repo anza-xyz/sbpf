@@ -11,33 +11,33 @@ use dynasmrt::{DynasmApi, DynasmLabelApi, VecAssembler};
 pub(in crate::codegen) struct SupportingCode {
     /// What the internal calls have in common, which is only jumped to.
     #[cfg(feature = "codegen-debug")]
-    call_internal: *const u8,
+    call_internal: u32,
     /// `CALL_IMM` SBPFv3 onwards.
-    pub(super) call_imm: *const u8,
+    pub(super) call_imm: u32,
     /// `CALL_REG` SBPFv3 onwards, by the register with the target.
-    pub(super) callx: [*const u8; Reg::COUNT],
+    pub(super) callx: [u32; Reg::COUNT],
     /// Syscall trampoline.
-    pub(super) syscall: *const u8,
+    pub(super) syscall: u32,
     /// Appends the registers and the pc of the instruction preceding the address in `TEMP` to
     /// `vm.register_trace`.
     #[cfg(feature = "tracer")]
-    pub(super) trace: *const u8,
+    pub(super) trace: u32,
     /// SBPFv0 `CALL_IMM`, which is a syscall or an internal call depending on the immediate.
-    pub(super) v0_call_imm: *const u8,
+    pub(super) v0_call_imm: u32,
     /// SBPFv0 `CALL_REG`, which computes the register from the immediate.
-    pub(super) v0_callx: *const u8,
-    pub(super) entry_point: *const u8,
+    pub(super) v0_callx: u32,
+    pub(super) entry_point: u32,
     /// See `SupportingCode::divide`.
-    pub(super) divide: [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4],
+    pub(super) divide: [[[u32; Reg::COUNT]; Reg::COUNT]; 4],
     /// Loads, by log2 of the access size, destination and source register.
-    pub(super) load: [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4],
+    pub(super) load: [[[u32; Reg::COUNT]; Reg::COUNT]; 4],
     /// Stores of the immediate, by log2 of the access size and destination register.
-    pub(super) store_imm: [[*const u8; Reg::COUNT]; 4],
+    pub(super) store_imm: [[u32; Reg::COUNT]; 4],
     /// Stores of a register, by log2 of the access size, destination and source register.
-    pub(super) store_reg: [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4],
+    pub(super) store_reg: [[[u32; Reg::COUNT]; Reg::COUNT]; 4],
     /// The addresses of all the generated code.
     #[cfg(feature = "codegen-debug")]
-    code_range: std::ops::Range<usize>,
+    code_range: std::ops::Range<u32>,
 }
 
 // SAFETY: the pointers are only used for their addresses, as the memory they point into is
@@ -62,9 +62,7 @@ impl SupportingCode {
 
     /// The generated code, and the address of each of its routines.
     #[cfg(feature = "codegen-debug")]
-    pub(in crate::codegen) fn debug_symbols(
-        &self,
-    ) -> (std::ops::Range<usize>, Vec<(String, usize)>) {
+    pub(in crate::codegen) fn debug_symbols(&self) -> (std::ops::Range<u32>, Vec<(String, usize)>) {
         let mut symbols = vec![
             ("call_internal".to_string(), self.call_internal as usize),
             ("call_imm".to_string(), self.call_imm as usize),
@@ -77,17 +75,20 @@ impl SupportingCode {
             symbols.push((format!("callx_r{reg}"), *callx as usize));
         }
         #[cfg(feature = "tracer")]
-        symbols.push(("trace".to_string(), self.trace as usize));
+        symbols.push(("trace".to_string(), self.trace));
         for size_log2 in 0..4 {
             let bits = 8usize << size_log2;
             for dst in 0..Reg::COUNT {
-                let store_imm = self.store_imm[size_log2][dst] as usize;
-                symbols.push((format!("store_imm_u{bits}_r{dst}"), store_imm));
+                let store_imm = self.store_imm[size_log2][dst];
+                symbols.push((format!("store_imm_u{bits}_r{dst}"), store_imm as usize));
                 for src in 0..Reg::COUNT {
-                    let load = self.load[size_log2][dst][src] as usize;
-                    symbols.push((format!("load_u{bits}_r{dst}_r{src}"), load));
-                    let store_reg = self.store_reg[size_log2][dst][src] as usize;
-                    symbols.push((format!("store_reg_u{bits}_r{dst}_r{src}"), store_reg));
+                    let load = self.load[size_log2][dst][src];
+                    symbols.push((format!("load_u{bits}_r{dst}_r{src}"), load as usize));
+                    let store_reg = self.store_reg[size_log2][dst][src];
+                    symbols.push((
+                        format!("store_reg_u{bits}_r{dst}_r{src}"),
+                        store_reg as usize,
+                    ));
                 }
             }
         }
@@ -108,7 +109,7 @@ impl SupportingCode {
 
     /// Helper performing the division in place on the registers `dst` and `src`. Expects the
     /// address of the instruction following the division in `temp`.
-    pub(super) fn divide(&self, is_div: bool, is_64: bool, dst: Reg, src: Reg) -> *const u8 {
+    pub(super) fn divide(&self, is_div: bool, is_64: bool, dst: Reg, src: Reg) -> u32 {
         self.divide[is_div as usize | (is_64 as usize) << 1][dst.0 as usize][src.0 as usize]
     }
 
@@ -126,7 +127,8 @@ impl SupportingCode {
         // to it. The mapping stays, as the supporting code is never freed.
         let code_record =
             unsafe { super::super::debug::CodeRecord::new("supports", buffer as usize, Self::LEN) };
-        let (supports, code) = Self::assemble(buffer as usize);
+        let base_addr = u32::try_from(buffer.expose_provenance()).unwrap();
+        let (supports, code) = Self::assemble(base_addr);
         assert!(code.len() <= Self::LEN, "supporting code is too long!");
         // SAFETY:
         //
@@ -149,8 +151,8 @@ impl SupportingCode {
     }
 
     /// Assemble the supporting code to run from the address `base`.
-    fn assemble(base: usize) -> (SupportingCode, Vec<u8>) {
-        let mut out = Asm::new(base);
+    fn assemble(base: u32) -> (SupportingCode, Vec<u8>) {
+        let mut out = Asm::new(usize::try_from(base).unwrap());
         let [call_internal_label, meter_checked, target_checked] =
             [(); 3].map(|()| out.new_dynamic_label());
         #[cfg_attr(not(feature = "codegen-debug"), allow(unused_variables))]
@@ -181,7 +183,7 @@ impl SupportingCode {
             entry_point: Self::entry_point(&mut out, base),
             divide: Self::divides(&mut out, base),
             #[cfg(feature = "codegen-debug")]
-            code_range: base..base.wrapping_add(out.offset().0),
+            code_range: base..base.wrapping_add(u32::try_from(out.offset().0).unwrap()),
         };
         let code = out
             .finalize()
@@ -197,11 +199,11 @@ impl SupportingCode {
     /// the text section and is in `rax` as an offset into it.
     fn call_internal(
         out: &mut Asm,
-        base: usize,
+        base: u32,
         label: DynamicLabel,
         meter_checked: DynamicLabel,
         target_checked: DynamicLabel,
-    ) -> *const u8 {
+    ) -> u32 {
         let start = address(out, base, true);
         let [exceeded, outside, too_deep, interpreted, resolved] =
             [(); 5].map(|()| out.new_dynamic_label());
@@ -276,7 +278,7 @@ impl SupportingCode {
         start
     }
 
-    fn call_imm(out: &mut Asm, base: usize, to_call_imm_target_checked: DynamicLabel) -> *const u8 {
+    fn call_imm(out: &mut Asm, base: u32, to_call_imm_target_checked: DynamicLabel) -> u32 {
         let start = address(out, base, true);
         let invalid = out.new_dynamic_label();
         validate_meter(out);
@@ -297,15 +299,15 @@ impl SupportingCode {
     #[allow(clippy::type_complexity)]
     fn memory_accesses(
         out: &mut Asm,
-        base: usize,
+        base: u32,
     ) -> (
-        [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4],
-        [[*const u8; Reg::COUNT]; 4],
-        [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4],
+        [[[u32; Reg::COUNT]; Reg::COUNT]; 4],
+        [[u32; Reg::COUNT]; 4],
+        [[[u32; Reg::COUNT]; Reg::COUNT]; 4],
     ) {
-        let mut load = [[[std::ptr::null(); Reg::COUNT]; Reg::COUNT]; 4];
-        let mut store_imm = [[std::ptr::null(); Reg::COUNT]; 4];
-        let mut store_reg = [[[std::ptr::null(); Reg::COUNT]; Reg::COUNT]; 4];
+        let mut load = [[[0; Reg::COUNT]; Reg::COUNT]; 4];
+        let mut store_imm = [[0; Reg::COUNT]; 4];
+        let mut store_reg = [[[0; Reg::COUNT]; Reg::COUNT]; 4];
         let failed = out.new_dynamic_label();
         for size_log2 in 0..4 {
             for dst in Reg::ALL {
@@ -329,8 +331,8 @@ impl SupportingCode {
     }
 
     /// The helpers for `divide`.
-    fn divides(out: &mut Asm, base: usize) -> [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4] {
-        let mut divide = [[[std::ptr::null(); Reg::COUNT]; Reg::COUNT]; 4];
+    fn divides(out: &mut Asm, base: u32) -> [[[u32; Reg::COUNT]; Reg::COUNT]; 4] {
+        let mut divide = [[[0; Reg::COUNT]; Reg::COUNT]; 4];
         for is_div in [false, true] {
             for is_64 in [false, true] {
                 let kind = &mut divide[is_div as usize | (is_64 as usize) << 1];
@@ -345,7 +347,7 @@ impl SupportingCode {
         divide
     }
 
-    fn entry_point(out: &mut Asm, base: usize) -> *const u8 {
+    fn entry_point(out: &mut Asm, base: u32) -> u32 {
         // Expects `rsi` to point at the `Frame`, `RINSN` and `RMETER` to be initialized to their
         // namesakes, and `rcx` to the machine code (jitted or interpreter step) for the first BPF
         // instruction to execute.
@@ -379,7 +381,7 @@ impl SupportingCode {
     }
 
     /// SBPFv0 `CALL_IMM`: the immediate is the key of either a syscall or an internal function.
-    fn v0_call_imm(out: &mut Asm, base: usize, meter_checked: DynamicLabel) -> *const u8 {
+    fn v0_call_imm(out: &mut Asm, base: u32, meter_checked: DynamicLabel) -> u32 {
         let start = address(out, base, true);
         let [not_internal, failed] = [(); 2].map(|()| out.new_dynamic_label());
         validate_meter(out);
@@ -420,16 +422,12 @@ impl SupportingCode {
 
     /// `CALL_REG`: the routines for each register with the target (for SBPFv3 onwards), and the
     /// SBPFv0 one, where the immediate is the number of the register, which jumps to them.
-    fn callx(
-        out: &mut Asm,
-        base: usize,
-        call_internal: DynamicLabel,
-    ) -> (*const u8, [*const u8; Reg::COUNT]) {
+    fn callx(out: &mut Asm, base: u32, call_internal: DynamicLabel) -> (u32, [u32; Reg::COUNT]) {
         // Each register's code takes the same space, which is what `lea` can scale by.
         const STUB_SIZE: usize = 8;
         let common = out.new_dynamic_label();
         let stubs = address(out, base, true);
-        let mut callx = [std::ptr::null(); Reg::COUNT];
+        let mut callx = [0; Reg::COUNT];
         for reg in Reg::ALL {
             callx[usize::from(reg.0)] = address(out, base, false);
             let stub_start = out.offset().0;
@@ -462,7 +460,7 @@ impl SupportingCode {
         (start, callx)
     }
 
-    fn syscall(out: &mut Asm, base: usize) -> *const u8 {
+    fn syscall(out: &mut Asm, base: u32) -> u32 {
         let start = address(out, base, true);
         let failed = out.new_dynamic_label();
         validate_meter(out);
@@ -493,7 +491,7 @@ impl SupportingCode {
     }
 
     #[cfg(feature = "tracer")]
-    fn trace(out: &mut Asm, base: usize) -> *const u8 {
+    fn trace(out: &mut Asm, base: u32) -> u32 {
         let start = address(out, base, true);
         spill_for_sysv64_call(out);
         for reg in Reg::ALL {
@@ -521,12 +519,12 @@ impl SupportingCode {
     /// instruction preceding the address in `RTEMP`. Jumps to `failed` if the access fails.
     fn load(
         out: &mut Asm,
-        base: usize,
+        base: u32,
         size_log2: usize,
         dst: Reg,
         src: Reg,
         failed: DynamicLabel,
-    ) -> *const u8 {
+    ) -> u32 {
         let start = address(out, base, true);
         let function = match size_log2 {
             0 => load::<u8> as *const u8,
@@ -564,12 +562,12 @@ impl SupportingCode {
     /// `failed` if the access fails.
     fn store(
         out: &mut Asm,
-        base: usize,
+        base: u32,
         size_log2: usize,
         dst: Reg,
         src: Option<Reg>,
         failed: DynamicLabel,
-    ) -> *const u8 {
+    ) -> u32 {
         let start = address(out, base, true);
         let function = match size_log2 {
             0 => store::<u8> as *const u8,
@@ -671,11 +669,12 @@ const SPILL_PUSHED_RTEMP: i32 = 8;
 const SPILL_PUSHED_RMETER: i32 = 0;
 
 /// Where the code generated next in `out`, based at `base`, is going to run from.
-fn address(out: &mut Asm, base: usize, align_for_call: bool) -> *const u8 {
+fn address(out: &mut Asm, base: u32, align_for_call: bool) -> u32 {
     if align_for_call {
         x64asm!(out; .align 16);
     }
-    base.wrapping_add(out.offset().0) as *const u8
+    let offset = u32::try_from(out.offset().0).unwrap();
+    base.checked_add(offset).unwrap()
 }
 
 /// Like the JIT templates' `terminate`.
@@ -990,7 +989,7 @@ fn invoke_syscall<C: crate::vm::ContextObject>(
 mod tests {
     use super::*;
 
-    fn contains_address(code: &[u8], address: *const u8) -> bool {
+    fn contains_address(code: &[u8], address: u32) -> bool {
         // `mov rax, imm64`, see `invoke_support`.
         let mov = [&[0x48, 0xb8][..], &(address as u64).to_le_bytes()].concat();
         code.windows(mov.len()).any(|window| window == mov)

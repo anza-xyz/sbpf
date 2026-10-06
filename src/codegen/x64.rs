@@ -134,7 +134,6 @@ trait X64Generator {
     fn push(&mut self, byte: u8);
     fn push_i8(&mut self, value: i8);
     fn push_i32(&mut self, value: i32);
-    fn push_i64(&mut self, value: i64);
     fn global_reloc(
         &mut self,
         name: &'static str,
@@ -563,7 +562,7 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             ; shl RTEMP, 32
             ; or Rq(dst), RTEMP
             // Counts as a single instruction.
-            ; add RMETER, ebpf::INSN_SIZE as i32
+            ; add RMETER, BYTE ebpf::INSN_SIZE as i8
         ),
 
         ebpf::LD_B_REG
@@ -643,12 +642,12 @@ fn load_next_insn_addr<G: X64Generator + ?Sized>(out: &mut G) {
 }
 
 /// Call the support at `support_addr`, which finds `RINSN` above its return address.
-fn invoke_support<G: X64Generator + ?Sized>(out: &mut G, support_addr: *const u8) {
+fn invoke_support<G: X64Generator + ?Sized>(out: &mut G, support_addr: u32) {
     // Every other register holds something, so `RINSN` makes room for the target. The JIT code
     // need not be within reach of a 32-bit displacement from the supports.
     x64asm!(out
         ; push RINSN
-        ; mov rax, QWORD support_addr as i64
+        ; mov eax, DWORD support_addr as i32
         ; call rax
         ; pop RINSN
     );
@@ -756,10 +755,6 @@ impl X64Generator for JITGenerator<'_> {
     }
 
     fn push_i32(&mut self, value: i32) {
-        self.template.extend(&value.to_le_bytes());
-    }
-
-    fn push_i64(&mut self, value: i64) {
         self.template.extend(&value.to_le_bytes());
     }
 
@@ -1016,10 +1011,6 @@ impl X64Generator for InterpreterGenerator {
     }
 
     fn push_i32(&mut self, value: i32) {
-        self.extend(&value.to_le_bytes());
-    }
-
-    fn push_i64(&mut self, value: i64) {
         self.extend(&value.to_le_bytes());
     }
 
