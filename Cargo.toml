@@ -50,10 +50,10 @@ tracer = []
 debugger = ["dep:gdbstub"]
 shuttle-test = ["dep:shuttle"]
 conf-stack-frame-size = []
-# Generate the code of `codegen` into mapped ELF files with its symbols (on Linux, in
-# `$SBPF_CODEGEN_DIR` or the temporary directory) and register it with the GDB JIT interface, expose
-# it in `codegen::debug`, and emit additional runtime checks into the generated code.
-codegen_debug = []
+# Compile in the debugging aids of `codegen`.
+#
+# Use the `SBPF_DEBUG_*` environment variables to enable and/or configure them.
+codegen-debug = []
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
@@ -81,4 +81,4 @@ harness = false
 
 [[example]]
 name = "dynasm_tool"
-required-features = ["codegen_debug"]
+required-features = ["codegen-debug"]

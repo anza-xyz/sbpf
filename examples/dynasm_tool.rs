@@ -2,10 +2,9 @@
 //!
 //! `<program>` is either an ELF (the file name ends with `.so`) or assembly text.
 //!
-//! Needs the `codegen_debug` feature. With it, on Linux, the generated code is itself in ELF files
-//! (`sbpf-<pid>-<label>.elf` in `$SBPF_CODEGEN_DIR` or the temporary directory), which the
-//! profilers and debuggers running the tool read the symbols of: see `run --maps`, and
-//! `codegen::debug`.
+//! Needs the `codegen-debug` feature. With it, on Linux and with `SBPF_DEBUG_CODE_DIR` set, the
+//! generated code is itself in ELF files (`sbpf-<pid>-<label>.elf` there), which the profilers and
+//! debuggers running the tool read the symbols of: see `run --maps`, and `codegen::debug`.
 
 #[cfg(target_arch = "x86_64")]
 mod tool {

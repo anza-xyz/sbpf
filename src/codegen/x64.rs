@@ -923,7 +923,7 @@ fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
 pub(super) struct Interpreter {
     pub(super) buffer: *mut u8,
     /// The length of the code of each step, which is followed by padding to the size of the step.
-    #[cfg(feature = "codegen_debug")]
+    #[cfg(feature = "codegen-debug")]
     pub(super) step_lens: Box<[u8]>,
 }
 
@@ -1102,16 +1102,16 @@ pub(super) fn interpreter(version: SBPFVersion) -> &'static Interpreter {
 fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     let mut generator = InterpreterGenerator::new(version);
     let base_addr = i32::try_from(generator.buffer as usize).expect("interpreter in first 2GB");
-    #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
+    #[cfg(all(feature = "codegen-debug", target_os = "linux"))]
     // SAFETY:
     //
-    // Contract from `CodeFile::map`: the range must be page aligned, owned by the caller, not
+    // Contract from `CodeRecord::new`: the range must be page aligned, owned by the caller, not
     // accessed meanwhile, and without content that is needed.
     // Evidence: it is the fresh allocation of `allocate_pages_low`, which is page aligned, and
     // `STEP_TABLE_SIZE` is a multiple of the page size. Nothing was written to it, and nothing else
     // refers to it. The mapping stays, as the interpreter is never freed.
-    let code_file = unsafe {
-        super::debug::CodeFile::map(
+    let code_record = unsafe {
+        super::debug::CodeRecord::new(
             &format!("interpreter-{version:?}").to_lowercase(),
             generator.buffer as usize,
             InterpreterGenerator::STEP_TABLE_SIZE,
@@ -1131,7 +1131,7 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
             InterpreterGenerator::STEP_TABLE_SIZE,
         )
     };
-    #[cfg(feature = "codegen_debug")]
+    #[cfg(feature = "codegen-debug")]
     let mut step_lens = vec![0; TemplateOpcode::COUNT];
     for opcode in TemplateOpcode::all() {
         let step_start = InterpreterGenerator::step_offset(opcode);
@@ -1174,7 +1174,7 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
             "step for {:#x} is too long",
             opcode.0
         );
-        #[cfg(feature = "codegen_debug")]
+        #[cfg(feature = "codegen-debug")]
         {
             step_lens[opcode.index()] = u8::try_from(step_len).unwrap();
         }
@@ -1191,10 +1191,10 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     };
     generator.relocs.resolve(buffer, Some(base_addr as usize));
 
-    #[cfg(feature = "codegen_debug")]
+    #[cfg(feature = "codegen-debug")]
     let step_lens = step_lens.into_boxed_slice();
-    #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
-    super::debug::finish_interpreter(code_file, version, generator.buffer, &step_lens);
+    #[cfg(all(feature = "codegen-debug", target_os = "linux"))]
+    super::debug::finish_interpreter(code_record, version, generator.buffer, &step_lens);
 
     // SAFETY:
     //
@@ -1213,7 +1213,7 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     .expect("failed to make the interpreter executable");
     Interpreter {
         buffer: generator.buffer,
-        #[cfg(feature = "codegen_debug")]
+        #[cfg(feature = "codegen-debug")]
         step_lens,
     }
 }

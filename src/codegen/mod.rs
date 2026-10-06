@@ -5,7 +5,7 @@
 // Everything here is used by the architecture specific backends, of which there may be none.
 #![cfg_attr(not(target_arch = "x86_64"), allow(dead_code, unused_imports))]
 
-#[cfg(all(feature = "codegen_debug", target_arch = "x86_64"))]
+#[cfg(all(feature = "codegen-debug", target_arch = "x86_64"))]
 pub mod debug;
 #[cfg(target_arch = "x86_64")]
 pub mod x64;
@@ -617,7 +617,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         // `output_len` is below `NOOP_DUE`, see `analyze`, and the sizes are far from `usize::MAX`.
         let mut program = JitProgram::new(pc_sec.len(), output_len.wrapping_add(SIZE));
         program.dynasm = true;
-        #[cfg(all(feature = "codegen_debug", target_arch = "x86_64", target_os = "linux"))]
+        #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
         debug::map_jit_text(&mut program);
 
         let mut position = 0;
@@ -674,7 +674,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         // the flags are in; it is small next to the machine code, so the copy is cheap.
         program.pc_section_mut().copy_from_slice(&pc_sec);
         program.seal(output_len)?;
-        #[cfg(all(feature = "codegen_debug", target_arch = "x86_64", target_os = "linux"))]
+        #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
         debug::finish_jit(self, executable, &mut program);
         Ok(program)
     }

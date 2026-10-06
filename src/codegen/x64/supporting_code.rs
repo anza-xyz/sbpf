@@ -10,7 +10,7 @@ use dynasmrt::{DynasmApi, DynasmLabelApi, VecAssembler};
 /// `load_next_insn_addr` produces it).
 pub(in crate::codegen) struct SupportingCode {
     /// What the internal calls have in common, which is only jumped to.
-    #[cfg(feature = "codegen_debug")]
+    #[cfg(feature = "codegen-debug")]
     call_internal: *const u8,
     /// `CALL_IMM` SBPFv3 onwards.
     pub(super) call_imm: *const u8,
@@ -36,7 +36,7 @@ pub(in crate::codegen) struct SupportingCode {
     /// Stores of a register, by log2 of the access size, destination and source register.
     pub(super) store_reg: [[[*const u8; Reg::COUNT]; Reg::COUNT]; 4],
     /// The addresses of all the generated code.
-    #[cfg(feature = "codegen_debug")]
+    #[cfg(feature = "codegen-debug")]
     code_range: std::ops::Range<usize>,
 }
 
@@ -61,7 +61,7 @@ impl SupportingCode {
     }
 
     /// The generated code, and the address of each of its routines.
-    #[cfg(feature = "codegen_debug")]
+    #[cfg(feature = "codegen-debug")]
     pub(in crate::codegen) fn debug_symbols(
         &self,
     ) -> (std::ops::Range<usize>, Vec<(String, usize)>) {
@@ -116,16 +116,16 @@ impl SupportingCode {
         // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
         let buffer = allocate_pages_low(Self::LEN)
             .expect("failed to allocate memory for the supporting code");
-        #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
+        #[cfg(all(feature = "codegen-debug", target_os = "linux"))]
         // SAFETY:
         //
-        // Contract from `CodeFile::map`: the range must be page aligned, owned by the caller, not
+        // Contract from `CodeRecord::new`: the range must be page aligned, owned by the caller, not
         // accessed meanwhile, and without content that is needed.
         // Evidence: it is the fresh allocation of `allocate_pages_low`, which is page aligned, and
         // `LEN` is a multiple of the page size. Nothing was written to it, and nothing else refers
         // to it. The mapping stays, as the supporting code is never freed.
-        let code_file =
-            unsafe { super::super::debug::CodeFile::map("supports", buffer as usize, Self::LEN) };
+        let code_record =
+            unsafe { super::super::debug::CodeRecord::new("supports", buffer as usize, Self::LEN) };
         let (supports, code) = Self::assemble(buffer as usize);
         assert!(code.len() <= Self::LEN, "supporting code is too long!");
         // SAFETY:
@@ -135,8 +135,8 @@ impl SupportingCode {
         // Evidence: `code.len()` was asserted to fit the `LEN` bytes of the fresh read-write
         // allocation, which `code`, a `Vec`, cannot overlap.
         unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), buffer, code.len()) };
-        #[cfg(all(feature = "codegen_debug", target_os = "linux"))]
-        super::super::debug::finish_supporting_code(code_file, &supports);
+        #[cfg(all(feature = "codegen-debug", target_os = "linux"))]
+        super::super::debug::finish_supporting_code(code_record, &supports);
         // SAFETY:
         //
         // Contract from `protect_pages`: the range must be whole pages of a mapping that the
@@ -153,7 +153,7 @@ impl SupportingCode {
         let mut out = Asm::new(base);
         let [call_internal_label, meter_checked, target_checked] =
             [(); 3].map(|()| out.new_dynamic_label());
-        #[cfg_attr(not(feature = "codegen_debug"), allow(unused_variables))]
+        #[cfg_attr(not(feature = "codegen-debug"), allow(unused_variables))]
         let call_internal = Self::call_internal(
             &mut out,
             base,
@@ -166,7 +166,7 @@ impl SupportingCode {
         let (v0_callx, callx) = Self::callx(&mut out, base, call_internal_label);
         let (load, store_imm, store_reg) = Self::memory_accesses(&mut out, base);
         let supports = Self {
-            #[cfg(feature = "codegen_debug")]
+            #[cfg(feature = "codegen-debug")]
             call_internal,
             call_imm,
             callx,
@@ -180,7 +180,7 @@ impl SupportingCode {
             store_reg,
             entry_point: Self::entry_point(&mut out, base),
             divide: Self::divides(&mut out, base),
-            #[cfg(feature = "codegen_debug")]
+            #[cfg(feature = "codegen-debug")]
             code_range: base..base.wrapping_add(out.offset().0),
         };
         let code = out
@@ -813,8 +813,8 @@ fn load_bpf_register(out: &mut Asm, reg: Reg) {
 
 /// Trap if the stack is not aligned for a host function call.
 fn debug_assert_sysv64_call_stack_alignment(out: &mut Asm) {
-    #[cfg(feature = "codegen_debug")]
-    {
+    #[cfg(feature = "codegen-debug")]
+    if super::super::debug::options().stack_checks {
         let aligned = out.new_dynamic_label();
         x64asm!(out
             ; test esp, 15
@@ -823,15 +823,15 @@ fn debug_assert_sysv64_call_stack_alignment(out: &mut Asm) {
             ; =>aligned
         );
     }
-    #[cfg(not(feature = "codegen_debug"))]
+    #[cfg(not(feature = "codegen-debug"))]
     let _ = out;
 }
 
 /// Trap if the stack is not aligned for a call of the BPF code, which is aligned past the return
 /// address, unlike host functions. Changes the flags.
 fn debug_assert_bpf_call_stack_alignment(out: &mut Asm) {
-    #[cfg(feature = "codegen_debug")]
-    {
+    #[cfg(feature = "codegen-debug")]
+    if super::super::debug::options().stack_checks {
         let (aligned, misaligned) = (out.new_dynamic_label(), out.new_dynamic_label());
         x64asm!(out
             ; test esp, 7
@@ -843,7 +843,7 @@ fn debug_assert_bpf_call_stack_alignment(out: &mut Asm) {
             ; =>aligned
         );
     }
-    #[cfg(not(feature = "codegen_debug"))]
+    #[cfg(not(feature = "codegen-debug"))]
     let _ = out;
 }
 

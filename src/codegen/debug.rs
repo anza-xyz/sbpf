@@ -3,14 +3,21 @@
 //! The generated code lives in a handful of regions (see [`Region`]), which this module describes
 //! and can write out as ELF files, for `objdump -d` and `nm`, see [`write_elf`].
 //!
-//! On Linux the running code itself is generated into ELF files, so that the tools know its symbols
-//! in the running process: the supporting code, each interpreter and each JIT program are written
-//! through a shared mapping of `sbpf-<pid>-<label>.elf`, with `<label>` being `supports`,
-//! `interpreter-<version>` or `jit-<n>`. The files are in `$SBPF_CODEGEN_DIR`, or the temporary
-//! directory if that is not set, and the directory must allow executable mappings (not `noexec`).
-//! `/proc/<pid>/maps` names them, and once the code is final it is also registered with the GDB
-//! JIT interface, so that `gdb` resolves the symbols without being told about the files. The files
-//! of the JIT programs stay on disk after the programs are dropped, as the record of them.
+//! The `codegen-debug` feature compiles in the debugging aids below, which environment variables
+//! control at runtime, see [`Options`]:
+//!
+//! - `SBPF_DEBUG_STACK_CHECKS` (on unless `0`, `false`, `off` or `no`): traps in the generated
+//!   code if the stack is misaligned for a call.
+//! - `SBPF_DEBUG_CODE_DIR` (Linux, off unless set): the running code itself is generated into ELF files
+//!   in that directory, so that the tools know its symbols in the running process: the supporting
+//!   code, each interpreter and each JIT program are written through a shared mapping of
+//!   `sbpf-<pid>-<label>.elf`, with `<label>` being `supports`, `interpreter-<version>` or
+//!   `jit-<n>`. The directory must allow executable mappings (not `noexec`). `/proc/<pid>/maps`
+//!   names the files. Those of the JIT programs stay on disk after the programs are dropped, as the
+//!   record of them.
+//! - `SBPF_DEBUG_GDB_INTEGRATION` (Linux, on unless `0`, `false`, `off` or `no`): once the code is final, it
+//!   is registered with the GDB JIT interface, so that `gdb` resolves the symbols without being
+//!   told about any files.
 
 use super::x64::{self, supporting_code::SupportingCode, InterpreterGenerator};
 use super::{AuxTemplate, JitTemplates, TemplateOpcode};
@@ -25,6 +32,46 @@ use std::convert::TryFrom;
 use std::fmt;
 use std::io;
 use std::path::Path;
+
+/// Which of the debugging aids are on, see the module documentation.
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// `SBPF_DEBUG_STACK_CHECKS`.
+    pub stack_checks: bool,
+    /// `SBPF_DEBUG_CODE_DIR`, the directory to generate the code into files in.
+    pub code_dir: Option<std::path::PathBuf>,
+    /// `SBPF_DEBUG_GDB_INTEGRATION`.
+    pub gdb_jit: bool,
+}
+
+/// The `Options` of the process, read from the environment once, before anything is generated.
+pub fn options() -> &'static Options {
+    static OPTIONS: std::sync::LazyLock<Options> = std::sync::LazyLock::new(|| Options {
+        stack_checks: env_flag("SBPF_DEBUG_STACK_CHECKS"),
+        code_dir: std::env::var_os("SBPF_DEBUG_CODE_DIR").map(std::path::PathBuf::from),
+        gdb_jit: env_flag("SBPF_DEBUG_GDB_INTEGRATION"),
+    });
+    &OPTIONS
+}
+
+/// Whether the environment variable `name` leaves its debugging aid on, which it is by default.
+///
+/// # Panics
+///
+/// If the value is not one of the recognized ones, rather than guessing what was meant.
+fn env_flag(name: &str) -> bool {
+    let Some(value) = std::env::var_os(name) else {
+        return true;
+    };
+    match value.to_str().map(str::to_ascii_lowercase).as_deref() {
+        Some("1" | "true" | "on" | "yes") => true,
+        Some("0" | "false" | "off" | "no") => false,
+        _ => panic!(
+            "{} must be 0/1, false/true, off/on or no/yes, not {:?}",
+            name, value
+        ),
+    }
+}
 
 /// A function in generated code.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -439,7 +486,7 @@ struct Segment<'a> {
 /// code, which is `end` bytes into the file, so it is written at the returned offset.
 ///
 /// Splitting it like this lets the code be written in place by whoever owns it, and the rest
-/// around it: see `CodeFile`.
+/// around it: see `CodeRecord`.
 fn elf_parts(segments: &[Segment], end: usize) -> (Vec<u8>, usize, Vec<u8>) {
     const ET_EXEC: u16 = 2;
     const EM_X86_64: u16 = 62;
@@ -592,15 +639,16 @@ fn elf_parts(segments: &[Segment], end: usize) -> (Vec<u8>, usize, Vec<u8>) {
 }
 
 #[cfg(target_os = "linux")]
-pub(crate) use linux::CodeFile;
+pub(crate) use linux::CodeRecord;
 #[cfg(target_os = "linux")]
 pub(super) use linux::{finish_interpreter, finish_jit, finish_supporting_code, map_jit_text};
 
-/// Generating the code into ELF files, and telling debuggers about them.
+/// Generating the code into ELF files, and telling debuggers about it.
 ///
 /// Anonymous memory is unnamed to profilers and debuggers. So the code is generated into a shared
 /// mapping of an ELF file instead, which `/proc/<pid>/maps` names, and once it is final the file
-/// is completed with the symbols and registered with the GDB JIT interface.
+/// is completed with the symbols, and the code registered with the GDB JIT interface. Either can
+/// be off, see `Options`.
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
@@ -612,24 +660,26 @@ mod linux {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::{Mutex, MutexGuard};
 
-    /// An ELF file being built, which the code is generated into through a mapping.
+    /// What the debugging aids keep of a piece of generated code: the ELF file it is generated
+    /// into, and its registration with the GDB JIT interface, if they are on.
     ///
-    /// The layout is that of `elf_parts` with the one segment: the headers in the first page, the
-    /// code at the offset of a page, which is what is mapped, and what `finish` appends after it.
-    pub(crate) struct CodeFile {
-        file: File,
-        path: PathBuf,
+    /// The layout of the file (or of the ELF image registered without one) is that of `elf_parts`
+    /// with the one segment: the headers in the first page, the code at the offset of a page,
+    /// which is what is mapped, and what `finish` appends after it.
+    pub(crate) struct CodeRecord {
+        file: Option<(File, PathBuf)>,
         /// The name of the section.
         section: String,
-        /// Where the code is mapped to, and its length.
+        /// Where the code is, and its length.
         start: usize,
         len: usize,
         registration: Option<Registration>,
     }
 
-    impl CodeFile {
-        /// Create the file for the code of `label` and map it over `len` bytes at `start`, so that
-        /// what is written there is written to the file.
+    impl CodeRecord {
+        /// Start the record of the code of `label`, which is going to be generated into the `len`
+        /// bytes at `start`. With `Options::code_dir`, that is a file there mapped over them, so
+        /// that what is written there is written to the file.
         ///
         /// # Panics
         ///
@@ -641,14 +691,21 @@ mod linux {
         /// `start` and `len` must be multiples of the page size, and the range must be pages of
         /// memory that the caller owns, with no content that is still needed, and not accessed
         /// while this runs. The mapping replaces the range, and stays until `release`.
-        pub(in crate::codegen) unsafe fn map(label: &str, start: usize, len: usize) -> CodeFile {
+        pub(in crate::codegen) unsafe fn new(label: &str, start: usize, len: usize) -> CodeRecord {
             assert_eq!(get_system_page_size(), PAGE_ALIGNMENT);
             assert!(start.is_multiple_of(PAGE_ALIGNMENT) && len.is_multiple_of(PAGE_ALIGNMENT));
-            let directory = std::env::var_os("SBPF_CODEGEN_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(std::env::temp_dir);
+            let section = format!(".text.{label}");
+            let Some(directory) = &options().code_dir else {
+                return CodeRecord {
+                    file: None,
+                    section,
+                    start,
+                    len,
+                    registration: None,
+                };
+            };
             let path = directory.join(format!("sbpf-{}-{label}.elf", std::process::id()));
-            let file = std::fs::create_dir_all(&directory)
+            let file = std::fs::create_dir_all(directory)
                 .and_then(|()| {
                     File::options()
                         .read(true)
@@ -668,7 +725,7 @@ mod linux {
             // size, as must the offset, the file must be open and at least as long as the offset
             // plus the length, and the existing mappings in the range are replaced, so it must
             // be one that the caller owns.
-            // Evidence: the address and the length are those of the contract of `map`, the offset
+            // Evidence: the address and the length are those of the contract of `new`, the offset
             // is a page, and the file was just made `PAGE_ALIGNMENT + len` bytes long. It is open
             // here, and the mapping outlives the descriptor.
             let mapped = unsafe {
@@ -687,18 +744,17 @@ mod linux {
                 path,
                 io::Error::last_os_error()
             );
-            CodeFile {
-                file,
-                path,
-                section: format!(".text.{label}"),
+            CodeRecord {
+                file: Some((file, path)),
+                section,
                 start,
                 len,
                 registration: None,
             }
         }
 
-        /// Complete the file, once the code in the mapping is final: the headers and the
-        /// `symbols` are written, and the file is registered with the GDB JIT interface.
+        /// Complete the record, once the code is final: the file gets the headers and the
+        /// `symbols`, and the code is registered with the GDB JIT interface.
         ///
         /// The writes are not through the mapping, as that only has the code. The mapping is
         /// then replaced with a private one of the same content and the `permissions`, as
@@ -709,7 +765,11 @@ mod linux {
             symbols: Vec<Symbol>,
             permissions: PagePermissions,
         ) {
-            assert!(self.registration.is_none(), "{:?} is finished", self.path);
+            assert!(self.registration.is_none(), "{} is finished", self.section);
+            let gdb_jit = options().gdb_jit;
+            if self.file.is_none() && !gdb_jit {
+                return;
+            }
             let segment = Segment {
                 name: &self.section,
                 start: self.start,
@@ -720,40 +780,57 @@ mod linux {
             let (head, tail_offset, tail) =
                 elf_parts(&[segment], PAGE_ALIGNMENT.checked_add(self.len).unwrap());
             let mut symfile = vec![0; tail_offset.checked_add(tail.len()).unwrap()];
-            self.file
-                .write_all_at(&head, 0)
-                .and_then(|()| self.file.write_all_at(&tail, tail_offset as u64))
-                .and_then(|()| self.file.read_exact_at(&mut symfile, 0))
-                .unwrap_or_else(|error| panic!("failed to write {:?}: {}", self.path, error));
-            let prot = match permissions {
-                PagePermissions::Read => libc::PROT_READ,
-                PagePermissions::ReadWrite => libc::PROT_READ | libc::PROT_WRITE,
-                PagePermissions::ReadExecute => libc::PROT_READ | libc::PROT_EXEC,
-            };
-            // SAFETY:
-            //
-            // Contract from `mmap` with `MAP_FIXED`: as for `map`.
-            // Evidence: the range and the file are those of `map`, whose contract has the range
-            // owned by the caller. The private mapping has the bytes that the shared one had, as
-            // both are of the page cache of the file, so nothing observes a change, apart from
-            // later writes, which the contract of `finish` excludes.
-            let mapped = unsafe {
-                libc::mmap(
-                    self.start as *mut libc::c_void,
-                    self.len,
-                    prot,
-                    libc::MAP_PRIVATE | libc::MAP_FIXED,
-                    self.file.as_raw_fd(),
-                    PAGE_ALIGNMENT as libc::off_t,
-                )
-            };
-            assert!(
-                mapped != libc::MAP_FAILED,
-                "failed to remap {:?}: {}",
-                self.path,
-                io::Error::last_os_error()
-            );
-            self.registration = Some(register(symfile.into_boxed_slice()));
+            match &self.file {
+                Some((file, path)) => {
+                    file.write_all_at(&head, 0)
+                        .and_then(|()| file.write_all_at(&tail, tail_offset as u64))
+                        .and_then(|()| file.read_exact_at(&mut symfile, 0))
+                        .unwrap_or_else(|error| panic!("failed to write {:?}: {}", path, error));
+                    let prot = match permissions {
+                        PagePermissions::Read => libc::PROT_READ,
+                        PagePermissions::ReadWrite => libc::PROT_READ | libc::PROT_WRITE,
+                        PagePermissions::ReadExecute => libc::PROT_READ | libc::PROT_EXEC,
+                    };
+                    // SAFETY:
+                    //
+                    // Contract from `mmap` with `MAP_FIXED`: as for `new`.
+                    // Evidence: the range and the file are those of `new`, whose contract has the
+                    // range owned by the caller. The private mapping has the bytes that the shared
+                    // one had, as both are of the page cache of the file, so nothing observes a
+                    // change, apart from later writes, which the contract of `finish` excludes.
+                    let mapped = unsafe {
+                        libc::mmap(
+                            self.start as *mut libc::c_void,
+                            self.len,
+                            prot,
+                            libc::MAP_PRIVATE | libc::MAP_FIXED,
+                            file.as_raw_fd(),
+                            PAGE_ALIGNMENT as libc::off_t,
+                        )
+                    };
+                    assert!(
+                        mapped != libc::MAP_FAILED,
+                        "failed to remap {:?}: {}",
+                        path,
+                        io::Error::last_os_error()
+                    );
+                }
+                None => {
+                    symfile[..head.len()].copy_from_slice(&head);
+                    // SAFETY:
+                    //
+                    // Contract from `read_memory`: the memory must be readable, initialized and
+                    // not written to.
+                    // Evidence: the contract of `new` has the range owned by the caller, and that
+                    // of `finish` has the code final, so nothing writes to it any more.
+                    let code = unsafe { read_memory(self.start, self.len) };
+                    symfile[PAGE_ALIGNMENT..tail_offset].copy_from_slice(&code);
+                    symfile[tail_offset..].copy_from_slice(&tail);
+                }
+            }
+            if gdb_jit {
+                self.registration = Some(register(symfile.into_boxed_slice()));
+            }
         }
 
         /// Keep the code known to debuggers for as long as the process lives.
@@ -762,21 +839,25 @@ mod linux {
             std::mem::forget(self.registration.take());
         }
 
-        /// Tell the debuggers that the code is gone, and replace the mapping with anonymous
-        /// memory, so that the file stays as it was when the memory is used for something else.
+        /// Tell the debuggers that the code is gone, and replace the mapping of the file with
+        /// anonymous memory, so that the file stays as it was when the memory is used for
+        /// something else.
         ///
         /// # Safety
         ///
-        /// The range given to `map` must be memory that the caller still owns, and nothing may
+        /// The range given to `new` must be memory that the caller still owns, and nothing may
         /// access it while this runs or rely on its content afterwards.
         pub(crate) unsafe fn release(mut self) {
             self.unregister();
+            let Some((_, path)) = &self.file else {
+                return;
+            };
             // SAFETY:
             //
             // Contract from `mmap` with `MAP_FIXED`: the address must be a multiple of the page
             // size, and the mappings in the range are replaced, so it must be one that the caller
             // owns. Without a file the offset must be zero, and the descriptor -1.
-            // Evidence: the range is the one `map` checked, and the contract of `release` has it
+            // Evidence: the range is the one `new` checked, and the contract of `release` has it
             // owned by the caller and unused.
             let mapped = unsafe {
                 libc::mmap(
@@ -791,7 +872,7 @@ mod linux {
             assert!(
                 mapped != libc::MAP_FAILED,
                 "failed to unmap {:?}: {}",
-                self.path,
+                path,
                 io::Error::last_os_error()
             );
         }
@@ -803,7 +884,7 @@ mod linux {
         }
     }
 
-    impl Drop for CodeFile {
+    impl Drop for CodeRecord {
         fn drop(&mut self) {
             // The debugger must not read an entry that is freed.
             self.unregister();
@@ -812,29 +893,29 @@ mod linux {
 
     /// Complete the file of the supporting code, which is final, in pages that are still read-write.
     pub(in crate::codegen) fn finish_supporting_code(
-        mut file: CodeFile,
+        mut record: CodeRecord,
         supports: &SupportingCode,
     ) {
-        file.finish(
+        record.finish(
             supporting_code_symbols(supports).1,
             PagePermissions::ReadWrite,
         );
-        file.keep_forever();
+        record.keep_forever();
     }
 
     /// Complete the file of the interpreter at `buffer`, whose steps are final and have the
     /// lengths `step_lens`, in pages that are still read-write.
     pub(in crate::codegen) fn finish_interpreter(
-        mut file: CodeFile,
+        mut record: CodeRecord,
         version: SBPFVersion,
         buffer: *const u8,
         step_lens: &[u8],
     ) {
-        file.finish(
+        record.finish(
             interpreter_symbols(version, buffer as usize, step_lens),
             PagePermissions::ReadWrite,
         );
-        file.keep_forever();
+        record.keep_forever();
     }
 
     /// Map a file for the code of the new `program` over its text pages.
@@ -845,14 +926,14 @@ mod linux {
         let label = format!("jit-{}", COUNTER.fetch_add(1, Ordering::Relaxed));
         // SAFETY:
         //
-        // Contract from `CodeFile::map`: the range must be page aligned, owned by the caller, and
+        // Contract from `CodeRecord::new`: the range must be page aligned, owned by the caller, and
         // not accessed meanwhile, with no content that is needed.
         // Evidence: the text section of a program that is not sealed yet is all of its page
         // rounded text capacity, which starts at a page, after the page rounded pc section, of the
         // allocation. `program` owns it, and nothing was written to it yet. The file is released
         // when the program is dropped, before the allocation is returned to the pool.
-        let file = unsafe { CodeFile::map(&label, start, len) };
-        program.code_file = Some(file);
+        let record = unsafe { CodeRecord::new(&label, start, len) };
+        program.code_record = Some(record);
     }
 
     /// Complete the file of the sealed `program`.
@@ -863,7 +944,7 @@ mod linux {
     ) {
         let symbols = jit_symbols(templates, executable, program);
         let file = program
-            .code_file
+            .code_record
             .as_mut()
             .expect("the program has its file from `map_jit_text`");
         file.finish(symbols, PagePermissions::ReadExecute);
