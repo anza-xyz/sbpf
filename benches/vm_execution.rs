@@ -12,12 +12,12 @@ use solana_sbpf::{
     ebpf,
     elf::Executable,
     memory_region::MemoryRegion,
-    program::{BuiltinProgram, SBPFVersion},
+    program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
     verifier::RequisiteVerifier,
     vm::{CallFrame, Config, ExecutionMode},
 };
 use std::{fs::File, io::Read, sync::Arc};
-use test_utils::{create_vm, TestContextObject};
+use test_utils::{create_vm, syscalls, TestContextObject};
 
 fn bench_backends(
     c: &mut Criterion,
@@ -278,14 +278,25 @@ fn bench_mem_ldxdw(c: &mut Criterion) {
 /// Assembles `assembly` for each version and benches it with whatever instruction count the
 /// interpreter arrives at, so that kernels may branch on data.
 fn bench_compute(c: &mut Criterion, name: &str, assembly: &str, mem: *mut [u8]) {
+    bench_versions(c, &format!("compute/{name}"), assembly, |_| {}, mem);
+}
+
+/// `bench_compute` with the syscalls `register` registers in the loader.
+fn bench_versions(
+    c: &mut Criterion,
+    name: &str,
+    assembly: &str,
+    register: fn(&mut BuiltinProgram<TestContextObject>),
+    mem: *mut [u8],
+) {
     for version in [SBPFVersion::V0, SBPFVersion::V3] {
         let config = Config {
             enabled_sbpf_versions: version..=version,
             ..Config::default()
         };
-        let executable =
-            assemble::<TestContextObject>(assembly, Arc::new(BuiltinProgram::new_loader(config)))
-                .unwrap();
+        let mut loader = BuiltinProgram::new_loader(config);
+        register(&mut loader);
+        let executable = assemble::<TestContextObject>(assembly, Arc::new(loader)).unwrap();
         executable.verify::<RequisiteVerifier>().unwrap();
         let mut context_object = TestContextObject::new(u64::MAX);
         let mem_region = MemoryRegion::new(mem, ebpf::MM_INPUT_START);
@@ -307,7 +318,7 @@ fn bench_compute(c: &mut Criterion, name: &str, assembly: &str, mem: *mut [u8]) 
         assert!(result.is_ok(), "{:?}", result);
         bench_backends(
             c,
-            &format!("compute/{name}/{version:?}").to_lowercase(),
+            &format!("{name}/{version:?}").to_lowercase(),
             &executable,
             instruction_count,
             instruction_count,
@@ -581,6 +592,62 @@ fn bench_compute_sum_input(c: &mut Criterion) {
     );
 }
 
+/// Loops over syscalls, alone and taking turns, with SBPFv0 dispatching them by hash and SBPFv3
+/// statically.
+fn bench_syscalls(c: &mut Criterion) {
+    // A buffer to frob, followed by two equal strings to compare.
+    let mut mem = *b"frobbed\0string\0string\0";
+    let gather_bytes = r#"
+        mov r1, 1
+        mov r2, 2
+        mov r3, 3
+        mov r4, 4
+        mov r5, 5
+        syscall bpf_gather_bytes
+    "#;
+    let mem_frob = r#"
+        mov r1, r7
+        mov r2, 8
+        syscall bpf_mem_frob
+    "#;
+    let str_cmp = r#"
+        mov r1, r7
+        add r1, 8
+        mov r2, r7
+        add r2, 16
+        syscall bpf_str_cmp
+    "#;
+    for (name, body) in [
+        ("gather_bytes", gather_bytes.to_string()),
+        ("mem_frob", mem_frob.to_string()),
+        ("str_cmp", str_cmp.to_string()),
+        ("mixed", [gather_bytes, mem_frob, str_cmp].concat()),
+    ] {
+        let assembly = format!(
+            r#"
+            mov r6, 1000
+            mov r7, r1
+            loop:
+            {body}
+            add r6, -1
+            jne r6, 0, loop
+            exit
+            "#
+        );
+        bench_versions(
+            c,
+            &format!("syscalls/{name}"),
+            &assembly,
+            |loader| {
+                syscalls::SyscallGatherBytes::register(loader, "bpf_gather_bytes").unwrap();
+                syscalls::SyscallMemFrob::register(loader, "bpf_mem_frob").unwrap();
+                syscalls::SyscallStrCmp::register(loader, "bpf_str_cmp").unwrap();
+            },
+            &mut mem,
+        );
+    }
+}
+
 criterion_group!(
     benches,
     bench_init_start,
@@ -598,5 +665,6 @@ criterion_group!(
     bench_compute_branches,
     bench_compute_stack_offsets,
     bench_compute_sum_input,
+    bench_syscalls,
 );
 criterion_main!(benches);

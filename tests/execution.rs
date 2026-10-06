@@ -4734,6 +4734,60 @@ fn test_jmp32_sbpfv0() {
 }
 
 #[test]
+fn test_entrypoint_in_lddw() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // Nothing stops an entrypoint from pointing at the second half of an `lddw`, which the JITs
+    // treat as an invalid jump target. Execution has to fail there as in the interpreter.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
+        ..Config::default()
+    };
+    let program = [
+        [0x18, 0x00, 0, 0, 1, 0, 0, 0], // lddw r0, 1
+        [0x00, 0x00, 0, 0, 0, 0, 0, 0],
+        [0x95, 0, 0, 0, 0, 0, 0, 0], // exit
+    ]
+    .concat();
+    let mut function_registry = FunctionRegistry::default();
+    function_registry
+        .register_function(ebpf::hash_symbol_name(b"entrypoint"), *b"entrypoint", 1)
+        .unwrap();
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        &program,
+        Arc::new(BuiltinProgram::new_loader(config)),
+        SBPFVersion::V0,
+        function_registry,
+    )
+    .unwrap();
+    assert_eq!(executable.get_entrypoint_instruction_offset(), 1);
+    executable.verify::<RequisiteVerifier>().unwrap();
+    executable.dynasm_compile().unwrap();
+    let mut results = Vec::new();
+    for (name, mode) in [
+        ("interpreter", ExecutionMode::Interpreted),
+        ("dynasm interpreter", ExecutionMode::DynasmInterpreted),
+        ("dynasm jit", ExecutionMode::Jit),
+    ] {
+        let mut context_object = TestContextObject::new(10);
+        create_vm!(
+            vm,
+            &executable,
+            &mut context_object,
+            stack,
+            heap,
+            vec![],
+            None
+        );
+        let mut mode = mode;
+        let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+        let (count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+        results.push((count, format!("{result:?}"), vm.registers[11]));
+        assert_eq!(results[0], results[results.len() - 1], "{name}");
+    }
+}
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[test]
 fn test_dynasm_compile_cached() {
     use solana_sbpf::vm::{CallFrame, ExecutionMode};
     for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
