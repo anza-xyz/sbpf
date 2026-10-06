@@ -234,40 +234,31 @@ impl SupportingCode {
             ; add RTEMP, rbp => Frame[BYTE -1].jit_pc_section
             ; mov WTEMP, [RTEMP]
             ; add RTEMP, rbp => Frame[BYTE -1].code
-            // For `AuxTemplate::InvalidJumpTarget` (see `CALLEE_NEXT_INSN`).
             ; add rax, ebpf::INSN_SIZE as i32
-            ; push rax
+            ; mov rbp => Frame[BYTE -1].next_insn, rax
             // The `RINSN` of the JIT code, which is above the return address of
             // `invoke_support`.
-            ; mov RINSN, [rsp + 24]
+            ; mov RINSN, [rsp + 16]
             ; jmp =>resolved
             ; =>interpreted
             ; movzx RTEMP, WORD [rax]
             ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
             ; add RTEMP, rbp => Frame[BYTE -1].code
             ; add RINSN, ebpf::INSN_SIZE as i32
-            ; push RINSN
             ; =>resolved
             ; push R6
             ; push R7
             ; push R8
             ; push R9
-            // `r10` is read-only in the SBPF versions this runs, so this push is not for
-            // preserving it, but keeps the stack aligned for the callee (see
-            // `debug_assert_bpf_call_stack_alignment`). Popping it is also cheaper than undoing
-            // the bump.
-            ; push R10
+            // `r10` is read-only, so we don't need to save it.
             ; add R10, rbp => Frame[BYTE -1].stack_frame_bump
             ;; debug_assert_bpf_call_stack_alignment(out)
-            ;; const { assert!(CALLEE_NEXT_INSN == 8 * (1 + 5)) }
             ; call RTEMP
-            ; pop R10
+            ; sub R10, rbp => Frame[BYTE -1].stack_frame_bump
             ; pop R9
             ; pop R8
             ; pop R7
             ; pop R6
-            // A `pop` is cheaper than `add rsp`.
-            ; pop RTEMP
             ; pop RTEMP
             // `EXIT` leaves the remaining budget in `RMETER`, convert back to the instruction
             // limit.
@@ -355,17 +346,17 @@ impl SupportingCode {
     }
 
     fn entry_point(out: &mut Asm, base: usize) -> *const u8 {
-        // Expects `rsi` to point at the `Frame`, and `RINSN` and `RMETER` to be initialized to
-        // their namesakes.
+        // Expects `rsi` to point at the `Frame`, `RINSN` and `RMETER` to be initialized to their
+        // namesakes, and `rcx` to the machine code (jitted or interpreter step) for the first BPF
+        // instruction to execute.
         let start = address(out, base, true);
         let after_dispatch = out.new_dynamic_label();
         let frame_size = std::mem::size_of::<Frame>();
-        let start_offset = std::mem::offset_of!(Frame, start) as i32;
         x64asm!(out
             ; push rbp
             ; mov rbp, rsp
             ; sub rsp, frame_size as i32
-            ; push QWORD [rsi + start_offset]
+            ; push rcx
             ; lea rdi, rbp => Frame[BYTE -1]
             ; mov ecx, (frame_size / 8) as i32
             ; rep movsq // SYSV ABI: The direction flag is clear on function entry.
@@ -675,9 +666,6 @@ type Vm = crate::vm::EbpfVm<'static, crate::static_analysis::DummyContextObject>
 const SYSV64_CLOBBERED: u16 = reg_mask(&[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11]);
 /// The BPF registers among them.
 const BPF_SYSV64_CLOBBERED: u16 = SYSV64_CLOBBERED & reg_mask(&GPREG_MAP);
-/// Where `call_internal` leaves the address of the instruction following the target, relative to
-/// `rsp` at the target, for the machine code that cannot compute it from `RINSN`.
-pub(super) const CALLEE_NEXT_INSN: i32 = 48;
 /// Where `spill_for_sysv64_call` pushes `RTEMP` and `RMETER`, relative to `rsp` after it.
 const SPILL_PUSHED_RTEMP: i32 = 8;
 const SPILL_PUSHED_RMETER: i32 = 0;

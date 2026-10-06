@@ -884,11 +884,8 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
         &mut templates,
         AuxTemplate::InvalidJumpTarget,
         |generator| {
-            // Reached through `call_internal` only (the verifier rejects the jumps), which leaves
-            // on the stack the address of the instruction following the target, as
-            // `load_next_insn_addr` would compute it.
-            let next_insn = supporting_code::CALLEE_NEXT_INSN;
-            x64asm!(generator; mov RTEMP, [rsp + next_insn]);
+            // The code paths that might end up here are expected to update `next_insn`.
+            x64asm!(generator; mov RTEMP, rbp => Frame[BYTE -1].next_insn);
             bpf_validate_meter(generator);
             #[cfg(feature = "tracer")]
             invoke_support(generator, generator.supports().trace);
@@ -1226,8 +1223,9 @@ struct Frame {
     vm: *mut u8,
     /// Where `terminate` jumps to. Set up by `SupportingCode::entry_point`.
     exit: *const u8,
-    /// The machine code to start executing at.
-    start: usize,
+    /// The address of the instruction following the target of the call (or the call just executed)
+    /// in anticipation of possible invalid instruction exception.
+    next_insn: *const u8,
     text_section: *const u8,
     /// Length of `text_section` in bytes.
     text_section_len: u64,
@@ -1296,7 +1294,9 @@ pub fn enter<C: crate::vm::ContextObject>(
     let mut frame = Frame {
         vm: std::ptr::from_mut(vm).cast(),
         exit: std::ptr::null(),
-        start: start_addr,
+        next_insn: bpf
+            .as_ptr()
+            .wrapping_add(pc.wrapping_add(1).wrapping_mul(ebpf::INSN_SIZE)),
         text_section: bpf.as_ptr(),
         text_section_len: bpf.len() as u64,
         text_section_limit: bpf.as_ptr_range().end,
@@ -1328,7 +1328,7 @@ pub fn enter<C: crate::vm::ContextObject>(
             inout("rsi") &raw mut frame => r0,
             inout("r8") entry_point => _,
             inout("rax") insn => exit_code,
-            lateout("rcx") last_pc_address,
+            inout("rcx") start_addr => last_pc_address,
             inout("rdx") meter => remaining,
             lateout("rdi") _,
             lateout("r9") _,
