@@ -205,7 +205,7 @@ impl SupportingCode {
         let start = address(out, base, true);
         let [exceeded, outside, too_deep, interpreted, resolved] =
             [(); 5].map(|()| out.new_dynamic_label());
-        let insn_mask = (ebpf::INSN_SIZE as i32).checked_neg().unwrap();
+        let insn_mask = (ebpf::INSN_SIZE as i8).checked_neg().unwrap();
         x64asm!(out
             ; =>label
             ; cmp RTEMP, RMETER
@@ -214,7 +214,7 @@ impl SupportingCode {
             ; sub rax, rbp => Frame[BYTE -1].text_section
             ; cmp rax, rbp => Frame[BYTE -1].text_section_len
             ; jae =>outside
-            ; and rax, insn_mask
+            ; and rax, BYTE insn_mask
             ; =>target_checked
             ; sub QWORD rbp => Frame[BYTE -1].calls_remaining, 1
             // This cc code is load-bearing for when `calls_remaining == 0`.
@@ -380,8 +380,7 @@ impl SupportingCode {
             // `terminate` and exit leave the exit code in `al`, the address of the instruction
             // following the last one executed in `RTEMP`, and r0 is in, well, `rsi`.
             ;=>after_dispatch
-            ; mov rsp, rbp
-            ; pop rbp
+            ; leave
             ; ret
         );
 
