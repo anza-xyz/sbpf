@@ -338,12 +338,12 @@ fn jit_symbols<const SIZE: usize, C: ContextObject>(
     let mut named = vec![(
         "invalid_jump_target".to_string(),
         start
-            .checked_add(JitTemplates::<SIZE>::INVALID_JUMP_TARGET as usize)
+            .checked_add(JitTemplates::<SIZE>::INVALID_CALL_TARGET as usize)
             .unwrap(),
     )];
     for (pc, &offset) in program.pc_section().iter().enumerate() {
         // The second halves of `lddw` have no code.
-        if offset == JitTemplates::<SIZE>::INVALID_JUMP_TARGET {
+        if offset == JitTemplates::<SIZE>::INVALID_CALL_TARGET {
             continue;
         }
         let insn = ebpf::get_insn_unchecked(bpf, pc);
@@ -362,7 +362,7 @@ fn jit_symbols<const SIZE: usize, C: ContextObject>(
 
     let mut symbols = sized_symbols(named, start.checked_add(text.len()).unwrap());
     // The padding that may follow the first template is not part of it.
-    let invalid_len = templates.aux_layout(AuxTemplate::InvalidJumpTarget).len();
+    let invalid_len = templates.aux_layout(AuxTemplate::InvalidCallTarget).len();
     symbols[0].size = symbols[0].size.min(invalid_len);
     symbols
 }

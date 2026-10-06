@@ -410,7 +410,7 @@ impl TemplateRelocation {
                     .checked_add_signed(isize::from(off).wrapping_add(1))
                     .and_then(|target_pc| pc_section.get(target_pc))
                     .copied()
-                    .unwrap_or(JitTemplates::<SIZE>::INVALID_JUMP_TARGET);
+                    .unwrap_or(JitTemplates::<SIZE>::INVALID_CALL_TARGET);
                 i64::from(target & !PADDING_DUE).wrapping_sub(template_start as i64)
             }
         };
@@ -454,7 +454,7 @@ enum AuxTemplate {
     ExecutionOverrun,
     /// For `pc_section` entries that are not valid jump targets (e.g. the second halves of 16
     /// byte instructions.)
-    InvalidJumpTarget,
+    InvalidCallTarget,
     /// Inserted between the other templates to diversify the output.
     Noop,
     /// Inserted ahead of an instruction (and instantiated for it) to check the instruction meter.
@@ -490,8 +490,8 @@ const PADDING_DUE: u32 = CHECKPOINT_DUE | NOOP_DUE;
 const MAX_START_PADDING_LENGTH: usize = 256;
 
 impl<const SIZE: usize> JitTemplates<SIZE> {
-    /// Offset of the `AuxTemplate::InvalidJumpTarget` in the output, which is emitted first.
-    const INVALID_JUMP_TARGET: u32 = 0;
+    /// Offset of the `AuxTemplate::InvalidCallTarget` in the output, which is emitted first.
+    const INVALID_CALL_TARGET: u32 = 0;
 
     fn empty() -> Self {
         let layout = TemplateLayout {
@@ -558,7 +558,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         // `position` saturates so that an absurdly large output fails the check at the end.
         let mut pc_sec = Vec::with_capacity(program.len());
         let mut position = 0usize;
-        position = position.wrapping_add(self.aux_layout(AuxTemplate::InvalidJumpTarget).len());
+        position = position.wrapping_add(self.aux_layout(AuxTemplate::InvalidCallTarget).len());
         position = position
             .wrapping_add(start_padding.wrapping_mul(self.aux_layout(AuxTemplate::Noop).len()));
         // Introduce checkpoints at certain points in the code; the instruction meter is otherwise
@@ -593,7 +593,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             position = position.wrapping_add(layout.len());
             for _ in 0..layout.extra_bpf_insns {
                 program_iter.next();
-                pc_sec.push(Self::INVALID_JUMP_TARGET);
+                pc_sec.push(Self::INVALID_CALL_TARGET);
             }
         }
         position = position.wrapping_add(self.aux_layout(AuxTemplate::ExecutionOverrun).len());
@@ -627,7 +627,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             &mut position,
             &pc_sec,
             0,
-            AuxTemplate::InvalidJumpTarget,
+            AuxTemplate::InvalidCallTarget,
         );
         for _ in 0..start_padding {
             self.emit_aux(text, &mut position, &pc_sec, 0, AuxTemplate::Noop);

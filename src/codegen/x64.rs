@@ -882,7 +882,7 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
     });
     generate(
         &mut templates,
-        AuxTemplate::InvalidJumpTarget,
+        AuxTemplate::InvalidCallTarget,
         |generator| {
             // The code paths that might end up here are expected to update `next_insn`.
             x64asm!(generator; mov RTEMP, rbp => Frame[BYTE -1].next_insn);
