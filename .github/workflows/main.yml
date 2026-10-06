@@ -50,8 +50,7 @@ jobs:
       - run: cargo nextest run --features="tracer,debugger" --no-fail-fast
       - run: cargo build --manifest-path cli/Cargo.toml --verbose
         # FIXME: this is not doing much of anything… maybe run a small subset of fuzzers' tests?
-
-      # not using bininstall for cargo-fuzz as it seems to grab one for a random target...
+        # not using bininstall for cargo-fuzz as it seems to grab one for a random target...
       - run: cargo install cargo-fuzz
       - run: cargo fuzz build
         if: matrix.rust == 'nightly' && matrix.os != 'windows-latest'
