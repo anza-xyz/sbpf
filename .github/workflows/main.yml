@@ -19,79 +19,87 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
         rust: [stable, beta, nightly]
     env:
-      # Trumps rust-toolchain.toml
       RUSTUP_TOOLCHAIN: ${{ matrix.rust }}
+      RUSTFLAGS: "-Dwarnings -Cinstrument-coverage"
+      LLVM_PROFILE_FILE: "sbpf-%p-%m.profraw"
+      NEXTEST_FAILURE_OUTPUT: immediate-final
     steps:
-    - uses: actions/checkout@v1
-    - name: Setup Rust (rustup)
-      run: |
-        rustup update ${{ matrix.rust }} --no-self-update
-        rustup default ${{ matrix.rust }}
-        rustup component add clippy
-        rustup component add rustfmt
-      shell: bash
-    - name: Lint
-      run: |
-        cargo fmt --all -- --check
-        cargo clippy --all --tests -- --deny=warnings
-      if: matrix.rust == 'beta'
-      shell: bash
-    - name: Build and test
-      run: |
-        export RUSTFLAGS="-D warnings"
-        cargo build --verbose
-        cargo build --features="shuttle-test"
-        cargo test --verbose
-        cargo test --test exercise_instructions --verbose
-        cargo test --features="tracer,debugger" --verbose
-      shell: bash
-    - name: CLI - Lint
-      run: |
-        cargo fmt --all --manifest-path cli/Cargo.toml -- --check
-        cargo clippy --all --tests --manifest-path cli/Cargo.toml -- --deny=warnings
-      if: matrix.rust == 'beta'
-      shell: bash
-    - name: CLI - Build and test
-      run: |
-        export RUSTFLAGS="-D warnings"
-        cargo build --manifest-path cli/Cargo.toml --verbose
-        cargo test --manifest-path cli/Cargo.toml --verbose
-      shell: bash
-    - name: Check fuzz
-      run: |
-        export RUSTFLAGS="-D warnings"
-        cargo install cargo-fuzz
-        cargo fuzz build
-      if: matrix.rust == 'nightly' && matrix.os != 'windows-latest'
-      shell: bash
-    - name: Benchmark
-      run: RUSTFLAGS="-D warnings" cargo bench -- --quick
-      if: matrix.rust == 'stable' && matrix.os != 'windows-latest'
-      shell: bash
+      - uses: actions/checkout@v4
+      - run: rustup update ${{ matrix.rust }} --no-self-update
+      - run: rustup default ${{ matrix.rust }}
+      - run: rustup component add clippy rustfmt llvm-tools
+      # To update a tool version bump the hash here as needed.
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad
+        with:
+          tool: nextest,grcov
+
+      - run: cargo fmt --all -- --check
+        if: matrix.rust == 'beta'
+      - run: cargo clippy --all --tests -- --deny=warnings
+        if: matrix.rust == 'beta'
+      - run: cargo fmt --all --manifest-path cli/Cargo.toml -- --check
+        if: matrix.rust == 'beta'
+      - run: cargo clippy --all --tests --manifest-path cli/Cargo.toml -- --deny=warnings
+        if: matrix.rust == 'beta'
+
+      - run: cargo build --verbose
+        # FIXME: this is not doing much of anything... maybe check? or run the test suite with this
+        # enabled?
+      - run: cargo build --features="shuttle-test"
+      - run: cargo nextest run --no-fail-fast
+      - run: cargo nextest run --features="tracer,debugger" --no-fail-fast
+      - run: cargo build --manifest-path cli/Cargo.toml --verbose
+        # FIXME: this is not doing much of anything… maybe run a small subset of fuzzers' tests?
+
+      # not using bininstall for cargo-fuzz as it seems to grab one for a random target...
+      - run: cargo install cargo-fuzz
+      - run: cargo fuzz build
+        if: matrix.rust == 'nightly' && matrix.os != 'windows-latest'
+
+      - run: cargo bench -- --quick --nocapture
+      - shell: bash
+        run: |
+          grcov $(find . -name "sbpf-*.profraw" -print) \
+            --branch \
+            --ignore-not-existing \
+            --source-dir $PWD/src \
+            --binary-path ./target/debug \
+            --output-types lcov \
+            -o lcov.info
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.os }}-${{ matrix.rust }}
+          path: lcov.info
+          if-no-files-found: error
 
   coverage:
     name: Coverage
+    needs: test
     runs-on: ubuntu-latest
     env:
       RUSTUP_TOOLCHAIN: nightly
     steps:
     - uses: actions/checkout@v1
-    - name: Setup Rust (rustup)
+    - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad
+      with:
+        tool: grcov
+    - name: Download test coverage
+      uses: actions/download-artifact@v4
+      with:
+        pattern: coverage-*
+        path: coverage
+    - shell: bash
       run: |
-        rustup update nightly --no-self-update
-        rustup default nightly
-        rustup component add llvm-tools-preview
-      shell: bash
-    - name: Install cargo-llvm-cov
-      run: cargo install cargo-llvm-cov
-      shell: bash
-    - name: Generate test coverage
-      run: |
-        cargo llvm-cov --lcov --output-path coverage.info
-      shell: bash
-    - name: Upload test coverage
-      run: bash <(curl -s https://codecov.io/bash) -f coverage.info || echo "Codecov did not collect coverage reports"
-      shell: bash
+        grcov coverage \
+          --source-dir $PWD/src \
+          --output-types lcov \
+          --output-path coverage.info
+    - uses: codecov/codecov-action@v5
+      with:
+        files: coverage.info
+        disable_search: true
+        token: ${{ secrets.CODECOV_TOKEN }}
+        fail_ci_if_error: true
 
   release:
     name: Release
