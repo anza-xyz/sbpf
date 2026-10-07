@@ -915,10 +915,18 @@ fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
     let offset = InterpreterGenerator::step_offset(opcode);
     // SAFETY:
     //
-    // Contract from `ptr::add`: the result must be in bounds of the allocation, and the offset
-    // must not overflow `isize`.
-    // Evidence: `buffer` has `STEP_TABLE_SIZE` bytes, which is the number of opcodes
-    // (`TemplateOpcode::COUNT`) times the step size, and the offset of any opcode is less.
+    // Contract from `<*mut u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed on
+    // mathematical integers (without "wrapping around"), must fit in an `isize`.
+    //
+    // Contract from `<*mut u8>::add`: If the computed offset is non-zero, then `self` must be
+    // derived from a pointer to some allocation, and the entire memory range between `self` and the
+    // result must be in bounds of that allocation. In particular, this range must not "wrap around"
+    // the edge of the address space.
+    //
+    // Evidence: `buffer` is the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes,
+    // which is `TemplateOpcode::COUNT` steps of `1 << STEP_SIZE_LOG2` bytes, and `offset` is the
+    // start of the step of an opcode, so less than that. It fits an `isize`, as the allocation
+    // does.
     unsafe { interpreter(version).buffer.add(offset) }
 }
 
@@ -929,10 +937,25 @@ pub(super) struct Interpreter {
     pub(super) step_lens: Box<[u8]>,
 }
 
-// SAFETY: `buffer` is only ever used for its address, as the memory is read-execute and is never
-// freed or written to once the `Interpreter` is constructed.
+// SAFETY:
+//
+// Contract from `Send`: Types that can be transferred across thread boundaries.
+//
+// Evidence: `buffer` is the only field that is not `Send` itself. It points to the steps, which are
+// read-execute and never freed once the `Interpreter` is constructed, so they can be used from any
+// thread.
 unsafe impl Send for Interpreter {}
-// SAFETY: see `Send`.
+// SAFETY:
+//
+// Contract from `Sync`: Types for which it is safe to share references between threads.
+//
+// Contract from `Sync`: The precise definition is: a type `T` is `Sync` if and only if `&T` is
+// `Send`. In other words, if there is no possibility of undefined behavior (including data races)
+// when passing `&T` references between threads.
+//
+// Evidence: `&Interpreter` only gives access to `buffer`, the address of memory that is never
+// written to or freed once the `Interpreter` is constructed, and to `step_lens`, which is `Sync`,
+// so there is nothing to race on.
 unsafe impl Sync for Interpreter {}
 
 /// Generates the interpreter.
@@ -992,18 +1015,38 @@ impl X64Generator for InterpreterGenerator {
         assert!(self.offset.saturating_add(buffer.len()) <= Self::STEP_TABLE_SIZE);
         // SAFETY:
         //
-        // Contract from `ptr::add`: the result must be in bounds of the allocation.
-        // Evidence: `offset` is at most `STEP_TABLE_SIZE`, the size of the allocation, per the
-        // assertion above.
+        // Contract from `<*mut u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed
+        // on mathematical integers (without "wrapping around"), must fit in an `isize`.
+        //
+        // Contract from `<*mut u8>::add`: If the computed offset is non-zero, then `self` must be
+        // derived from a pointer to some allocation, and the entire memory range between `self` and
+        // the result must be in bounds of that allocation. In particular, this range must not "wrap
+        // around" the edge of the address space.
+        //
+        // Evidence: `buffer` is the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes,
+        // and `offset` is at most `STEP_TABLE_SIZE`, per the assertion above. It fits an `isize`,
+        // as the allocation does.
         let destination = unsafe { self.buffer.add(self.offset) };
         // SAFETY:
         //
-        // Contract from `ptr::copy_nonoverlapping`: the source and the destination must be valid
-        // for `buffer.len()` bytes, and not overlap.
-        // Evidence: the destination range ends within the `STEP_TABLE_SIZE` bytes per the
-        // assertion above, which are read-write until `generate_interpreter` protects them after
-        // the generation, and not borrowed anywhere. `buffer` is a slice, so it cannot overlap
-        // memory that is only accessed through raw pointers.
+        // Contract from `ptr::copy_nonoverlapping`: `src` must be valid for reads of `count *
+        // size_of::<T>()` bytes or that number must be 0.
+        //
+        // Contract from `ptr::copy_nonoverlapping`: `dst` must be valid for writes of `count *
+        // size_of::<T>()` bytes or that number must be 0.
+        //
+        // Contract from `ptr::copy_nonoverlapping`: Both `src` and `dst` must be properly aligned.
+        //
+        // Contract from `ptr::copy_nonoverlapping`: The region of memory beginning at `src` with a
+        // size of `count * size_of::<T>()` bytes must *not* overlap with the region of memory
+        // beginning at `dst` with the same size.
+        //
+        // Evidence: `T` is `u8`, so the pointers are aligned, and the size is `buffer.len()` bytes.
+        // `buffer` is a slice, so valid for reads. The destination range ends within the
+        // `STEP_TABLE_SIZE` bytes of the allocation at `buffer`, per the assertion above, which is
+        // read-write until `generate_interpreter` protects it after the generation, and which
+        // nothing else accesses meanwhile. `buffer` is not of that allocation, which only `self`
+        // refers to, so the regions do not overlap.
         unsafe { std::ptr::copy_nonoverlapping(buffer.as_ptr(), destination, buffer.len()) };
         self.offset = self.offset.checked_add(buffer.len()).unwrap();
     }
@@ -1051,10 +1094,36 @@ impl X64Generator for InterpreterGenerator {
         let field = patch.range(0);
         // SAFETY:
         //
-        // Contract from `slice::from_raw_parts_mut`: the memory must be valid, initialized and not
-        // otherwise accessed for the lifetime of the slice.
-        // Evidence: the field is within the instruction that `extend` has just written into the
-        // read-write `STEP_TABLE_SIZE` bytes at `buffer`, which are not borrowed anywhere.
+        // Contract from `<*mut u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed
+        // on mathematical integers (without "wrapping around"), must fit in an `isize`.
+        //
+        // Contract from `<*mut u8>::add`: If the computed offset is non-zero, then `self` must be
+        // derived from a pointer to some allocation, and the entire memory range between `self` and
+        // the result must be in bounds of that allocation. In particular, this range must not "wrap
+        // around" the edge of the address space.
+        //
+        // Contract from `slice::from_raw_parts_mut`: `data` must be non-null, valid for both reads
+        // and writes for `len * size_of::<T>()` many bytes, and it must be properly aligned. This
+        // means in particular: The entire memory range of this slice must be contained within a
+        // single allocation! Slices can never span across multiple allocations.
+        //
+        // Contract from `slice::from_raw_parts_mut`: `data` must point to `len` consecutive
+        // properly initialized values of type `T`.
+        //
+        // Contract from `slice::from_raw_parts_mut`: The memory referenced by the returned slice
+        // must not be accessed through any other pointer (not derived from the return value) for
+        // the duration of lifetime `'a`. Both read and write accesses are forbidden.
+        //
+        // Contract from `slice::from_raw_parts_mut`: The total size `len * size_of::<T>()` of the
+        // slice must be no larger than `isize::MAX`, and adding that size to `data` must not "wrap
+        // around" the address space. See the safety documentation of `pointer::offset`.
+        //
+        // Evidence: `T` is `u8`, so the pointer is aligned, and the size is 4 bytes. The field is
+        // within the instruction that `extend` has just written into the `STEP_TABLE_SIZE` bytes of
+        // the allocation of `allocate_pages_low` at `buffer`, so the offset is within it and fits
+        // an `isize`. `generate_interpreter` filled the allocation with 0xcc, so it is initialized,
+        // and it is read-write until `generate_interpreter` protects it after the generation.
+        // Nothing else accesses it while the slice lives, which ends at the end of this function.
         let field = unsafe { std::slice::from_raw_parts_mut(self.buffer.add(field.start), 4) };
         field.copy_from_slice(&value.to_le_bytes());
     }
@@ -1127,11 +1196,16 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     #[cfg(all(feature = "codegen-debug", target_os = "linux"))]
     // SAFETY:
     //
-    // Contract from `CodeRecord::new`: the range must be page aligned, owned by the caller, not
-    // accessed meanwhile, and without content that is needed.
-    // Evidence: it is the fresh allocation of `allocate_pages_low`, which is page aligned, and
-    // `STEP_TABLE_SIZE` is a multiple of the page size. Nothing was written to it, and nothing else
-    // refers to it. The mapping stays, as the interpreter is never freed.
+    // Contract from `CodeRecord::new`: The `len` bytes at `start` must be pages of a mapping that
+    // the caller owns.
+    //
+    // Contract from `CodeRecord::new`: Nothing may access these pages while this runs, or rely on
+    // what they held before: they are replaced with a mapping that stays until `release`.
+    //
+    // Evidence: the range is the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes,
+    // which `generator` just made, and which nothing else refers to. Nothing was written to it yet,
+    // and the steps are generated into it afterwards. The mapping stays, as the interpreter is
+    // never freed.
     let code_record = unsafe {
         super::debug::CodeRecord::new(
             &format!("interpreter-{version:?}").to_lowercase(),
@@ -1143,9 +1217,14 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     //
     // SAFETY:
     //
-    // Contract from `ptr::write_bytes`: the range must be valid for writes.
-    // Evidence: `generator.buffer` has `STEP_TABLE_SIZE` bytes of read-write memory, and nothing
-    // refers to it yet.
+    // Contract from `ptr::write_bytes`: `dst` must be valid for writes of `count * size_of::<T>()`
+    // bytes.
+    //
+    // Contract from `ptr::write_bytes`: `dst` must be properly aligned.
+    //
+    // Evidence: `T` is `u8`, so the pointer is aligned, and the size is `STEP_TABLE_SIZE` bytes,
+    // which is the read-write allocation of `allocate_pages_low` at `generator.buffer`. Nothing
+    // else accesses it meanwhile.
     unsafe {
         std::ptr::write_bytes(
             generator.buffer,
@@ -1202,10 +1281,26 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
 
     // SAFETY:
     //
-    // Contract from `slice::from_raw_parts_mut`: the memory must be valid for reads and writes of
-    // the length, initialized, and not accessed through other pointers while the slice lives.
-    // Evidence: `generator.buffer` has `STEP_TABLE_SIZE` bytes of mmapped, thus initialized,
-    // read-write memory, and `generator.buffer` is not used until `buffer` is last.
+    // Contract from `slice::from_raw_parts_mut`: `data` must be non-null, valid for both reads and
+    // writes for `len * size_of::<T>()` many bytes, and it must be properly aligned. This means in
+    // particular: The entire memory range of this slice must be contained within a single
+    // allocation! Slices can never span across multiple allocations.
+    //
+    // Contract from `slice::from_raw_parts_mut`: `data` must point to `len` consecutive properly
+    // initialized values of type `T`.
+    //
+    // Contract from `slice::from_raw_parts_mut`: The memory referenced by the returned slice must
+    // not be accessed through any other pointer (not derived from the return value) for the
+    // duration of lifetime `'a`. Both read and write accesses are forbidden.
+    //
+    // Contract from `slice::from_raw_parts_mut`: The total size `len * size_of::<T>()` of the slice
+    // must be no larger than `isize::MAX`, and adding that size to `data` must not "wrap around"
+    // the address space. See the safety documentation of `pointer::offset`.
+    //
+    // Evidence: `T` is `u8`, so the pointer is aligned, and the size is `STEP_TABLE_SIZE` bytes,
+    // which is the read-write allocation of `allocate_pages_low` at `generator.buffer`, so it is
+    // non-null and fits an `isize`. It is initialized, as it was filled with 0xcc above.
+    // `generator.buffer` is not used to access it until `buffer` is last used, by `resolve`.
     let buffer = unsafe {
         std::slice::from_raw_parts_mut(generator.buffer, InterpreterGenerator::STEP_TABLE_SIZE)
     };
@@ -1218,11 +1313,14 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
 
     // SAFETY:
     //
-    // Contract from `protect_pages`: the range must be whole pages of a mapping that the caller
-    // owns, and nothing may access them in a way the new permissions disallow.
-    // Evidence: it is the whole allocation of `allocate_pages_low`, which is page aligned, and
-    // `STEP_TABLE_SIZE` is a multiple of the page size. `buffer` is not used after this, and the
-    // steps are only executed afterwards.
+    // Contract from `protect_pages`: These pages must be of an allocation that the caller owns.
+    //
+    // Contract from `protect_pages`: While `permissions` apply, nothing may access these pages in a
+    // way that `permissions` do not allow.
+    //
+    // Evidence: the pages are the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes,
+    // which `generator` made, and which the interpreter keeps forever. `buffer` is not used after
+    // this, and the steps are only executed, and read by `codegen::debug`, afterwards.
     unsafe {
         protect_pages(
             generator.buffer,
@@ -1337,12 +1435,54 @@ pub fn enter<C: crate::vm::ContextObject>(
     let r0: u64;
     // SAFETY:
     //
-    // Contract from `asm!`: every register the code changes must be declared or restored, the
-    // stack must be restored, and the code must not unwind.
-    // Evidence: `entry_point` restores `rbp` and `rsp`, the block itself saves `rbx`, and the other
-    // general purpose registers are declared. The host functions the generated code calls are
-    // `extern "sysv64"`, so a panic in them aborts instead of unwinding. `frame` outlives the call,
-    // and `jit` (if any) or the interpreter is code for the same `version`, which outlives it too.
+    // Contract from `asm!`: r[asm.rules.reg-not-input]: Any registers not specified as inputs will
+    // contain an undefined value on entry to the assembly code.
+    //
+    // Contract from `asm!`: r[asm.rules.reg-not-output]: Any registers not specified as outputs
+    // must have the same value upon exiting the assembly code as they had on entry, otherwise
+    // behavior is undefined.
+    //
+    // Contract from `asm!`: r[asm.rules.unwind]: Behavior is undefined if execution unwinds out of
+    // the assembly code. This also applies if the assembly code calls a function which then
+    // unwinds.
+    //
+    // Contract from `asm!`: r[asm.rules.mem-same-as-ffi]: The set of memory locations that assembly
+    // code is allowed to read and write are the same as those allowed for an FFI function. If the
+    // `readonly` option is set, then only memory reads are allowed. If the `nomem` option is set
+    // then no reads or writes to memory are allowed.
+    //
+    // Contract from `asm!`: r[asm.rules.stack-below-sp]: Unless the `nostack` option is set,
+    // assembly code is allowed to use stack space below the stack pointer. On entry to the assembly
+    // code the stack pointer is guaranteed to be suitably aligned (according to the target ABI) for
+    // a function call. You are responsible for making sure you don't overflow the stack (e.g. use
+    // stack probing to ensure you hit a guard page). You should adjust the stack pointer when
+    // allocating stack memory as required by the target ABI. The stack pointer must be restored to
+    // its original value before leaving the assembly code.
+    //
+    // Contract from `asm!`: r[asm.rules.x86-df]: On x86, the direction flag (DF in `EFLAGS`) is
+    // clear on entry to the assembly code and must be clear on exit.
+    //
+    // Contract from `asm!`: r[asm.rules.x86-x87]: On x86, the x87 floating-point register stack
+    // must remain unchanged unless all of the `st([0-7])` registers have been marked as clobbered
+    // with `out("st(0)") _, out("st(1)") _, ...`.
+    //
+    // Contract from `asm!`: r[asm.rules.x86-prefix-restriction]: On x86, inline assembly must not
+    // end with an instruction prefix (such as `LOCK`) that would apply to instructions generated by
+    // the compiler.
+    //
+    // Evidence: The code only relies on the values of the registers that are inputs (`rsi`, `r8`,
+    // `rax`, `rcx` and `rdx`). Of the general purpose registers, `rbx` is pushed and popped,
+    // `entry_point` restores `rbp` and `rsp` (with `leave`, whichever depth of internal calls
+    // `exit` or `terminate` jumps back from), and the rest are outputs, as are all the registers
+    // `clobber_abi("sysv64")` covers, so nothing else is changed on exit. The host functions that
+    // the generated code calls are `extern "sysv64"`, which does not unwind, so a panic in them
+    // aborts. The memory the code accesses is reachable from the pointers passed in, as for an FFI
+    // function: `frame`, which outlives the call, and through it the `EbpfVm`, the executable's
+    // text and function registry, and the code at `start_addr` (the JIT output or the interpreter
+    // of the same `version`, which outlives the call too). The stack is used below the stack
+    // pointer with pushes and calls, a few words per internal call, of which there are at most
+    // `max_call_depth`, and as each push touches the word below the last, an overflow hits the
+    // guard page. Nothing the code emits sets the direction flag, uses x87 or ends with a prefix.
     unsafe {
         std::arch::asm!(
             "push rbx",

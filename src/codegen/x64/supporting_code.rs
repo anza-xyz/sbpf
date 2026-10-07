@@ -44,12 +44,6 @@ pub(in crate::codegen) struct SupportingCode {
     code_range: std::ops::Range<u32>,
 }
 
-// SAFETY: the pointers are only used for their addresses, as the memory they point into is
-// read-execute and is never freed or written to once the `SupportingCode` is constructed.
-unsafe impl Send for SupportingCode {}
-// SAFETY: see `Send`.
-unsafe impl Sync for SupportingCode {}
-
 type Asm = VecAssembler<X64Relocation>;
 
 /// The supporting code of all SBPF versions, which the JIT output and the interpreters of all of
@@ -126,11 +120,15 @@ impl SupportingCode {
         #[cfg(all(feature = "codegen-debug", target_os = "linux"))]
         // SAFETY:
         //
-        // Contract from `CodeRecord::new`: the range must be page aligned, owned by the caller, not
-        // accessed meanwhile, and without content that is needed.
-        // Evidence: it is the fresh allocation of `allocate_pages_low`, which is page aligned, and
-        // `LEN` is a multiple of the page size. Nothing was written to it, and nothing else refers
-        // to it. The mapping stays, as the supporting code is never freed.
+        // Contract from `CodeRecord::new`: The `len` bytes at `start` must be pages of a mapping
+        // that the caller owns.
+        //
+        // Contract from `CodeRecord::new`: Nothing may access these pages while this runs, or rely
+        // on what they held before: they are replaced with a mapping that stays until `release`.
+        //
+        // Evidence: the range is the allocation of `allocate_pages_low` of `LEN` bytes just made,
+        // which nothing else refers to. Nothing was written to it yet, and the code is copied into
+        // it afterwards. The mapping stays, as the supporting code is never freed.
         let code_record =
             unsafe { super::super::debug::CodeRecord::new("supports", buffer as usize, Self::LEN) };
         let base_addr = u32::try_from(buffer.expose_provenance()).unwrap();
@@ -138,19 +136,35 @@ impl SupportingCode {
         assert!(code.len() <= Self::LEN, "supporting code is too long!");
         // SAFETY:
         //
-        // Contract from `ptr::copy_nonoverlapping`: the source and the destination must be valid
-        // for `code.len()` bytes, and not overlap.
-        // Evidence: `code.len()` was asserted to fit the `LEN` bytes of the fresh read-write
-        // allocation, which `code`, a `Vec`, cannot overlap.
+        // Contract from `ptr::copy_nonoverlapping`: `src` must be valid for reads of `count *
+        // size_of::<T>()` bytes or that number must be 0.
+        //
+        // Contract from `ptr::copy_nonoverlapping`: `dst` must be valid for writes of `count *
+        // size_of::<T>()` bytes or that number must be 0.
+        //
+        // Contract from `ptr::copy_nonoverlapping`: Both `src` and `dst` must be properly aligned.
+        //
+        // Contract from `ptr::copy_nonoverlapping`: The region of memory beginning at `src` with a
+        // size of `count * size_of::<T>()` bytes must *not* overlap with the region of memory
+        // beginning at `dst` with the same size.
+        //
+        // Evidence: `T` is `u8`, so the pointers are aligned, and the size is `code.len()` bytes.
+        // `code` is a `Vec`, so valid for reads, and not of the read-write allocation of
+        // `allocate_pages_low` at `buffer`, which `code.len()` was asserted to fit, and which
+        // nothing else accesses meanwhile, so the regions do not overlap.
         unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), buffer, code.len()) };
         #[cfg(all(feature = "codegen-debug", target_os = "linux"))]
         super::super::debug::finish_supporting_code(code_record, &supports);
         // SAFETY:
         //
-        // Contract from `protect_pages`: the range must be whole pages of a mapping that the
-        // caller owns, and nothing may access them in a way the new permissions disallow.
-        // Evidence: it is the whole allocation of `allocate_pages_low`, which is page aligned, and
-        // `LEN` is a multiple of the page size. The code is only executed afterwards.
+        // Contract from `protect_pages`: These pages must be of an allocation that the caller owns.
+        //
+        // Contract from `protect_pages`: While `permissions` apply, nothing may access these pages
+        // in a way that `permissions` do not allow.
+        //
+        // Evidence: the pages are the allocation of `allocate_pages_low` of `LEN` bytes, which the
+        // supporting code keeps forever. It is only executed, and read by `codegen::debug`,
+        // afterwards.
         unsafe { protect_pages(buffer, Self::LEN, PagePermissions::ReadExecute) }
             .expect("failed to make the supporting code executable");
         supports
@@ -911,11 +925,18 @@ extern "sysv64" fn store<T: crate::aligned_memory::Pod>(
     // Truncates `value`.
     // SAFETY:
     //
-    // Contract from `mem::transmute_copy`: `T` must not be larger than `u64`, and the first
-    // `size_of::<T>()` bytes of the `u64` must be a valid `T`.
-    // Evidence: `store` is only instantiated for `u8` to `u64` (see the match above), for which
-    // every bit pattern is valid, and on little endian the first bytes are the low ones, which
-    // truncates as intended.
+    // Contract from `mem::transmute_copy`: This function will unsafely assume the pointer `src` is
+    // valid for `size_of::<Dst>` bytes by transmuting `&Src` to `&Dst` and then reading the `&Dst`
+    // (except that this is done in a way that is correct even when `&Dst` has stricter alignment
+    // requirements than `&Src`).
+    //
+    // Contract from `mem::transmute_copy`: This function triggers undefined behavior if `Dst` is
+    // larger than `Src`.
+    //
+    // Evidence: `store` is only instantiated for `u8`, `u16`, `u32` and `u64` (see
+    // `SupportingCode::store`), which are not larger than `u64`, and for which any bytes are a
+    // valid value. `&value` is valid for 8 bytes, of which the first `size_of::<T>()` are read,
+    // which on little endian are the low ones, so the value is truncated as intended.
     let value = unsafe { std::mem::transmute_copy::<u64, T>(&value) };
     HostCallResult::new(mapping.store::<T>(value, vm_addr), result)
 }
@@ -1035,10 +1056,26 @@ mod tests {
 
             // SAFETY:
             //
-            // Contract from `slice::from_raw_parts`: the memory must be valid for reads of the
-            // length, and not mutated while borrowed.
-            // Evidence: a step is `1 << STEP_SIZE_LOG2` bytes of the interpreter buffer, which is
-            // read-execute and never freed, and the opcode's step is within it.
+            // Contract from `slice::from_raw_parts`: `data` must be non-null, valid for reads for
+            // `len * size_of::<T>()` many bytes, and it must be properly aligned. This means in
+            // particular: The entire memory range of this slice must be contained within a single
+            // allocation! Slices can never span across multiple allocations.
+            //
+            // Contract from `slice::from_raw_parts`: `data` must point to `len` consecutive
+            // properly initialized values of type `T`.
+            //
+            // Contract from `slice::from_raw_parts`: The memory referenced by the returned slice
+            // must not be mutated for the duration of lifetime `'a`, except inside an `UnsafeCell`.
+            //
+            // Contract from `slice::from_raw_parts`: The total size `len * size_of::<T>()` of the
+            // slice must be no larger than `isize::MAX`, and adding that size to `data` must not
+            // "wrap around" the address space. See the safety documentation of `pointer::offset`.
+            //
+            // Evidence: `T` is `u8`, so the pointer is aligned, and the size is a step, `1 <<
+            // STEP_SIZE_LOG2` bytes, which is within the allocation of the interpreter of
+            // `version`, as `interpreter_step` points at the start of a step in it. The interpreter
+            // is generated in full, so initialized, and is read-execute and never freed afterwards,
+            // so it is not mutated while the slices live.
             let step = |opcode| unsafe {
                 std::slice::from_raw_parts(
                     interpreter_step(version, opcode),

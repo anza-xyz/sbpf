@@ -143,9 +143,14 @@ pub fn interpreter(version: SBPFVersion) -> Region {
     let start = interpreter.buffer as usize;
     // SAFETY:
     //
-    // Contract from `read_memory`: the memory must be readable, initialized and not written to.
-    // Evidence: `buffer` is the interpreter's table of `STEP_TABLE_SIZE` bytes, read-execute and
-    // never freed once generated, which `x64::interpreter` returned.
+    // Contract from `read_memory`: `start` must be non-null, and the `len` bytes at it must be
+    // readable and initialized, within a single allocation.
+    //
+    // Contract from `read_memory`: Nothing may write to these bytes while this runs.
+    //
+    // Evidence: `buffer` is the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes that
+    // `x64::interpreter` generated in full, so non-null and initialized, which is read-execute and
+    // never written to or freed afterwards.
     let bytes = unsafe { read_memory(start, InterpreterGenerator::STEP_TABLE_SIZE) };
     Region {
         name: format!(".text.interpreter_{}", version_name(version)),
@@ -226,13 +231,29 @@ fn sized_symbols(mut named: Vec<(String, usize)>, end: usize) -> Vec<Symbol> {
 ///
 /// # Safety
 ///
-/// The memory must be readable and initialized, and not written to meanwhile.
+/// - `start` must be non-null, and the `len` bytes at it must be readable and initialized, within
+///   a single allocation.
+/// - Nothing may mutate the pointee while this runs.
 unsafe fn read_memory(start: usize, len: usize) -> Vec<u8> {
     // SAFETY:
     //
-    // Contract from `slice::from_raw_parts`: the memory must be valid for reads of the length,
-    // initialized, and not mutated while borrowed.
-    // Evidence: all of it is the contract of `read_memory`.
+    // Contract from `slice::from_raw_parts`: `data` must be non-null, valid for reads for `len *
+    // size_of::<T>()` many bytes, and it must be properly aligned. This means in particular: The
+    // entire memory range of this slice must be contained within a single allocation! Slices can
+    // never span across multiple allocations.
+    //
+    // Contract from `slice::from_raw_parts`: `data` must point to `len` consecutive properly
+    // initialized values of type `T`.
+    //
+    // Contract from `slice::from_raw_parts`: The memory referenced by the returned slice must not
+    // be mutated for the duration of lifetime `'a`, except inside an `UnsafeCell`.
+    //
+    // Contract from `slice::from_raw_parts`: The total size `len * size_of::<T>()` of the slice
+    // must be no larger than `isize::MAX`, and adding that size to `data` must not "wrap around"
+    // the address space. See the safety documentation of `pointer::offset`.
+    //
+    // Evidence: `T` is `u8`, so the pointer is aligned. The rest is delegated to the callers of
+    // this function.
     unsafe { std::slice::from_raw_parts(start as *const u8, len) }.to_vec()
 }
 
@@ -240,9 +261,14 @@ fn supporting_code_region(supports: &SupportingCode) -> Region {
     let (range, symbols) = supporting_code_symbols(supports);
     // SAFETY:
     //
-    // Contract from `read_memory`: the memory must be readable, initialized and not written to.
-    // Evidence: the range is the code that `SupportingCode` generated into its allocation, which
-    // is read-execute after the generation, and is never freed.
+    // Contract from `read_memory`: `start` must be non-null, and the `len` bytes at it must be
+    // readable and initialized, within a single allocation.
+    //
+    // Contract from `read_memory`: Nothing may write to these bytes while this runs.
+    //
+    // Evidence: the range is the code that `SupportingCode` generated at the start of its
+    // allocation of `allocate_pages_low`, so non-null and initialized, which is read-execute and
+    // never written to or freed afterwards.
     let bytes = unsafe { read_memory(range.start, range.len()) };
     Region {
         name: ".text.supports".to_string(),
@@ -698,9 +724,9 @@ mod linux {
         ///
         /// # Safety
         ///
-        /// `start` and `len` must be multiples of the page size, and the range must be pages of
-        /// memory that the caller owns, with no content that is still needed, and not accessed
-        /// while this runs. The mapping replaces the range, and stays until `release`.
+        /// - The `len` bytes at `start` must be pages of a mapping that the caller owns.
+        /// - Nothing may access these pages while this runs, or rely on what they held before:
+        ///   they are replaced with a mapping that stays until `release`.
         pub(in crate::codegen) unsafe fn new(label: &str, start: usize, len: usize) -> CodeRecord {
             assert_eq!(get_system_page_size(), PAGE_ALIGNMENT);
             assert!(start.is_multiple_of(PAGE_ALIGNMENT) && len.is_multiple_of(PAGE_ALIGNMENT));
@@ -731,13 +757,22 @@ mod linux {
                 .unwrap_or_else(|error| panic!("failed to create {:?}: {}", path, error));
             // SAFETY:
             //
-            // Contract from `mmap` with `MAP_FIXED`: the address must be a multiple of the page
-            // size, as must the offset, the file must be open and at least as long as the offset
-            // plus the length, and the existing mappings in the range are replaced, so it must
-            // be one that the caller owns.
-            // Evidence: the address and the length are those of the contract of `new`, the offset
-            // is a page, and the file was just made `PAGE_ALIGNMENT + len` bytes long. It is open
-            // here, and the mapping outlives the descriptor.
+            // Contract from calling `libc::mmap`: none documented. As for any foreign function, the
+            // effects must not be undefined behavior in Rust, such as r[undefined.pointer-access]
+            // of the Reference: Accessing (loading from or storing to) a place that is dangling or
+            // based on a misaligned pointer.
+            //
+            // Behaviour from `mmap(2)`: MAP_FIXED Don't interpret addr as a hint: place the mapping
+            // at exactly that address. addr must be suitably aligned: for most architectures a
+            // multiple of the page size is sufficient; however, some architectures may impose
+            // additional restrictions. If the memory region specified by addr and length overlaps
+            // pages of any existing mapping(s), then the overlapped part of the existing mapping(s)
+            // will be discarded. If the specified address cannot be used, mmap() will fail.
+            //
+            // Evidence: the part of the existing mappings that is discarded is the `len` bytes at
+            // `start`, which the contract of `new` has be pages of a mapping that the caller owns,
+            // which nothing accesses while this runs, or relies on the content of. Accesses
+            // afterwards are to the new mapping, which is read-write like the memory it replaces.
             let mapped = unsafe {
                 libc::mmap(
                     start as *mut libc::c_void,
@@ -803,11 +838,26 @@ mod linux {
                     };
                     // SAFETY:
                     //
-                    // Contract from `mmap` with `MAP_FIXED`: as for `new`.
-                    // Evidence: the range and the file are those of `new`, whose contract has the
-                    // range owned by the caller. The private mapping has the bytes that the shared
-                    // one had, as both are of the page cache of the file, so nothing observes a
-                    // change, apart from later writes, which the contract of `finish` excludes.
+                    // Contract from calling `libc::mmap`: none documented. As for any foreign
+                    // function, the effects must not be undefined behavior in Rust, such as
+                    // r[undefined.pointer-access] of the Reference: Accessing (loading from or
+                    // storing to) a place that is dangling or based on a misaligned pointer.
+                    //
+                    // Behaviour from `mmap(2)`: MAP_FIXED Don't interpret addr as a hint: place the
+                    // mapping at exactly that address. addr must be suitably aligned: for most
+                    // architectures a multiple of the page size is sufficient; however, some
+                    // architectures may impose additional restrictions. If the memory region
+                    // specified by addr and length overlaps pages of any existing mapping(s), then
+                    // the overlapped part of the existing mapping(s) will be discarded. If the
+                    // specified address cannot be used, mmap() will fail.
+                    //
+                    // Evidence: the part of the existing mappings that is discarded is the mapping
+                    // of the file that `new` made, which the contract of `new` has be the record's
+                    // until `release`. Nothing accesses it meanwhile: the records of the supporting
+                    // code and of the interpreters are finished while they are generated, and that
+                    // of a `JitProgram` once it is sealed but before `compile` returns it, through
+                    // `&mut`. Accesses afterwards are to the new mapping, with the bytes of the
+                    // file and the `permissions` that the code needs.
                     let mapped = unsafe {
                         libc::mmap(
                             self.start as *mut libc::c_void,
@@ -829,10 +879,19 @@ mod linux {
                     symfile[..head.len()].copy_from_slice(&head);
                     // SAFETY:
                     //
-                    // Contract from `read_memory`: the memory must be readable, initialized and
-                    // not written to.
-                    // Evidence: the contract of `new` has the range owned by the caller, and that
-                    // of `finish` has the code final, so nothing writes to it any more.
+                    // Contract from `read_memory`: `start` must be non-null, and the `len` bytes at
+                    // it must be readable and initialized, within a single allocation.
+                    //
+                    // Contract from `read_memory`: Nothing may write to these bytes while this
+                    // runs.
+                    //
+                    // Evidence: the range is the one given to `new`, which the contract of `new`
+                    // has be pages of a mapping that the caller owns, so non-null and readable, and
+                    // initialized as mapped memory is. The code is final when `finish` is called,
+                    // and nothing writes to it meanwhile: the records of the supporting code and of
+                    // the interpreters are finished while they are generated, and that of a
+                    // `JitProgram` once it is sealed but before `compile` returns it, through
+                    // `&mut`.
                     let code = unsafe { read_memory(self.start, self.len) };
                     symfile[PAGE_ALIGNMENT..tail_offset].copy_from_slice(&code);
                     symfile[tail_offset..].copy_from_slice(&tail);
@@ -855,8 +914,9 @@ mod linux {
         ///
         /// # Safety
         ///
-        /// The range given to `new` must be memory that the caller still owns, and nothing may
-        /// access it while this runs or rely on its content afterwards.
+        /// - The `len` bytes at `start` given to `new` must still be pages that the caller owns.
+        /// - Nothing may access these pages while this runs, or rely on what they held before:
+        ///   they are replaced with an anonymous mapping.
         pub(crate) unsafe fn release(mut self) {
             self.unregister();
             let Some((_, path)) = &self.file else {
@@ -864,11 +924,23 @@ mod linux {
             };
             // SAFETY:
             //
-            // Contract from `mmap` with `MAP_FIXED`: the address must be a multiple of the page
-            // size, and the mappings in the range are replaced, so it must be one that the caller
-            // owns. Without a file the offset must be zero, and the descriptor -1.
-            // Evidence: the range is the one `new` checked, and the contract of `release` has it
-            // owned by the caller and unused.
+            // Contract from calling `libc::mmap`: none documented. As for any foreign function, the
+            // effects must not be undefined behavior in Rust, such as r[undefined.pointer-access]
+            // of the Reference: Accessing (loading from or storing to) a place that is dangling or
+            // based on a misaligned pointer.
+            //
+            // Behaviour from `mmap(2)`: MAP_FIXED Don't interpret addr as a hint: place the mapping
+            // at exactly that address. addr must be suitably aligned: for most architectures a
+            // multiple of the page size is sufficient; however, some architectures may impose
+            // additional restrictions. If the memory region specified by addr and length overlaps
+            // pages of any existing mapping(s), then the overlapped part of the existing mapping(s)
+            // will be discarded. If the specified address cannot be used, mmap() will fail.
+            //
+            // Evidence: the part of the existing mappings that is discarded is the `len` bytes at
+            // `start`, which the contract of `release` has still be pages that the caller owns,
+            // which nothing accesses while this runs, or relies on the content of afterwards.
+            // Accesses afterwards are to the new mapping, which is read-write like the memory of
+            // the pool that it returns to.
             let mapped = unsafe {
                 libc::mmap(
                     self.start as *mut libc::c_void,
@@ -936,12 +1008,17 @@ mod linux {
         let label = format!("jit-{}", COUNTER.fetch_add(1, Ordering::Relaxed));
         // SAFETY:
         //
-        // Contract from `CodeRecord::new`: the range must be page aligned, owned by the caller, and
-        // not accessed meanwhile, with no content that is needed.
-        // Evidence: the text section of a program that is not sealed yet is all of its page
-        // rounded text capacity, which starts at a page, after the page rounded pc section, of the
-        // allocation. `program` owns it, and nothing was written to it yet. The file is released
-        // when the program is dropped, before the allocation is returned to the pool.
+        // Contract from `CodeRecord::new`: The `len` bytes at `start` must be pages of a mapping
+        // that the caller owns.
+        //
+        // Contract from `CodeRecord::new`: Nothing may access these pages while this runs, or rely
+        // on what they held before: they are replaced with a mapping that stays until `release`.
+        //
+        // Evidence: the text section of a program that is not sealed is all of its page-rounded
+        // text capacity, which starts at a page boundary after the page-rounded pc section, within
+        // the allocation that `program` owns. Nothing was written to it yet, and the code is
+        // generated into it afterwards. The `JitProgram` releases the record when dropped, before
+        // returning the allocation to the pool.
         let record = unsafe { CodeRecord::new(&label, start, len) };
         program.code_record = Some(record);
     }
@@ -1001,9 +1078,38 @@ mod linux {
     extern "C" fn __jit_debug_register_code() {
         // SAFETY:
         //
-        // Contract from `asm!`: the assembly must be valid, and uphold the options.
-        // Evidence: it is empty, and so touches no memory, stack or flags. It is there so that
-        // the function is not optimized into nothing, as the debugger needs its address.
+        // Contract from `asm!`: r[asm.rules.reg-not-output]: Any registers not specified as outputs
+        // must have the same value upon exiting the assembly code as they had on entry, otherwise
+        // behavior is undefined.
+        //
+        // Contract from `asm!`: r[asm.rules.unwind]: Behavior is undefined if execution unwinds out
+        // of the assembly code. This also applies if the assembly code calls a function which then
+        // unwinds.
+        //
+        // Contract from `asm!`: r[asm.rules.mem-same-as-ffi]: The set of memory locations that
+        // assembly code is allowed to read and write are the same as those allowed for an FFI
+        // function. If the `readonly` option is set, then only memory reads are allowed. If the
+        // `nomem` option is set then no reads or writes to memory are allowed.
+        //
+        // Contract from `asm!`: r[asm.rules.preserved-registers]: These flags registers must be
+        // restored upon exiting the assembly code if the `preserves_flags` option is set: Status
+        // flags in `EFLAGS` (CF, PF, AF, ZF, SF, OF). Floating-point status word (all).
+        // Floating-point exception flags in `MXCSR` (PE, UE, OE, ZE, DE, IE).
+        //
+        // Contract from `asm!`: r[asm.rules.x86-df]: On x86, the direction flag (DF in `EFLAGS`) is
+        // clear on entry to the assembly code and must be clear on exit.
+        //
+        // Contract from `asm!`: r[asm.rules.x86-x87]: On x86, the x87 floating-point register stack
+        // must remain unchanged unless all of the `st([0-7])` registers have been marked as
+        // clobbered with `out("st(0)") _, out("st(1)") _, ...`.
+        //
+        // Contract from `asm!`: r[asm.rules.x86-prefix-restriction]: On x86, inline assembly must
+        // not end with an instruction prefix (such as `LOCK`) that would apply to instructions
+        // generated by the compiler.
+        //
+        // Evidence: the assembly code is empty, so it changes no registers or flags, calls nothing,
+        // and accesses no memory or stack. It is there so that the function is not optimized into
+        // nothing, as the debugger needs its address.
         unsafe { std::arch::asm!("", options(nomem, nostack, preserves_flags)) };
     }
 
@@ -1033,13 +1139,23 @@ mod linux {
         let descriptor = &raw mut __jit_debug_descriptor;
         // SAFETY:
         //
-        // Contract from dereferencing a raw pointer: it must be valid for the reads and writes,
-        // and nothing else may access the memory meanwhile.
-        // Evidence: `descriptor` is a static, which only this module accesses, and only while
-        // holding `LIST_LOCK` (apart from the debugger, which reads it while the process is
-        // stopped). `entry` is a fresh allocation. `first` is an entry of the list, as the
-        // descriptor only holds entries that `unregister` has not freed yet, which it only does
-        // after removing them under the lock.
+        // Contract from `dereferencing a raw pointer (the Reference)`: r[undefined.race]: Data
+        // races.
+        //
+        // Contract from `dereferencing a raw pointer (the Reference)`: r[undefined.pointer-access]:
+        // Accessing (loading from or storing to) a place that is dangling or based on a misaligned
+        // pointer.
+        //
+        // Contract from `dereferencing a raw pointer (the Reference)`: r[undefined.alias]: Breaking
+        // the pointer aliasing rules.
+        //
+        // Evidence: `descriptor` points to a static, which lives forever and is aligned, and
+        // `entry` to a fresh `Box` allocation of a `JitCodeEntry`. `first` is an entry in the list,
+        // as the list only holds entries that `unregister` has not freed yet, which it frees after
+        // removing them. Only this module accesses the static and the entries, while holding
+        // `LIST_LOCK` (apart from the debugger, which reads them while the process is stopped), so
+        // there is no data race. They are only accessed through raw pointers, so no reference to
+        // them is live.
         unsafe {
             let first = (*descriptor).first_entry;
             (*entry).next = first;
@@ -1064,9 +1180,18 @@ mod linux {
         let descriptor = &raw mut __jit_debug_descriptor;
         // SAFETY:
         //
-        // Contract from dereferencing a raw pointer: as for `register`.
-        // Evidence: as for `register`, with `entry` being in the list as it is only removed here,
-        // and so are its neighbours `prev` and `next`, which are updated to skip it.
+        // Contract from `dereferencing a raw pointer (the Reference)`: r[undefined.race]: Data
+        // races.
+        //
+        // Contract from `dereferencing a raw pointer (the Reference)`: r[undefined.pointer-access]:
+        // Accessing (loading from or storing to) a place that is dangling or based on a misaligned
+        // pointer.
+        //
+        // Contract from `dereferencing a raw pointer (the Reference)`: r[undefined.alias]: Breaking
+        // the pointer aliasing rules.
+        //
+        // Evidence: as for `register`, with `entry` in the list, as it is only removed here, and so
+        // its neighbours `prev` and `next`, which are updated to skip it.
         unsafe {
             let (prev, next) = ((*entry).prev, (*entry).next);
             if prev.is_null() {
@@ -1083,11 +1208,21 @@ mod linux {
         __jit_debug_register_code();
         // SAFETY:
         //
-        // Contract from `Box::from_raw`: the pointer must come from `Box::into_raw`, and not be
-        // freed already.
-        // Evidence: `register` made it so, and a `Registration` is consumed here, so it is only
-        // freed once. The list no longer has it, and the debugger is done with it, as it was
-        // stopped in `__jit_debug_register_code` above until it had read the descriptor.
+        // Contract from `Box::from_raw`: The raw pointer must point to a block of memory allocated
+        // by the global allocator.
+        //
+        // Contract from `std::boxed`: More precisely, a `value: *mut T` that has been allocated
+        // with the `Global` allocator with `Layout::for_value(&*value)` may be converted into a box
+        // using `Box::<T>::from_raw(value)`.
+        //
+        // Contract from `std::boxed`: On top of these basic layout requirements, a `Box<T>` must
+        // point to a valid value of `T`.
+        //
+        // Evidence: `register` made `entry` with `Box::into_raw(Box::new(..))`, so it was allocated
+        // by the global allocator with the layout of a `JitCodeEntry`, and points to a valid one. A
+        // `Registration` is consumed here, so the entry is only freed once. The list no longer has
+        // it, and the debugger is done with it, as it was stopped in `__jit_debug_register_code`
+        // above until it had read the descriptor.
         drop(unsafe { Box::from_raw(entry) });
     }
 }

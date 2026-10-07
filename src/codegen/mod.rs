@@ -466,10 +466,41 @@ fn add_to_field<const SIZE: usize>(
     debug_assert!(field.wrapping_add(4) <= SIZE);
     // SAFETY:
     //
-    // Contract from `ptr::add`, `ptr::read_unaligned` and `ptr::write_unaligned`: the 4 bytes at
-    // `field` must be within `template` and `out`.
-    // Evidence: `TemplateRelocation::new` asserts that the fields end within the template, which
-    // is at most `SIZE` bytes, and that the meter adjustment of a taken branch is within it too.
+    // Contract from `<*const u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed on
+    // mathematical integers (without "wrapping around"), must fit in an `isize`.
+    //
+    // Contract from `<*const u8>::add`: If the computed offset is non-zero, then `self` must be
+    // derived from a pointer to some allocation, and the entire memory range between `self` and the
+    // result must be in bounds of that allocation. In particular, this range must not "wrap around"
+    // the edge of the address space.
+    //
+    // Contract from `<*const i32>::read_unaligned`: See `ptr::read_unaligned` for safety concerns
+    // and examples.
+    //
+    // Contract from `ptr::read_unaligned`: `src` must be valid for reads.
+    //
+    // Contract from `ptr::read_unaligned`: `src` must point to a properly initialized value of type
+    // `T`.
+    //
+    // Contract from `<*mut u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed on
+    // mathematical integers (without "wrapping around"), must fit in an `isize`.
+    //
+    // Contract from `<*mut u8>::add`: If the computed offset is non-zero, then `self` must be
+    // derived from a pointer to some allocation, and the entire memory range between `self` and the
+    // result must be in bounds of that allocation. In particular, this range must not "wrap around"
+    // the edge of the address space.
+    //
+    // Contract from `<*mut i32>::write_unaligned`: See `ptr::write_unaligned` for safety concerns
+    // and examples.
+    //
+    // Contract from `ptr::write_unaligned`: `dst` must be valid for writes.
+    //
+    // Evidence: `TemplateRelocation::new` asserts that a field ends within its template, so `field
+    // + 4` is at most the length of the template, and that the meter adjustment of a taken branch,
+    // `TAKEN_BRANCH_METER_ADJUSTMENT` bytes before its field, is within it too. That is at most
+    // `SIZE`, so `field` is an offset within the arrays `template` and `out`, which fits an
+    // `isize`, and the 4 bytes at it are within either array. They are initialized bytes, and any 4
+    // of them are a valid `i32`. `out` is borrowed mutably, so writing to it is allowed.
     unsafe {
         let addend = template.as_ptr().add(field).cast::<i32>().read_unaligned();
         debug_assert!(
