@@ -179,7 +179,7 @@ fn conditional_branch<G: Generator + ?Sized>(
             ebpf::BPF_JEQ | ebpf::BPF_JGE | ebpf::BPF_JLE | ebpf::BPF_JSGE | ebpf::BPF_JSLE => {
                 load_next_insn_addr(out);
                 bpf_validate_meter(out);
-                return out.bpf_taken_branch();
+                return out.bpf_taken_branch(true);
             }
             ebpf::BPF_JNE | ebpf::BPF_JGT | ebpf::BPF_JLT | ebpf::BPF_JSGT | ebpf::BPF_JSLT => {
                 return;
@@ -205,7 +205,11 @@ fn conditional_branch<G: Generator + ?Sized>(
         ebpf::BPF_JSLE => x64asm!(out; jg BYTE =>fallthrough),
         _ => invalid_insn(out),
     }
-    out.bpf_taken_branch();
+    // Comparisons of 64 bits with an immediate sign-extend it into the temporary register.
+    let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
+    let is_64 = (op & ebpf::BPF_CLS_MASK) == ebpf::BPF_JMP64;
+    // FIXME: bool is ugly!
+    out.bpf_taken_branch(!(is_imm && is_64));
     out.dynamic_label(fallthrough);
 }
 
@@ -469,7 +473,7 @@ pub(super) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
         ebpf::JA => {
             load_next_insn_addr(out);
             bpf_validate_meter(out);
-            out.bpf_taken_branch();
+            out.bpf_taken_branch(true);
         }
 
         // The supports read what they need from the instruction.
@@ -643,30 +647,25 @@ fn bpf_validate_meter<G: Generator + ?Sized>(out: &mut G) {
 /// Every template reserves this many relocations, so keep it at the maximum that any template
 /// needs (`templates_fit_max_relocations` checks both directions).
 /// The tracer's prelude takes another one.
-pub(super) const MAX_RELOCATIONS: usize = if cfg!(feature = "tracer") { 4 } else { 3 };
+pub(super) const MAX_RELOCATIONS: usize = if cfg!(feature = "tracer") { 5 } else { 4 };
 
 pub(super) const MAX_JIT_TEMPLATE_SIZE: usize = if cfg!(feature = "tracer") { 64 } else { 48 };
-
-/// Distance from the meter adjustment field of a taken branch to its jump field, see
-/// `TemplateRelocationKind::TakenBranch`: the `jmp rel32` follows the `add r64, imm32`.
-const TAKEN_BRANCH_METER_ADJUSTMENT: usize = 5;
 
 #[derive(Clone, Copy, Debug)]
 #[repr(u8)]
 pub(super) enum TemplateRelocationKind {
-    /// The JIT holds a pointer to the second instruction of the eBPF program in `insn`,
-    /// whereas the templates default to addressing where `insn` is updated to point to right
-    /// after the current instruction. This relocation adds the offset of the current instruction
-    /// to the field.
+    /// The JIT holds a pointer `insn_bias` bytes past the second instruction of the eBPF program
+    /// in `insn`, whereas the templates default to addressing where `insn` is updated to point to
+    /// right after the current instruction. This relocation adds the offset of the current
+    /// instruction, minus the bias, to the field.
+    ///
+    /// The bias is random (see `JitTemplates::analyze`), so that the displacements are not
+    /// predictable from the program, which could otherwise choose them to spray machine code.
     InsnOffset,
     /// When BPF instruction represents a branch, and the branch is taken, the control flow has to
     /// transfer to the machine code representing the target BPF instruction's code. Offset to this
     /// machine code is what this relocation must overwrite based on the BPF instruction being
     /// templated.
-    ///
-    /// The field `TAKEN_BRANCH_METER_ADJUSTMENT` bytes before it, which `bpf_taken_branch`
-    /// always emits there, gets the offset (in bytes) from the instruction following the branch to
-    /// the branch target.
     TakenBranch,
     /// For `jmp ->sig_meter_exceeded`.
     SigMeterExceeded,
@@ -745,13 +744,6 @@ impl TemplateRelocation {
             field.checked_add(4).unwrap() <= location,
             "unsupported template relocation"
         );
-        // `apply` also patches the meter adjustment ahead of the field.
-        if let TemplateRelocationKind::TakenBranch = kind {
-            assert!(
-                field >= TAKEN_BRANCH_METER_ADJUSTMENT,
-                "unsupported template relocation"
-            );
-        }
         let addend =
             i32::try_from(patch.target_offset.checked_sub(reference as isize).unwrap()).unwrap();
         code[field..field.wrapping_add(4)].copy_from_slice(&addend.to_le_bytes());
@@ -774,14 +766,10 @@ impl TemplateRelocation {
         // `analyze`), as are the `pc_section` entries, `pc * INSN_SIZE` is an offset into the text
         // section, and `off` and the addends are at most 32 bits.
         let target = match self.kind {
-            TemplateRelocationKind::InsnOffset => {
-                (at.pc as i64).wrapping_mul(ebpf::INSN_SIZE as i64)
-            }
+            TemplateRelocationKind::InsnOffset => (at.pc as i64)
+                .wrapping_mul(ebpf::INSN_SIZE as i64)
+                .wrapping_sub(at.random_key as u32 as i64),
             TemplateRelocationKind::TakenBranch => {
-                let adjustment = i64::from(at.off).wrapping_mul(ebpf::INSN_SIZE as i64);
-                // At least `TAKEN_BRANCH_METER_ADJUSTMENT` (see `new`).
-                let field = usize::from(self.field).wrapping_sub(TAKEN_BRANCH_METER_ADJUSTMENT);
-                add_to_field(template, out, field, adjustment);
                 // The verifier rejects invalid jump offsets, but doing this defensive thing is
                 // faster anyway.
                 let target = at
@@ -809,8 +797,7 @@ impl TemplateRelocation {
 /// Reads `template` rather than `out`, which was just written with wider stores that a load of
 /// the field couldn't be forwarded from.
 ///
-/// `field` must be a field of a relocation of the template, or the meter adjustment of
-/// `TemplateRelocationKind::TakenBranch`.
+/// `field` must be a field of a relocation of the template.
 #[inline(always)]
 fn add_to_field<const SIZE: usize>(
     template: &[u8; SIZE],
@@ -851,9 +838,7 @@ fn add_to_field<const SIZE: usize>(
     // Contract from `ptr::write_unaligned`: `dst` must be valid for writes.
     //
     // Evidence: `TemplateRelocation::new` asserts that a field ends within its template, so `field
-    // + 4` is at most the length of the template, and that the meter adjustment of a taken branch,
-    // `TAKEN_BRANCH_METER_ADJUSTMENT` bytes before its field, is within it too. That is at
-    // most `SIZE`, so `field` is an offset within the arrays `template` and `out`, which fits an
+    // + 4` is at most the length of the template. That is at most `SIZE`, so `field` is an offset within the arrays `template` and `out`, which fits an
     // `isize`, and the 4 bytes at it are within either array. They are initialized bytes, and any 4
     // of them are a valid `i32`. `out` is borrowed mutably, so writing to it is allowed.
     unsafe {
@@ -920,25 +905,35 @@ pub(super) fn aux_template<G: Generator + ?Sized>(out: &mut G, template: AuxTemp
 }
 
 /// `Generator::bpf_taken_branch` of the JIT templates.
-pub(super) fn jit_taken_branch<G: Generator + ?Sized>(out: &mut G) {
-    // The `TakenBranch` relocation of the `jmp` also patches the adjustment.
-    x64asm!(out; add RMETER, DWORD 0);
-    let adjustment = out.offset();
+pub(super) fn jit_taken_branch<G: Generator + ?Sized>(out: &mut G, next_insn_in_temp: bool) {
+    adjust_meter_for_taken_branch(out, next_insn_in_temp);
     x64asm!(out; jmp ->template_taken_branch);
-    assert_eq!(
-        out.offset().wrapping_sub(adjustment),
-        TAKEN_BRANCH_METER_ADJUSTMENT,
-        "the adjustment must precede the jump field"
-    );
 }
 
 /// `Generator::bpf_taken_branch` of the interpreter steps, which `interpreter_dispatch` follows.
-pub(super) fn interpreter_taken_branch<G: Generator + ?Sized>(out: &mut G) {
-    x64asm!(out
-        ; movsx RTEMP, WORD REL32_OFF
-        ; lea RMETER, [ RMETER + RTEMP*8 ]
-        ; lea RINSN, [ RINSN + RTEMP*8 ]
-    );
+pub(super) fn interpreter_taken_branch<G: Generator + ?Sized>(
+    out: &mut G,
+    next_insn_in_temp: bool,
+) {
+    adjust_meter_for_taken_branch(out, next_insn_in_temp);
+    x64asm!(out; lea RINSN, [ RINSN + RTEMP*8 ]);
+}
+
+/// Move the limit in `RMETER` by the offset of the branch being taken, leaving the offset (in
+/// instructions) in `RTEMP`.
+///
+/// The offset is read from the instruction, rather than being an immediate in the code, which a
+/// program could choose to spray machine code. It is read through the address of the next
+/// instruction if `RTEMP` still has it, otherwise through `RINSN` (which takes a relocation):
+/// comparisons with a 64-bit immediate need `RTEMP` for the immediate, and keeping the address
+/// around them (with `push` and `pop`, or by reloading `RINSN` for it) makes tight loops slower.
+fn adjust_meter_for_taken_branch<G: Generator + ?Sized>(out: &mut G, next_insn_in_temp: bool) {
+    if next_insn_in_temp {
+        x64asm!(out; movsx RTEMP, WORD [ RTEMP - 6i8 ]);
+    } else {
+        x64asm!(out; movsx RTEMP, WORD REL32_OFF);
+    }
+    x64asm!(out; lea RMETER, [ RMETER + RTEMP*8 ]);
 }
 
 /// Generate the end of an interpreter step, which dispatches to the step of the next instruction.
@@ -1013,19 +1008,23 @@ struct Frame {
 /// `executable`, or `None` to interpret it.
 pub(super) fn enter<C: ContextObject>(
     executable: &Executable<C>,
-    jit: Option<(&[u32], *const u8)>,
+    jit: Option<&JitProgram>,
     vm: &mut EbpfVm<C>,
 ) {
     let version = executable.get_sbpf_version();
     let (bpf_vm_addr, bpf) = executable.get_text_bytes();
     let pc = vm.registers[11] as usize;
     let (start_addr, insn, jit_pc_section, code) = match jit {
-        Some((pc_section, text_section)) => (
-            (text_section as usize).wrapping_add(pc_section[pc] as usize),
-            bpf.as_ptr().wrapping_add(ebpf::INSN_SIZE),
-            pc_section.as_ptr(),
-            text_section,
-        ),
+        Some(program) => {
+            let (pc_section, text_section) = (program.pc_section(), program.text_section());
+            (
+                (text_section.as_ptr() as usize).wrapping_add(pc_section[pc] as usize),
+                bpf.as_ptr()
+                    .wrapping_add(ebpf::INSN_SIZE.wrapping_add(program.random_key as usize)),
+                pc_section.as_ptr(),
+                text_section.as_ptr(),
+            )
+        }
         None => {
             // `pc` is bounds checked by the indexing below.
             let starting_insn = bpf.as_chunks::<{ ebpf::INSN_SIZE }>().0[pc];

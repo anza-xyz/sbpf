@@ -32,6 +32,11 @@ pub struct JitProgram {
     /// makes the two incompatible in how they are entered.
     #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
     pub(crate) dynasm: bool,
+    /// For the code produced by jit this is a random value by which some randomzation can be
+    /// applied to user data to prevent e.g. JIT spraying.
+    // FIXME: could be shared with old jit for its own encryption key thing.
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
+    pub(crate) random_key: u32,
     /// What the debugging aids keep of the code, see `codegen::debug`.
     #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
     pub(crate) code_record: Option<crate::codegen::debug::CodeRecord>,
@@ -80,6 +85,7 @@ impl JitProgram {
             text_section: NonNull::slice_from_raw_parts(text, text_capacity),
             sealed: false,
             dynasm: false,
+            random_key: 0,
             #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
             code_record: None,
         }

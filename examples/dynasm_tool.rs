@@ -148,6 +148,7 @@ mod tool {
             enabled_sbpf_versions: version..=version,
             // The output is the same on every run.
             noop_instruction_rate: 0,
+            sanitize_user_provided_values: false,
             ..Config::default()
         };
         let mut loader = BuiltinProgram::new_loader(config);
@@ -194,7 +195,7 @@ mod tool {
             let executable = load(path, version);
             dynasm_compile(&executable);
             let program = executable.get_compiled_program().unwrap();
-            regions.push(debug::jit(&executable, &program));
+            regions.push(debug::jit(&executable, &program, true));
         }
         debug::write_elf(&args.out, &regions)
             .unwrap_or_else(|e| die(format!("{}: {e}", args.out.display())));

@@ -4901,6 +4901,46 @@ fn test_dynasm_compile_cached() {
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 #[test]
+fn test_dynasm_insn_bias() {
+    // The program chooses the offsets of its instructions and of its branches, which would end up
+    // as displacements in the machine code if they were not biased by a random amount.
+    let source = "
+        mov64 r0, 0
+        mov64 r1, 0
+        add64 r1, 1
+        add64 r0, 0x12345
+        jlt r1, 10, -3
+        jeq r0, 0, 2
+        lddw r2, 0x1122334455667788
+        exit";
+    for sanitize_user_provided_values in [false, true] {
+        let config = Config {
+            noop_instruction_rate: 0,
+            sanitize_user_provided_values,
+            ..Config::default()
+        };
+        let compile = || {
+            let loader = Arc::new(BuiltinProgram::new_loader(config.clone()));
+            let executable = assemble::<TestContextObject>(source, loader).unwrap();
+            executable.dynasm_compile().unwrap();
+            let program = executable.get_compiled_program().unwrap();
+            program.text_section().to_vec()
+        };
+        let (first, second) = (compile(), compile());
+        // Equal by chance with a probability of 2^-30.
+        assert_eq!(first == second, !sanitize_user_provided_values);
+        test_interpreter_and_jit_asm!(
+            source,
+            config,
+            NO_INPUT,
+            TestContextObject::new(35),
+            ProgramResult::Ok(0x12345 * 10),
+        );
+    }
+}
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[test]
 fn test_max_call_depth_zero() {
     use solana_sbpf::vm::{CallFrame, ExecutionMode};
     // FIXME: The interpreter panics.

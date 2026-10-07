@@ -34,6 +34,7 @@ shuttle = { version = "0.9.3", optional = true }
 thiserror = "2.0.9"
 dynasm = "5.1.0"
 dynasmrt = "5.1.0"
+object = { version = "0.40", optional = true, default-features = false, features = ["write_core", "elf"] }
 
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["memoryapi", "sysinfoapi", "winnt", "errhandlingapi"] }
@@ -53,13 +54,14 @@ conf-stack-frame-size = []
 # Compile in the debugging aids of `codegen`.
 #
 # Use the `SBPF_DEBUG_*` environment variables to enable and/or configure them.
-codegen-debug = []
+codegen-debug = ["dep:object"]
 
 [dev-dependencies]
 clap = { version = "4", features = ["derive"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 elf = "0.0.10"
 json = "0.12"
+object = { version = "0.40", default-features = false, features = ["read_core", "elf"] }
 rand = { version = "0.8.5", features = ["small_rng"] }
 test_utils = { path = "test_utils/" }
 

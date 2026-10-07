@@ -15,9 +15,12 @@
 //!   `jit-<n>`. The directory must allow executable mappings (not `noexec`). `/proc/<pid>/maps`
 //!   names the files. Those of the JIT programs stay on disk after the programs are dropped, as the
 //!   record of them.
-//! - `SBPF_DEBUG_GDB_INTEGRATION` (Linux, on unless `0`, `false`, `off` or `no`): once the code is final, it
-//!   is registered with the GDB JIT interface, so that `gdb` resolves the symbols without being
-//!   told about any files.
+//! - `SBPF_DEBUG_GDB_INTEGRATION` (Linux, on unless `0`, `false`, `off` or `no`): once the code is
+//!   final, it is registered with the GDB JIT interface, so that `gdb` resolves the symbols without
+//!   being told about any files.
+//! - `SBPF_DEBUG_INSTRUCTION_SYMBOLS` (off unless `1`, `true`, `on` or `yes`): the JIT output has a
+//!   symbol for each BPF instruction, rather than only for the functions of the executable, which
+//!   is expensive for large programs.
 
 use super::arch::SupportingCode;
 use super::generate::{self, InterpreterGenerator};
@@ -43,26 +46,30 @@ pub struct Options {
     pub code_dir: Option<std::path::PathBuf>,
     /// `SBPF_DEBUG_GDB_INTEGRATION`.
     pub gdb_jit: bool,
+    /// `SBPF_DEBUG_INSTRUCTION_SYMBOLS`.
+    pub instruction_symbols: bool,
 }
 
 /// The `Options` of the process, read from the environment once, before anything is generated.
 pub fn options() -> &'static Options {
     static OPTIONS: std::sync::LazyLock<Options> = std::sync::LazyLock::new(|| Options {
-        stack_checks: env_flag("SBPF_DEBUG_STACK_CHECKS"),
+        stack_checks: env_flag("SBPF_DEBUG_STACK_CHECKS", true),
         code_dir: std::env::var_os("SBPF_DEBUG_CODE_DIR").map(std::path::PathBuf::from),
-        gdb_jit: env_flag("SBPF_DEBUG_GDB_INTEGRATION"),
+        gdb_jit: env_flag("SBPF_DEBUG_GDB_INTEGRATION", true),
+        instruction_symbols: env_flag("SBPF_DEBUG_INSTRUCTION_SYMBOLS", false),
     });
     &OPTIONS
 }
 
-/// Whether the environment variable `name` leaves its debugging aid on, which it is by default.
+/// Whether the environment variable `name` turns its debugging aid on, or `default` if it is not
+/// set.
 ///
 /// # Panics
 ///
 /// If the value is not one of the recognized ones, rather than guessing what was meant.
-fn env_flag(name: &str) -> bool {
+fn env_flag(name: &str, default: bool) -> bool {
     let Some(value) = std::env::var_os(name) else {
-        return true;
+        return default;
     };
     match value.to_str().map(str::to_ascii_lowercase).as_deref() {
         Some("1" | "true" | "on" | "yes") => true,
@@ -161,18 +168,26 @@ pub fn interpreter(version: SBPFVersion) -> Region {
     }
 }
 
-/// The JIT output `program` of `executable`, with a symbol per BPF instruction.
+/// The JIT output `program` of `executable`, with a symbol per function of the executable, or per
+/// BPF instruction with `instruction_symbols`.
 ///
 /// # Panics
 ///
 /// If `program` was not produced by `codegen`.
-pub fn jit<C: ContextObject>(executable: &Executable<C>, program: &JitProgram) -> Region {
+pub fn jit<C: ContextObject>(
+    executable: &Executable<C>,
+    program: &JitProgram,
+    instruction_symbols: bool,
+) -> Region {
     assert!(program.dynasm, "not a program of codegen");
-    jit_region(
-        generate::jit_templates(executable.get_sbpf_version()),
-        executable,
-        program,
-    )
+    let templates = generate::jit_templates(executable.get_sbpf_version());
+    let text = program.text_section();
+    Region {
+        name: ".text.jit".to_string(),
+        start: text.as_ptr() as usize,
+        bytes: text.to_vec(),
+        symbols: jit_symbols(templates, executable, program, instruction_symbols),
+    }
 }
 
 /// The JIT template for the instructions with the `TemplateOpcode` `opcode`: the opcode of the
@@ -208,7 +223,7 @@ pub fn template(version: SBPFVersion, opcode: u16) -> Template {
 /// Write the `regions` into an ELF file at `path`, which can be disassembled and mapped at the
 /// addresses of the regions.
 pub fn write_elf(path: &Path, regions: &[Region]) -> io::Result<()> {
-    std::fs::write(path, build_elf(regions).0)
+    std::fs::write(path, elf_image(regions))
 }
 
 /// Sort `named` addresses, and make each symbol extend to the next one, and the last to `end`.
@@ -341,31 +356,16 @@ fn interpreter_symbols(version: SBPFVersion, start: usize, step_lens: &[u8]) -> 
     symbols
 }
 
-fn jit_region<const SIZE: usize, C: ContextObject>(
-    templates: &JitTemplates<SIZE>,
-    executable: &Executable<C>,
-    program: &JitProgram,
-) -> Region {
-    let text = program.text_section();
-    Region {
-        name: ".text.jit".to_string(),
-        start: text.as_ptr() as usize,
-        bytes: text.to_vec(),
-        symbols: jit_symbols(templates, executable, program),
-    }
-}
-
-/// The symbols of the sealed `program`: one per BPF instruction, and the templates around them.
+/// The symbols of the sealed `program`: one per function of the executable (or per BPF instruction
+/// with `instruction_symbols`), and the templates around them.
 fn jit_symbols<const SIZE: usize, C: ContextObject>(
     templates: &JitTemplates<SIZE>,
     executable: &Executable<C>,
     program: &JitProgram,
+    instruction_symbols: bool,
 ) -> Vec<Symbol> {
-    let version = executable.get_sbpf_version();
     let text = program.text_section();
     let start = text.as_ptr() as usize;
-    let bpf = executable.get_text_bytes().1;
-    let loader = BuiltinProgram::<DummyContextObject>::new_mock();
 
     let names = [
         "invalid_call_target",
@@ -377,16 +377,45 @@ fn jit_symbols<const SIZE: usize, C: ContextObject>(
         .zip(templates.shared_offsets())
         .map(|(name, offset)| (name.to_string(), start.checked_add(offset).unwrap()))
         .collect();
-    for (pc, &offset) in program.pc_section().iter().enumerate() {
-        // The second halves of `lddw` have no code.
-        if offset == JitTemplates::<SIZE>::INVALID_CALL_TARGET {
-            continue;
+    let pc_section = program.pc_section();
+    if instruction_symbols {
+        let version = executable.get_sbpf_version();
+        let bpf = executable.get_text_bytes().1;
+        let loader = BuiltinProgram::<DummyContextObject>::new_mock();
+        for (pc, &offset) in pc_section.iter().enumerate() {
+            // The second halves of `lddw` have no code.
+            if offset == JitTemplates::<SIZE>::INVALID_CALL_TARGET {
+                continue;
+            }
+            let insn = ebpf::get_insn_unchecked(bpf, pc);
+            named.push((
+                format!("pc_{pc}_{}", mnemonic(&loader, version, &insn)),
+                start.checked_add(offset as usize).unwrap(),
+            ));
         }
-        let insn = ebpf::get_insn_unchecked(bpf, pc);
-        named.push((
-            format!("pc_{pc}_{}", mnemonic(&loader, version, &insn)),
-            start.checked_add(offset as usize).unwrap(),
-        ));
+    } else {
+        let mut functions = BTreeMap::new();
+        for (_, (name, pc)) in executable.get_function_registry().iter() {
+            functions.insert(pc, String::from_utf8_lossy(name).into_owned());
+        }
+        functions
+            .entry(executable.get_entrypoint_instruction_offset())
+            .or_insert_with(|| "entrypoint".to_string());
+        for (pc, name) in functions {
+            // Ignore what the verifier would reject.
+            let Some(&offset) = pc_section.get(pc) else {
+                continue;
+            };
+            if offset == JitTemplates::<SIZE>::INVALID_CALL_TARGET {
+                continue;
+            }
+            let name = if name.is_empty() {
+                format!("function_{pc}")
+            } else {
+                name
+            };
+            named.push((name, start.checked_add(offset as usize).unwrap()));
+        }
     }
     let overrun_len = templates.aux_layout(AuxTemplate::ExecutionOverrun).len();
     let overrun = start
@@ -405,274 +434,118 @@ fn jit_symbols<const SIZE: usize, C: ContextObject>(
 }
 
 const PAGE_ALIGNMENT: usize = 4096;
-const ELF_HEADER_SIZE: usize = 64;
-const PROGRAM_HEADER_SIZE: usize = 56;
-const SECTION_HEADER_SIZE: usize = 64;
-const SYMBOL_SIZE: usize = 24;
 
-fn put_u16(out: &mut Vec<u8>, value: u16) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
+/// An ELF executable with the `regions`, each of which is a section and a `PT_LOAD` segment at
+/// its address, at a file offset congruent to the address modulo the page size so that the file
+/// can be mapped at it. The symbols of the regions are in `.symtab`.
+fn elf_image(regions: &[Region]) -> Vec<u8> {
+    use object::elf;
+    use object::write::elf::{FileHeader, ProgramHeader, SectionHeader, Sym, Writer};
 
-fn put_u32(out: &mut Vec<u8>, value: u32) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-fn put_u64(out: &mut Vec<u8>, value: u64) {
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-/// Append `name` to the string table `strings`, and return its offset.
-fn put_string(strings: &mut Vec<u8>, name: &str) -> u32 {
-    let offset = u32::try_from(strings.len()).unwrap();
-    strings.extend_from_slice(name.as_bytes());
-    strings.push(0);
-    offset
-}
-
-/// Pad `out` with zeros to `offset`.
-fn pad_to(out: &mut Vec<u8>, offset: usize) {
-    assert!(out.len() <= offset);
-    out.resize(offset, 0);
-}
-
-#[derive(Clone, Copy)]
-struct SectionHeader {
-    name: u32,
-    kind: u32,
-    flags: u64,
-    address: u64,
-    offset: u64,
-    size: u64,
-    link: u32,
-    info: u32,
-    alignment: u64,
-    entry_size: u64,
-}
-
-fn put_section_header(out: &mut Vec<u8>, header: &SectionHeader) {
-    put_u32(out, header.name);
-    put_u32(out, header.kind);
-    put_u64(out, header.flags);
-    put_u64(out, header.address);
-    put_u64(out, header.offset);
-    put_u64(out, header.size);
-    put_u32(out, header.link);
-    put_u32(out, header.info);
-    put_u64(out, header.alignment);
-    put_u64(out, header.entry_size);
-}
-
-/// An ELF file with the `regions`, and the offset in it of the bytes of each of them.
-///
-/// Every region is a section and a `PT_LOAD` segment at its address, with the file offset
-/// congruent to the address modulo the page size so that the file can be mapped at it. The file
-/// has all the symbols of the regions in `.symtab`.
-fn build_elf(regions: &[Region]) -> (Vec<u8>, Vec<usize>) {
     // The segments have to be in the order of their addresses.
-    let mut order: Vec<usize> = (0..regions.len()).collect();
-    order.sort_by_key(|&index| regions[index].start);
-    let mut offsets = vec![0; regions.len()];
-    let mut segments = Vec::with_capacity(regions.len());
-    let mut cursor = ELF_HEADER_SIZE
-        .checked_add(regions.len().checked_mul(PROGRAM_HEADER_SIZE).unwrap())
-        .unwrap();
-    for &index in &order {
-        let region = &regions[index];
-        let in_page = region.start & (PAGE_ALIGNMENT - 1);
-        let offset = cursor
-            .next_multiple_of(PAGE_ALIGNMENT)
-            .checked_add(in_page)
-            .unwrap();
-        offsets[index] = offset;
-        cursor = offset.checked_add(region.bytes.len()).unwrap();
-        segments.push(Segment {
-            name: &region.name,
-            start: region.start,
-            len: region.bytes.len(),
-            offset,
-            symbols: &region.symbols,
-        });
+    let mut regions: Vec<&Region> = regions.iter().collect();
+    regions.sort_by_key(|region| region.start);
+    let mut image = Vec::new();
+    let mut writer = Writer::new(object::Endianness::Little, true, &mut image);
+
+    // Everything is reserved first, then written in the same order.
+    writer.reserve_file_header();
+    writer.reserve_program_headers(u32::try_from(regions.len()).unwrap());
+    let mut offsets = Vec::with_capacity(regions.len());
+    for region in &regions {
+        let page = usize::try_from(writer.reserved_len())
+            .unwrap()
+            .next_multiple_of(PAGE_ALIGNMENT);
+        let offset = page.checked_add(region.start % PAGE_ALIGNMENT).unwrap();
+        writer.reserve_until(offset as u64);
+        writer.reserve(region.bytes.len() as u64, 1);
+        offsets.push(offset);
     }
-    let (head, tail_offset, tail) = elf_parts(&segments, cursor);
-    let mut out = head;
-    for &index in &order {
-        pad_to(&mut out, offsets[index]);
-        out.extend_from_slice(&regions[index].bytes);
-    }
-    pad_to(&mut out, tail_offset);
-    out.extend_from_slice(&tail);
-    (out, offsets)
-}
-
-/// A region of code in an ELF file.
-struct Segment<'a> {
-    /// Name of the section.
-    name: &'a str,
-    /// The address the code is at when running.
-    start: usize,
-    /// Of the code in bytes.
-    len: usize,
-    /// Of the code in the file, which is congruent to `start` modulo the page size.
-    offset: usize,
-    symbols: &'a [Symbol],
-}
-
-/// The parts of the ELF file with the `segments` (sorted by address) that are not the code: the
-/// headers, which are to be written at the start of the file, and everything that follows the
-/// code, which is `end` bytes into the file, so it is written at the returned offset.
-///
-/// Splitting it like this lets the code be written in place by whoever owns it, and the rest
-/// around it: see `CodeRecord`.
-fn elf_parts(segments: &[Segment], end: usize) -> (Vec<u8>, usize, Vec<u8>) {
-    const ET_EXEC: u16 = 2;
-    const EM_X86_64: u16 = 62;
-    const PT_LOAD: u32 = 1;
-    const PF_X_R: u32 = 1 | 4;
-    const SHT_PROGBITS: u32 = 1;
-    const SHT_SYMTAB: u32 = 2;
-    const SHT_STRTAB: u32 = 3;
-    const SHF_ALLOC_EXECINSTR: u64 = 2 | 4;
-    /// `STB_GLOBAL` and `STT_FUNC`.
-    const SYMBOL_INFO: u8 = 1 << 4 | 2;
-
-    let count = segments.len();
-    // Section indices: the null section, the segments, `.symtab`, `.strtab`, `.shstrtab`.
-    let strtab_index = count.checked_add(2).unwrap();
-    let shstrtab_index = count.checked_add(3).unwrap();
-    let section_count = count.checked_add(4).unwrap();
-
-    let mut strtab = vec![0];
-    let mut symtab = vec![0; SYMBOL_SIZE];
-    let mut shstrtab = vec![0];
-    let mut section_names = Vec::new();
-    for (position, segment) in segments.iter().enumerate() {
-        section_names.push(put_string(&mut shstrtab, segment.name));
-        let section = u16::try_from(position.checked_add(1).unwrap()).unwrap();
-        for symbol in segment.symbols {
-            put_u32(&mut symtab, put_string(&mut strtab, &symbol.name));
-            symtab.push(SYMBOL_INFO);
-            symtab.push(0);
-            put_u16(&mut symtab, section);
-            put_u64(&mut symtab, symbol.address as u64);
-            put_u64(&mut symtab, symbol.size as u64);
+    writer.reserve_null_section_index();
+    let sections: Vec<_> = regions
+        .iter()
+        .map(|region| {
+            let name = writer.add_section_name(region.name.as_bytes());
+            (name, writer.reserve_section_index())
+        })
+        .collect();
+    writer.reserve_symtab_section_index();
+    writer.reserve_strtab_section_index();
+    writer.reserve_shstrtab_section_index();
+    writer.reserve_null_symbol_index();
+    let mut symbols = Vec::new();
+    for (region, &(_, section)) in regions.iter().zip(&sections) {
+        for symbol in &region.symbols {
+            writer.reserve_symbol_index(Some(section));
+            symbols.push((writer.add_string(symbol.name.as_bytes()), section, symbol));
         }
     }
-    let symtab_name = put_string(&mut shstrtab, ".symtab");
-    let strtab_name = put_string(&mut shstrtab, ".strtab");
-    let shstrtab_name = put_string(&mut shstrtab, ".shstrtab");
+    writer.reserve_symtab();
+    writer.reserve_strtab().unwrap();
+    writer.reserve_shstrtab().unwrap();
+    writer.reserve_section_headers();
 
-    // Offsets in `tail`, which starts aligned.
-    let tail_offset = end.next_multiple_of(8);
-    let strtab_offset = symtab.len();
-    let shstrtab_offset = strtab_offset.checked_add(strtab.len()).unwrap();
-    let section_headers_offset = shstrtab_offset
-        .checked_add(shstrtab.len())
-        .unwrap()
-        .next_multiple_of(8);
-
-    let mut head = Vec::new();
-    head.extend_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0]);
-    head.extend_from_slice(&[0; 8]);
-    put_u16(&mut head, ET_EXEC);
-    put_u16(&mut head, EM_X86_64);
-    put_u32(&mut head, 1);
-    put_u64(&mut head, 0);
-    put_u64(&mut head, ELF_HEADER_SIZE as u64);
-    put_u64(
-        &mut head,
-        tail_offset.checked_add(section_headers_offset).unwrap() as u64,
-    );
-    put_u32(&mut head, 0);
-    put_u16(&mut head, ELF_HEADER_SIZE as u16);
-    put_u16(&mut head, PROGRAM_HEADER_SIZE as u16);
-    put_u16(&mut head, u16::try_from(count).unwrap());
-    put_u16(&mut head, SECTION_HEADER_SIZE as u16);
-    put_u16(&mut head, u16::try_from(section_count).unwrap());
-    put_u16(&mut head, u16::try_from(shstrtab_index).unwrap());
-    assert_eq!(head.len(), ELF_HEADER_SIZE);
-    for segment in segments {
-        let len = segment.len as u64;
-        put_u32(&mut head, PT_LOAD);
-        put_u32(&mut head, PF_X_R);
-        put_u64(&mut head, segment.offset as u64);
-        put_u64(&mut head, segment.start as u64);
-        put_u64(&mut head, segment.start as u64);
-        put_u64(&mut head, len);
-        put_u64(&mut head, len);
-        put_u64(&mut head, PAGE_ALIGNMENT as u64);
+    writer
+        .write_file_header(&FileHeader {
+            os_abi: elf::ELFOSABI_NONE,
+            abi_version: 0,
+            e_type: elf::ET_EXEC,
+            e_machine: elf::EM_X86_64,
+            e_entry: 0,
+            e_flags: Default::default(),
+        })
+        .unwrap();
+    writer.write_align_program_headers();
+    for (region, &offset) in regions.iter().zip(&offsets) {
+        writer.write_program_header(&ProgramHeader {
+            p_type: elf::PT_LOAD,
+            p_flags: elf::PF_R | elf::PF_X,
+            p_offset: offset as u64,
+            p_vaddr: region.start as u64,
+            p_paddr: region.start as u64,
+            p_filesz: region.bytes.len() as u64,
+            p_memsz: region.bytes.len() as u64,
+            p_align: PAGE_ALIGNMENT as u64,
+        });
     }
-
-    let mut tail = symtab;
-    tail.extend_from_slice(&strtab);
-    tail.extend_from_slice(&shstrtab);
-    pad_to(&mut tail, section_headers_offset);
-    let null_section = SectionHeader {
-        name: 0,
-        kind: 0,
-        flags: 0,
-        address: 0,
-        offset: 0,
-        size: 0,
-        link: 0,
-        info: 0,
-        alignment: 0,
-        entry_size: 0,
-    };
-    put_section_header(&mut tail, &null_section);
-    for (position, segment) in segments.iter().enumerate() {
-        put_section_header(
-            &mut tail,
-            &SectionHeader {
-                name: section_names[position],
-                kind: SHT_PROGBITS,
-                flags: SHF_ALLOC_EXECINSTR,
-                address: segment.start as u64,
-                offset: segment.offset as u64,
-                size: segment.len as u64,
-                alignment: 16,
-                ..null_section
-            },
-        );
+    for (region, &offset) in regions.iter().zip(&offsets) {
+        writer.pad_until(offset as u64);
+        writer.write(&region.bytes);
     }
-    put_section_header(
-        &mut tail,
-        &SectionHeader {
-            name: symtab_name,
-            kind: SHT_SYMTAB,
-            offset: tail_offset as u64,
-            size: strtab_offset as u64,
-            link: strtab_index as u32,
-            // The index of the first global symbol, as the null symbol is the only local one.
-            info: 1,
-            alignment: 8,
-            entry_size: SYMBOL_SIZE as u64,
-            ..null_section
-        },
-    );
-    put_section_header(
-        &mut tail,
-        &SectionHeader {
-            name: strtab_name,
-            kind: SHT_STRTAB,
-            offset: tail_offset.checked_add(strtab_offset).unwrap() as u64,
-            size: strtab.len() as u64,
-            alignment: 1,
-            ..null_section
-        },
-    );
-    put_section_header(
-        &mut tail,
-        &SectionHeader {
-            name: shstrtab_name,
-            kind: SHT_STRTAB,
-            offset: tail_offset.checked_add(shstrtab_offset).unwrap() as u64,
-            size: shstrtab.len() as u64,
-            alignment: 1,
-            ..null_section
-        },
-    );
-    (head, tail_offset, tail)
+    writer.write_null_symbol();
+    for &(name, section, symbol) in &symbols {
+        writer.write_symbol(&Sym {
+            section: Some(section.0),
+            st_name: writer.string_offset(Some(name)),
+            st_info: elf::SymbolInfo::new(elf::STB_GLOBAL, elf::STT_FUNC),
+            st_other: Default::default(),
+            st_shndx: Default::default(),
+            st_value: symbol.address as u64,
+            st_size: symbol.size as u64,
+        });
+    }
+    writer.write_strtab();
+    writer.write_shstrtab();
+    writer.write_null_section_header();
+    for (region, (&(name, _), &offset)) in regions.iter().zip(sections.iter().zip(&offsets)) {
+        writer.write_section_header(&SectionHeader {
+            sh_name: writer.section_name_offset(Some(name)),
+            sh_type: elf::SHT_PROGBITS,
+            sh_flags: elf::SHF_ALLOC | elf::SHF_EXECINSTR,
+            sh_addr: region.start as u64,
+            sh_offset: offset as u64,
+            sh_size: region.bytes.len() as u64,
+            sh_link: 0,
+            sh_info: 0,
+            sh_addralign: 16,
+            sh_entsize: 0,
+        });
+    }
+    // The null symbol is the only local one.
+    writer.write_symtab_section_header(1);
+    writer.write_strtab_section_header();
+    writer.write_shstrtab_section_header();
+    image
 }
 
 #[cfg(target_os = "linux")]
@@ -700,9 +573,9 @@ mod linux {
     /// What the debugging aids keep of a piece of generated code: the ELF file it is generated
     /// into, and its registration with the GDB JIT interface, if they are on.
     ///
-    /// The layout of the file (or of the ELF image registered without one) is that of `elf_parts`
-    /// with the one segment: the headers in the first page, the code at the offset of a page,
-    /// which is what is mapped, and what `finish` appends after it.
+    /// The file (or the ELF image registered without one) is the `elf_image` of the one region:
+    /// the headers in the first page, the code at the offset of a page, which is what is mapped,
+    /// and what `finish` writes after it.
     pub(crate) struct CodeRecord {
         file: Option<(File, PathBuf)>,
         /// The name of the section.
@@ -729,10 +602,36 @@ mod linux {
         /// - Nothing may access these pages while this runs, or rely on what they held before:
         ///   they are replaced with a mapping that stays until `release`.
         pub(in crate::codegen) unsafe fn new(label: &str, start: usize, len: usize) -> CodeRecord {
+            // SAFETY:
+            //
+            // Contract from `CodeRecord::new_in`: The `len` bytes at `start` must be pages of a
+            // mapping that the caller owns.
+            //
+            // Contract from `CodeRecord::new_in`: Nothing may access these pages while this runs,
+            // or rely on what they held before: they are replaced with a mapping that stays until
+            // `release`.
+            //
+            // Evidence: the same contract as this function's.
+            unsafe { Self::new_in(options().code_dir.as_deref(), label, start, len) }
+        }
+
+        /// `new`, with the file in `code_dir` rather than in `Options::code_dir`.
+        ///
+        /// # Safety
+        ///
+        /// - The `len` bytes at `start` must be pages of a mapping that the caller owns.
+        /// - Nothing may access these pages while this runs, or rely on what they held before:
+        ///   they are replaced with a mapping that stays until `release`.
+        pub(super) unsafe fn new_in(
+            code_dir: Option<&Path>,
+            label: &str,
+            start: usize,
+            len: usize,
+        ) -> CodeRecord {
             assert_eq!(get_system_page_size(), PAGE_ALIGNMENT);
             assert!(start.is_multiple_of(PAGE_ALIGNMENT) && len.is_multiple_of(PAGE_ALIGNMENT));
             let section = format!(".text.{label}");
-            let Some(directory) = &options().code_dir else {
+            let Some(directory) = code_dir else {
                 return CodeRecord {
                     file: None,
                     section,
@@ -771,7 +670,7 @@ mod linux {
             // will be discarded. If the specified address cannot be used, mmap() will fail.
             //
             // Evidence: the part of the existing mappings that is discarded is the `len` bytes at
-            // `start`, which the contract of `new` has be pages of a mapping that the caller owns,
+            // `start`, which the contract of `new_in` has be pages of a mapping that the caller owns,
             // which nothing accesses while this runs, or relies on the content of. Accesses
             // afterwards are to the new mapping, which is read-write like the memory it replaces.
             let mapped = unsafe {
@@ -802,13 +701,12 @@ mod linux {
         /// Complete the record, once the code is final: the file gets the headers and the
         /// `symbols`, and the code is registered with the GDB JIT interface.
         ///
-        /// The writes are not through the mapping, as that only has the code. The mapping is
-        /// then replaced with a private one of the same content and the `permissions`, as
-        /// debuggers cannot insert breakpoints into shared mappings. So the code must not be
-        /// written to afterwards, which the file would not have.
+        /// The mapping is then replaced with a private one of the same content and the
+        /// `permissions`, as debuggers cannot insert breakpoints into shared mappings. So the code
+        /// must not be written to afterwards, which the file would not have.
         pub(in crate::codegen) fn finish(
             &mut self,
-            symbols: Vec<Symbol>,
+            symbols: impl FnOnce() -> Vec<Symbol>,
             permissions: PagePermissions,
         ) {
             assert!(self.registration.is_none(), "{} is finished", self.section);
@@ -816,90 +714,81 @@ mod linux {
             if self.file.is_none() && !gdb_jit {
                 return;
             }
-            let segment = Segment {
-                name: &self.section,
+            // SAFETY:
+            //
+            // Contract from `read_memory`: `start` must be non-null, and the `len` bytes at it must
+            // be readable and initialized, within a single allocation.
+            //
+            // Contract from `read_memory`: Nothing may write to these bytes while this runs.
+            //
+            // Evidence: the range is the one given to `new_in`, which the contract of `new_in` has
+            // be pages of a mapping that the caller owns, so non-null and readable, and
+            // initialized as mapped memory is. The code is final when `finish` is called, and
+            // nothing writes to it meanwhile: the records of the supporting code and of the
+            // interpreters are finished while they are generated, and that of a `JitProgram` once
+            // it is sealed but before `compile` returns it, through `&mut`.
+            let code = unsafe { read_memory(self.start, self.len) };
+            let image = elf_image(&[Region {
+                name: self.section.clone(),
                 start: self.start,
-                len: self.len,
-                offset: PAGE_ALIGNMENT,
-                symbols: &symbols,
-            };
-            let (head, tail_offset, tail) =
-                elf_parts(&[segment], PAGE_ALIGNMENT.checked_add(self.len).unwrap());
-            let mut symfile = vec![0; tail_offset.checked_add(tail.len()).unwrap()];
-            match &self.file {
-                Some((file, path)) => {
-                    file.write_all_at(&head, 0)
-                        .and_then(|()| file.write_all_at(&tail, tail_offset as u64))
-                        .and_then(|()| file.read_exact_at(&mut symfile, 0))
-                        .unwrap_or_else(|error| panic!("failed to write {:?}: {}", path, error));
-                    let prot = match permissions {
-                        PagePermissions::Read => libc::PROT_READ,
-                        PagePermissions::ReadWrite => libc::PROT_READ | libc::PROT_WRITE,
-                        PagePermissions::ReadExecute => libc::PROT_READ | libc::PROT_EXEC,
-                    };
-                    // SAFETY:
-                    //
-                    // Contract from calling `libc::mmap`: none documented. As for any foreign
-                    // function, the effects must not be undefined behavior in Rust, such as
-                    // r[undefined.pointer-access] of the Reference: Accessing (loading from or
-                    // storing to) a place that is dangling or based on a misaligned pointer.
-                    //
-                    // Behaviour from `mmap(2)`: MAP_FIXED Don't interpret addr as a hint: place the
-                    // mapping at exactly that address. addr must be suitably aligned: for most
-                    // architectures a multiple of the page size is sufficient; however, some
-                    // architectures may impose additional restrictions. If the memory region
-                    // specified by addr and length overlaps pages of any existing mapping(s), then
-                    // the overlapped part of the existing mapping(s) will be discarded. If the
-                    // specified address cannot be used, mmap() will fail.
-                    //
-                    // Evidence: the part of the existing mappings that is discarded is the mapping
-                    // of the file that `new` made, which the contract of `new` has be the record's
-                    // until `release`. Nothing accesses it meanwhile: the records of the supporting
-                    // code and of the interpreters are finished while they are generated, and that
-                    // of a `JitProgram` once it is sealed but before `compile` returns it, through
-                    // `&mut`. Accesses afterwards are to the new mapping, with the bytes of the
-                    // file and the `permissions` that the code needs.
-                    let mapped = unsafe {
-                        libc::mmap(
-                            self.start as *mut libc::c_void,
-                            self.len,
-                            prot,
-                            libc::MAP_PRIVATE | libc::MAP_FIXED,
-                            file.as_raw_fd(),
-                            PAGE_ALIGNMENT as libc::off_t,
-                        )
-                    };
-                    assert!(
-                        mapped != libc::MAP_FAILED,
-                        "failed to remap {:?}: {}",
-                        path,
-                        io::Error::last_os_error()
-                    );
-                }
-                None => {
-                    symfile[..head.len()].copy_from_slice(&head);
-                    // SAFETY:
-                    //
-                    // Contract from `read_memory`: `start` must be non-null, and the `len` bytes at
-                    // it must be readable and initialized, within a single allocation.
-                    //
-                    // Contract from `read_memory`: Nothing may write to these bytes while this
-                    // runs.
-                    //
-                    // Evidence: the range is the one given to `new`, which the contract of `new`
-                    // has be pages of a mapping that the caller owns, so non-null and readable, and
-                    // initialized as mapped memory is. The code is final when `finish` is called,
-                    // and nothing writes to it meanwhile: the records of the supporting code and of
-                    // the interpreters are finished while they are generated, and that of a
-                    // `JitProgram` once it is sealed but before `compile` returns it, through
-                    // `&mut`.
-                    let code = unsafe { read_memory(self.start, self.len) };
-                    symfile[PAGE_ALIGNMENT..tail_offset].copy_from_slice(&code);
-                    symfile[tail_offset..].copy_from_slice(&tail);
-                }
+                bytes: code,
+                symbols: symbols(),
+            }]);
+            // Where the file is mapped.
+            assert!(image
+                .get(PAGE_ALIGNMENT..)
+                .is_some_and(|code| code.len() >= self.len));
+            if let Some((file, path)) = &self.file {
+                // The code in the file is what is written there, as it is mapped there.
+                file.write_all_at(&image, 0)
+                    .unwrap_or_else(|error| panic!("failed to write {:?}: {}", path, error));
+                let prot = match permissions {
+                    PagePermissions::Read => libc::PROT_READ,
+                    PagePermissions::ReadWrite => libc::PROT_READ | libc::PROT_WRITE,
+                    PagePermissions::ReadExecute => libc::PROT_READ | libc::PROT_EXEC,
+                };
+                // SAFETY:
+                //
+                // Contract from calling `libc::mmap`: none documented. As for any foreign
+                // function, the effects must not be undefined behavior in Rust, such as
+                // r[undefined.pointer-access] of the Reference: Accessing (loading from or
+                // storing to) a place that is dangling or based on a misaligned pointer.
+                //
+                // Behaviour from `mmap(2)`: MAP_FIXED Don't interpret addr as a hint: place the
+                // mapping at exactly that address. addr must be suitably aligned: for most
+                // architectures a multiple of the page size is sufficient; however, some
+                // architectures may impose additional restrictions. If the memory region
+                // specified by addr and length overlaps pages of any existing mapping(s), then
+                // the overlapped part of the existing mapping(s) will be discarded. If the
+                // specified address cannot be used, mmap() will fail.
+                //
+                // Evidence: the part of the existing mappings that is discarded is the mapping
+                // of the file that `new_in` made, which the contract of `new_in` has be the
+                // record's until `release`. Nothing accesses it meanwhile: the records of the
+                // supporting code and of the interpreters are finished while they are generated,
+                // and that of a `JitProgram` once it is sealed but before `compile` returns it,
+                // through `&mut`. Accesses afterwards are to the new mapping, with the bytes of
+                // the file, which are those of the code, and the `permissions` that the code
+                // needs.
+                let mapped = unsafe {
+                    libc::mmap(
+                        self.start as *mut libc::c_void,
+                        self.len,
+                        prot,
+                        libc::MAP_PRIVATE | libc::MAP_FIXED,
+                        file.as_raw_fd(),
+                        PAGE_ALIGNMENT as libc::off_t,
+                    )
+                };
+                assert!(
+                    mapped != libc::MAP_FAILED,
+                    "failed to remap {:?}: {}",
+                    path,
+                    io::Error::last_os_error()
+                );
             }
             if gdb_jit {
-                self.registration = Some(register(symfile.into_boxed_slice()));
+                self.registration = Some(register(image.into_boxed_slice()));
             }
         }
 
@@ -980,7 +869,7 @@ mod linux {
         supports: &SupportingCode,
     ) {
         record.finish(
-            supporting_code_symbols(supports).1,
+            || supporting_code_symbols(supports).1,
             PagePermissions::ReadWrite,
         );
         record.keep_forever();
@@ -995,7 +884,7 @@ mod linux {
         step_lens: &[u8],
     ) {
         record.finish(
-            interpreter_symbols(version, buffer as usize, step_lens),
+            || interpreter_symbols(version, buffer as usize, step_lens),
             PagePermissions::ReadWrite,
         );
         record.keep_forever();
@@ -1030,12 +919,22 @@ mod linux {
         executable: &Executable<C>,
         program: &mut JitProgram,
     ) {
-        let symbols = jit_symbols(templates, executable, program);
-        let file = program
+        let mut record = program
             .code_record
-            .as_mut()
+            .take()
             .expect("the program has its file from `map_jit_text`");
-        file.finish(symbols, PagePermissions::ReadExecute);
+        record.finish(
+            || {
+                jit_symbols(
+                    templates,
+                    executable,
+                    program,
+                    options().instruction_symbols,
+                )
+            },
+            PagePermissions::ReadExecute,
+        );
+        program.code_record = Some(record);
     }
 
     /// An entry of the list the debugger reads, see `GDB JIT interface` in its documentation.
@@ -1231,11 +1130,45 @@ mod linux {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use object::read::elf::{ElfFile64, ProgramHeader as _};
+    use object::{Object as _, ObjectSection as _, ObjectSymbol as _};
 
-    fn read_u64(bytes: &[u8], offset: usize) -> u64 {
-        let mut word = [0; 8];
-        word.copy_from_slice(&bytes[offset..offset.checked_add(8).unwrap()]);
-        u64::from_le_bytes(word)
+    /// Check that `image` has the `regions`, as `elf_image` lays them out.
+    fn check_elf_image(image: &[u8], regions: &[Region]) {
+        let file = ElfFile64::<object::Endianness>::parse(image).unwrap();
+        let endian = file.endian();
+        let mut by_address: Vec<_> = regions.iter().collect();
+        by_address.sort_by_key(|region| region.start);
+        let segments = file.elf_program_headers();
+        assert_eq!(segments.len(), regions.len());
+        for (segment, region) in segments.iter().zip(by_address) {
+            assert_eq!(segment.p_vaddr(endian), region.start as u64);
+            // So that the file can be mapped at the address.
+            let in_page = (PAGE_ALIGNMENT as u64).checked_sub(1).unwrap();
+            assert_eq!(
+                segment.p_offset(endian) & in_page,
+                region.start as u64 & in_page
+            );
+            assert_eq!(segment.data(endian, image).unwrap(), region.bytes);
+        }
+        for region in regions {
+            let section = file.section_by_name(&region.name).unwrap();
+            assert_eq!(section.address(), region.start as u64);
+            assert_eq!(section.data().unwrap(), region.bytes);
+            for symbol in &region.symbols {
+                let found = file
+                    .symbols()
+                    .find(|found| found.name() == Ok(symbol.name.as_str()))
+                    .unwrap();
+                assert_eq!(found.address(), symbol.address as u64);
+                assert_eq!(found.size(), symbol.size as u64);
+                assert_eq!(found.section_index(), Some(section.index()));
+                assert_eq!(found.kind(), object::SymbolKind::Text);
+                assert!(found.is_global());
+            }
+        }
+        let symbol_count: usize = regions.iter().map(|region| region.symbols.len()).sum();
+        assert_eq!(file.symbols().count(), symbol_count);
     }
 
     #[test]
@@ -1289,8 +1222,9 @@ mod tests {
         assert!(!template.relocations.is_empty());
     }
 
+    /// Regions out of the order of their addresses, and one not at the start of a page.
     #[test]
-    fn elf_layout() {
+    fn elf_image_layout() {
         let regions = [
             Region {
                 name: ".text.b".to_string(),
@@ -1306,19 +1240,161 @@ mod tests {
                 name: ".text.a".to_string(),
                 start: 0x10_0000,
                 bytes: vec![0xcc; 4096],
+                symbols: sized_symbols(
+                    vec![("a2".to_string(), 0x10_0010), ("a1".to_string(), 0x10_0000)],
+                    0x10_1000,
+                ),
+            },
+            Region {
+                name: ".text.empty".to_string(),
+                start: 0x30_0000,
+                bytes: Vec::new(),
                 symbols: Vec::new(),
             },
         ];
-        let (elf, offsets) = build_elf(&regions);
-        assert_eq!(&elf[..4], b"\x7fELF");
-        assert_eq!(offsets[1] % 4096, 0);
-        assert_eq!(offsets[0] % 4096, 0x10);
-        assert_eq!(&elf[offsets[0]..offsets[0] + 20], &[0x90; 20]);
-        // The first segment is the one at the lower address.
-        assert_eq!(read_u64(&elf, ELF_HEADER_SIZE + 16), 0x10_0000);
-        assert_eq!(
-            read_u64(&elf, ELF_HEADER_SIZE + PROGRAM_HEADER_SIZE + 16),
-            0x20_0010
-        );
+        check_elf_image(&elf_image(&regions), &regions);
+    }
+
+    #[test]
+    fn jit_symbols_of_functions_or_instructions() {
+        use crate::vm::Config;
+        use std::sync::Arc;
+        let loader = Arc::new(BuiltinProgram::<DummyContextObject>::new_loader(
+            Config::default(),
+        ));
+        let executable = crate::assembler::assemble(
+            "
+            call function_foo
+            lddw r0, 1
+            exit
+            function_foo:
+            mov64 r0, 0
+            exit",
+            loader,
+        )
+        .unwrap();
+        executable.dynasm_compile().unwrap();
+        let program = executable.get_compiled_program().unwrap();
+        for (instruction_symbols, expected) in [
+            (false, &["entrypoint", "function_foo"][..]),
+            (
+                true,
+                &[
+                    "pc_0_call",
+                    "pc_1_lddw",
+                    "pc_3_exit",
+                    "pc_4_mov64",
+                    "pc_5_exit",
+                ][..],
+            ),
+        ] {
+            let region = jit(&executable, &program, instruction_symbols);
+            let names: Vec<_> = region.symbols.iter().map(|s| s.name.as_str()).collect();
+            let shared = [
+                "invalid_call_target",
+                "sig_invalid_insn",
+                "sig_meter_exceeded",
+            ];
+            assert_eq!(names[..3], shared);
+            assert_eq!(names[3..names.len() - 1], *expected);
+            assert_eq!(names.last(), Some(&"execution_overrun"));
+            let end = region.start + region.bytes.len();
+            assert!(region
+                .symbols
+                .windows(2)
+                .all(|w| w[0].address + w[0].size <= w[1].address));
+            assert_eq!(
+                region.symbols.last().unwrap().address + region.symbols.last().unwrap().size,
+                end
+            );
+            let regions = std::slice::from_ref(&region);
+            check_elf_image(&elf_image(regions), regions);
+        }
+    }
+
+    /// The code is generated into a file mapped over it, which keeps the code once the mapping
+    /// is replaced, and the file what it had once the memory is released.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn code_record_file() {
+        use crate::memory_management::{allocate_pages_low, PagePermissions};
+        let directory =
+            std::env::temp_dir().join(format!("sbpf-code-record-{}", std::process::id()));
+        let label = "code-record-test";
+        // Leaked, as the pages are only freed by the owners of the code that this is the record of.
+        let start = allocate_pages_low(PAGE_ALIGNMENT).unwrap() as usize;
+        // SAFETY:
+        //
+        // Contract from `CodeRecord::new_in`: The `len` bytes at `start` must be pages of a
+        // mapping that the caller owns.
+        //
+        // Contract from `CodeRecord::new_in`: Nothing may access these pages while this runs, or
+        // rely on what they held before: they are replaced with a mapping that stays until
+        // `release`.
+        //
+        // Evidence: the page was just allocated by `allocate_pages_low` for this test, which
+        // nothing else knows of, and it is only accessed afterwards.
+        let mut record =
+            unsafe { CodeRecord::new_in(Some(&directory), label, start, PAGE_ALIGNMENT) };
+        let code = [0x90, 0xc3];
+        // SAFETY:
+        //
+        // Contract from `ptr::copy_nonoverlapping`: `src` must be valid for reads of `count *
+        // size_of::<T>()` bytes or that number must be 0.
+        //
+        // Contract from `ptr::copy_nonoverlapping`: `dst` must be valid for writes of `count *
+        // size_of::<T>()` bytes or that number must be 0.
+        //
+        // Contract from `ptr::copy_nonoverlapping`: Both `src` and `dst` must be properly aligned.
+        //
+        // Contract from `ptr::copy_nonoverlapping`: The region of memory beginning at `src` with a
+        // size of `count * size_of::<T>()` bytes must *not* overlap with the region of memory
+        // beginning at `dst` with the same size.
+        //
+        // Evidence: `T` is `u8`, so the pointers are aligned, and the size is 2 bytes. `code` is
+        // an array, so valid for reads, and the destination is the start of the read-write
+        // mapping of the file that `new_in` made, which does not overlap it.
+        unsafe { std::ptr::copy_nonoverlapping(code.as_ptr(), start as *mut u8, code.len()) };
+        let symbol = Symbol {
+            name: "f".to_string(),
+            address: start,
+            size: code.len(),
+        };
+        let symbols = vec![symbol.clone()];
+        record.finish(|| symbols, PagePermissions::ReadExecute);
+        // SAFETY:
+        //
+        // Contract from `read_memory`: `start` must be non-null, and the `len` bytes at it must be
+        // readable and initialized, within a single allocation.
+        //
+        // Contract from `read_memory`: Nothing may write to these bytes while this runs.
+        //
+        // Evidence: `finish` mapped the page read-execute with the content of the file, and
+        // nothing else knows of it.
+        let mapped = unsafe { read_memory(start, PAGE_ALIGNMENT) };
+        let mut expected = vec![0; PAGE_ALIGNMENT];
+        expected[..code.len()].copy_from_slice(&code);
+        assert_eq!(mapped, expected);
+        let path = directory.join(format!("sbpf-{}-{label}.elf", std::process::id()));
+        let image = std::fs::read(&path).unwrap();
+        let region = Region {
+            name: format!(".text.{label}"),
+            start,
+            bytes: expected,
+            symbols: vec![symbol],
+        };
+        check_elf_image(&image, &[region]);
+        // SAFETY:
+        //
+        // Contract from `CodeRecord::release`: The `len` bytes at `start` given to `new` must
+        // still be pages that the caller owns.
+        //
+        // Contract from `CodeRecord::release`: Nothing may access these pages while this runs, or
+        // rely on what they held before: they are replaced with an anonymous mapping.
+        //
+        // Evidence: the page is still this test's, and it is not accessed afterwards.
+        unsafe { record.release() };
+        assert_eq!(std::fs::read(&path).unwrap(), image);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

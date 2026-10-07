@@ -102,11 +102,7 @@ impl JitProgram {
         executable: &Executable<C>,
         vm: &mut EbpfVm<C>,
     ) {
-        arch::enter(
-            executable,
-            Some((self.pc_section(), self.text_section().as_ptr())),
-            vm,
-        )
+        arch::enter(executable, Some(self), vm)
     }
 }
 
@@ -124,6 +120,8 @@ struct Instantiation<'a> {
     pc: usize,
     /// The `off` field of the instruction.
     off: i16,
+    /// See [`JitProgram::random_key`].
+    random_key: u32,
 }
 
 /// What the first pass of `JitTemplates::compile` needs to know of a template, apart from the
@@ -208,6 +206,9 @@ const NOOP_DUE: u32 = 1 << 30;
 const PADDING_DUE: u32 = CHECKPOINT_DUE | NOOP_DUE;
 /// Longest run of no-ops `JitTemplates::compile` may insert at the beginning.
 const MAX_START_PADDING_LENGTH: usize = 256;
+/// Bound of `JitProgram::insn_bias`, and of the length of the text section the JIT compiles, so
+/// that the biased offsets in the text fit 32-bit displacements.
+const MAX_INSN_BIAS: u32 = 1 << 28;
 
 impl<const SIZE: usize> JitTemplates<SIZE> {
     /// Offset of the `AuxTemplate::InvalidCallTarget` in the output, which is emitted first.
@@ -344,11 +345,22 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         executable: &Executable<C>,
     ) -> Result<JitProgram, EbpfError> {
         let (mut pc_sec, output_len, start_padding) = self.analyze(executable);
+        let bpf = executable.get_text_bytes().1;
+        assert!(
+            bpf.len() <= MAX_INSN_BIAS as usize,
+            "text section too large for the JIT"
+        );
+        let random_key = if executable.get_config().sanitize_user_provided_values {
+            thread_rng().gen_range(0..MAX_INSN_BIAS)
+        } else {
+            0
+        };
         // Templates are always written out in large chunks to employ SIMD and avoid memcpy calls,
         // so the last one may extend past the output.
         // `output_len` is below `NOOP_DUE`, see `analyze`, and the sizes are far from `usize::MAX`.
         let mut program = JitProgram::new(pc_sec.len(), output_len.wrapping_add(SIZE));
         program.dynasm = true;
+        program.random_key = random_key;
         #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
         debug::map_jit_text(&mut program);
 
@@ -362,6 +374,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             position: 0,
             pc: 0,
             off: 0,
+            random_key,
         };
         for template in AuxTemplate::SHARED {
             self.emit_aux(text, &mut at, template);
@@ -370,7 +383,6 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             self.emit_aux(text, &mut at, AuxTemplate::Noop);
         }
 
-        let bpf = executable.get_text_bytes().1;
         let (program_insns, _) = bpf.as_chunks::<{ ebpf::INSN_SIZE }>();
         let mut program_iter = program_insns.iter().zip(&pc_sec).enumerate();
         while let Some((pc, (insn, &entry))) = program_iter.next() {

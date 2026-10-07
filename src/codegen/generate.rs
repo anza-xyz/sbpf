@@ -249,8 +249,10 @@ pub(super) trait Generator {
     /// Of the instruction being generated.
     fn opcode(&self) -> TemplateOpcode;
 
-    // Generate code to handle branch taken case.
-    fn bpf_taken_branch(&mut self);
+    /// Generate code to handle branch taken case. `next_insn_in_temp` tells whether the
+    /// temporary register still has the address of the next instruction (from
+    /// `load_next_insn_addr`).
+    fn bpf_taken_branch(&mut self, next_insn_in_temp: bool);
 
     /// The code generated so far checks the instruction meter.
     fn meter_checked(&mut self);
@@ -367,8 +369,8 @@ impl Generator for JITGenerator<'_> {
             .expect("not generating the template for an instruction")
     }
 
-    fn bpf_taken_branch(&mut self) {
-        arch::jit_taken_branch(self);
+    fn bpf_taken_branch(&mut self, next_insn_in_temp: bool) {
+        arch::jit_taken_branch(self, next_insn_in_temp);
     }
 
     fn meter_checked(&mut self) {
@@ -644,8 +646,8 @@ impl Generator for InterpreterGenerator {
         self.opcode
     }
 
-    fn bpf_taken_branch(&mut self) {
-        arch::interpreter_taken_branch(self);
+    fn bpf_taken_branch(&mut self, next_insn_in_temp: bool) {
+        arch::interpreter_taken_branch(self, next_insn_in_temp);
         self.terminal = true;
     }
 
