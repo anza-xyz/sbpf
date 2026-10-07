@@ -452,8 +452,7 @@ impl<C: ContextObject> Executable<C> {
         if matches!(self.sbpf_version, SBPFVersion::V1 | SBPFVersion::V2) {
             return self.jit_compile();
         }
-        let compiled =
-            Arc::new(crate::codegen::x64::jit_templates(self.sbpf_version).compile(self)?);
+        let compiled = Arc::new(crate::codegen::jit_templates(self.sbpf_version).compile(self)?);
         let mut guard = self
             .compiled_program
             .lock()

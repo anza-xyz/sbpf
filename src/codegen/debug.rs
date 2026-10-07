@@ -19,7 +19,8 @@
 //!   is registered with the GDB JIT interface, so that `gdb` resolves the symbols without being
 //!   told about any files.
 
-use super::x64::{self, supporting_code::SupportingCode, InterpreterGenerator};
+use super::arch::SupportingCode;
+use super::generate::{self, InterpreterGenerator};
 use super::{AuxTemplate, JitTemplates, TemplateOpcode};
 use crate::disassembler::disassemble_instruction;
 use crate::ebpf;
@@ -139,7 +140,7 @@ pub fn supporting_code() -> Region {
 ///
 /// If `codegen` does not support `version`.
 pub fn interpreter(version: SBPFVersion) -> Region {
-    let interpreter = x64::interpreter(version);
+    let interpreter = generate::interpreter(version);
     let start = interpreter.buffer as usize;
     // SAFETY:
     //
@@ -149,8 +150,8 @@ pub fn interpreter(version: SBPFVersion) -> Region {
     // Contract from `read_memory`: Nothing may write to these bytes while this runs.
     //
     // Evidence: `buffer` is the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes that
-    // `x64::interpreter` generated in full, so non-null and initialized, which is read-execute and
-    // never written to or freed afterwards.
+    // `generate::interpreter` generated in full, so non-null and initialized, which is
+    // read-execute and never written to or freed afterwards.
     let bytes = unsafe { read_memory(start, InterpreterGenerator::STEP_TABLE_SIZE) };
     Region {
         name: format!(".text.interpreter_{}", version_name(version)),
@@ -168,7 +169,7 @@ pub fn interpreter(version: SBPFVersion) -> Region {
 pub fn jit<C: ContextObject>(executable: &Executable<C>, program: &JitProgram) -> Region {
     assert!(program.dynasm, "not a program of codegen");
     jit_region(
-        x64::jit_templates(executable.get_sbpf_version()),
+        generate::jit_templates(executable.get_sbpf_version()),
         executable,
         program,
     )
@@ -182,7 +183,7 @@ pub fn jit<C: ContextObject>(executable: &Executable<C>, program: &JitProgram) -
 ///
 /// If `codegen` does not support `version`.
 pub fn template(version: SBPFVersion, opcode: u16) -> Template {
-    let templates = x64::jit_templates(version);
+    let templates = generate::jit_templates(version);
     let index = TemplateOpcode(opcode).index();
     let layout = templates.layouts[index];
     let relocations = &templates.relocations[index][..usize::from(layout.num_relocations)];

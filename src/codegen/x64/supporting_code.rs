@@ -2,8 +2,10 @@
 //! executable memory, and the host functions it calls into.
 
 use super::*;
+use crate::memory_management::{allocate_pages_low, protect_pages, PagePermissions};
 use dynasmrt::x64::X64Relocation;
-use dynasmrt::{DynasmApi, DynasmLabelApi, VecAssembler};
+use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler};
+use std::sync::LazyLock;
 
 /// The routines the JIT output and the interpreter steps call with `invoke_support`, which all
 /// expect the address of the BPF instruction following the current one in `RTEMP` (as
@@ -1024,6 +1026,7 @@ fn invoke_syscall<C: crate::vm::ContextObject>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::generate::interpreter_step;
 
     fn contains_address(code: &[u8], address: u32) -> bool {
         // `mov eax, imm32`, see `invoke_support`.

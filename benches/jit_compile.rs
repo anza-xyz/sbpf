@@ -99,7 +99,7 @@ mod x86_64 {
         executable: &Executable<TestContextObject>,
         jit_supported: bool,
     ) {
-        let templates = solana_sbpf::codegen::x64::jit_templates(executable.get_sbpf_version());
+        let templates = solana_sbpf::codegen::jit_templates(executable.get_sbpf_version());
         let mut group = c.benchmark_group(format!("compile/{name}"));
         group.throughput(Throughput::Bytes(executable.get_text_bytes().1.len() as u64));
         #[cfg(all(feature = "jit", not(target_os = "windows")))]

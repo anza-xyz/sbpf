@@ -534,6 +534,15 @@ pub const BPF_ALU_OP_MASK: u8 = 0xf0;
 /// Mask to extract the access size from a load or store operation code.
 pub const BPF_SIZE_MASK: u8 = 0x18;
 
+/// Size of the instruction with the opcode `op`, in bytes.
+pub const fn opcode_size(op: u8) -> usize {
+    if op == LD_DW_IMM {
+        2 * INSN_SIZE
+    } else {
+        INSN_SIZE
+    }
+}
+
 /// An eBPF instruction.
 ///
 /// See <https://www.kernel.org/doc/Documentation/networking/filter.txt> for the Linux kernel

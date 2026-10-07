@@ -1,12 +1,13 @@
 //! The x86_64 backend.
 
-use dynasmrt::relocations::SimpleRelocation;
-use dynasmrt::DynamicLabel;
-
+use super::generate::{self, Generator, InterpreterGenerator, PatchFields};
 use super::*;
-use crate::memory_management::{allocate_pages_low, protect_pages, PagePermissions};
+use dynasmrt::relocations::Relocation as _;
+use dynasmrt::relocations::RelocationKind;
 use std::convert::TryFrom;
-use std::sync::LazyLock;
+
+/// The relocations of `dynasm` for x86_64.
+pub(super) type Relocation = dynasmrt::x64::X64Relocation;
 
 const RAX: u8 = 0;
 const RCX: u8 = 1;
@@ -99,13 +100,13 @@ macro_rules! x64asm {
 
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_IMM $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [ DWORD -4i32 + RINSN ] ;; $output.template_reloc(TemplateRelocationKind::InsnOffset, -4, 4, 0)
+            $($curr)* [ DWORD -4i32 + RINSN ] ;; $output.template_reloc(TemplateRelocationKind::InsnOffset, -4, 4, 0, ABSOLUTE_DWORD)
         ]} $($rest)*)
     };
 
     (@munch {$output:expr; [$($acc:tt)*] [$($curr:tt)*]} REL32_OFF $($rest:tt)*) => {
         x64asm!(@munch {$output; [ $($acc)* ] [
-            $($curr)* [ DWORD -6i32 + RINSN ] ;; $output.template_reloc(TemplateRelocationKind::InsnOffset, -6, 4, 0)
+            $($curr)* [ DWORD -6i32 + RINSN ] ;; $output.template_reloc(TemplateRelocationKind::InsnOffset, -6, 4, 0, ABSOLUTE_DWORD)
         ]} $($rest)*)
     };
 
@@ -124,65 +125,16 @@ macro_rules! x64asm {
 }
 
 pub(super) mod supporting_code;
+#[cfg(feature = "codegen-debug")]
+pub(super) use supporting_code::SupportingCode;
+#[cfg(not(feature = "codegen-debug"))]
 use supporting_code::SupportingCode;
-
-trait X64Generator {
-    type DynamicLabel: Copy;
-
-    fn extend(&mut self, buffer: &[u8]);
-    fn offset(&self) -> usize;
-    fn push(&mut self, byte: u8);
-    fn push_i8(&mut self, value: i8);
-    fn push_i32(&mut self, value: i32);
-    fn global_reloc(
-        &mut self,
-        name: &'static str,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
-    );
-    fn dynamic_reloc(
-        &mut self,
-        id: Self::DynamicLabel,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
-    );
-    /// Record a template relocation for bytes immediately preceding the current offset.
-    ///
-    /// The field is overwritten based on BPF instruction data as the templates are assembled. This
-    /// is unlike the other types of relocations which have to be resolved or resolvable when the
-    /// template is finalized.
-    fn template_reloc(
-        &mut self,
-        kind: TemplateRelocationKind,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-    );
-    fn new_dynamic_label(&mut self) -> Self::DynamicLabel;
-    fn dynamic_label(&mut self, id: Self::DynamicLabel);
-
-    /// The SBPF version the code is generated for.
-    fn version(&self) -> SBPFVersion;
-    /// Of the instruction being generated.
-    fn opcode(&self) -> TemplateOpcode;
-    fn supports(&self) -> &SupportingCode;
-
-    // Generate code to handle branch taken case.
-    fn bpf_taken_branch(&mut self);
-
-    /// The code generated so far checks the instruction meter.
-    fn meter_checked(&mut self);
-}
 
 /// Set the flags for the comparison of the 64 bit registers (or the immediate) of the conditional
 /// jump being generated.
 ///
 /// `RTEMP` expected to hold address of the next BPF instruction (from `load_next_insn_addr`.)
-fn compare_64<G: X64Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
+fn compare_64<G: Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
     let op = out.opcode().op();
     let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
     let is_jset = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
@@ -201,7 +153,7 @@ fn compare_64<G: X64Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
 }
 
 /// Like `compare_64`, for the lower 32 bits.
-fn compare_32<G: X64Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
+fn compare_32<G: Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
     let op = out.opcode().op();
     let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
     let is_jset = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_JSET;
@@ -214,7 +166,7 @@ fn compare_32<G: X64Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
 }
 
 /// Produce a template for a conditional jump, the flags of which are set by `compare`.
-fn conditional_branch<G: X64Generator + ?Sized>(
+fn conditional_branch<G: Generator + ?Sized>(
     out: &mut G,
     dst: Reg,
     src: Reg,
@@ -258,17 +210,17 @@ fn conditional_branch<G: X64Generator + ?Sized>(
 }
 
 /// Terminate execution for an instruction that is not valid.
-fn invalid_insn<G: X64Generator + ?Sized>(out: &mut G) {
+fn invalid_insn<G: Generator + ?Sized>(out: &mut G) {
     load_next_insn_addr(out);
     x64asm!(out; jmp ->sig_invalid_insn);
 }
 
 /// Build the code to execute the BPF instruction.
-fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
+pub(super) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
     #[cfg(feature = "tracer")]
     {
         load_next_insn_addr(out);
-        invoke_support(out, out.supports().trace);
+        invoke_support(out, SupportingCode::get().trace);
     }
     let opcode = out.opcode();
     let op = opcode.op();
@@ -366,7 +318,7 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
         ebpf::DIV64_REG |
         ebpf::MOD64_REG => {
             let is_div = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
-            let helper = out.supports().divide(is_div, is_alu64, dst, src);
+            let helper = SupportingCode::get().divide(is_div, is_alu64, dst, src);
             load_next_insn_addr(out);
             invoke_support(out, helper);
         }
@@ -525,9 +477,9 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             load_next_insn_addr(out);
             out.meter_checked();
             match (out.version().static_syscalls(), src.0) {
-                (false, _) => invoke_support(out, out.supports().v0_call_imm),
-                (true, 1) => invoke_support(out, out.supports().call_imm),
-                (true, 0) => invoke_support(out, out.supports().syscall),
+                (false, _) => invoke_support(out, SupportingCode::get().v0_call_imm),
+                (true, 1) => invoke_support(out, SupportingCode::get().call_imm),
+                (true, 0) => invoke_support(out, SupportingCode::get().syscall),
                 (true, _) => x64asm!(out; jmp ->sig_invalid_insn),
             }
         }
@@ -535,9 +487,9 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             load_next_insn_addr(out);
             out.meter_checked();
             if out.version().callx_uses_dst_reg() {
-                invoke_support(out, out.supports().callx[usize::from(dst.0)]);
+                invoke_support(out, SupportingCode::get().callx[usize::from(dst.0)]);
             } else {
-                invoke_support(out, out.supports().v0_callx);
+                invoke_support(out, SupportingCode::get().v0_callx);
             }
         }
         ebpf::EXIT => {
@@ -589,9 +541,9 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             };
             let (d, s) = (usize::from(dst.0), usize::from(src.0));
             let helper = match op & ebpf::BPF_CLS_MASK {
-                ebpf::BPF_LDX => out.supports().load[size_log2][d][s],
-                ebpf::BPF_ST => out.supports().store_imm[size_log2][d],
-                ebpf::BPF_STX => out.supports().store_reg[size_log2][d][s],
+                ebpf::BPF_LDX => SupportingCode::get().load[size_log2][d][s],
+                ebpf::BPF_ST => SupportingCode::get().store_imm[size_log2][d],
+                ebpf::BPF_STX => SupportingCode::get().store_reg[size_log2][d][s],
                 _ => unreachable!(),
             };
             load_next_insn_addr(out);
@@ -637,15 +589,15 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
 }
 
 /// Load the address of the BPF instruction following the current one into `temp`.
-fn load_next_insn_addr<G: X64Generator + ?Sized>(out: &mut G) {
+fn load_next_insn_addr<G: Generator + ?Sized>(out: &mut G) {
     x64asm!(out
         ; lea RTEMP, [ DWORD 0i32 + RINSN ]
-        ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0)
+        ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 0, 4, 0, ABSOLUTE_DWORD)
     );
 }
 
 /// Call the support at `support_addr`, which finds `RINSN` above its return address.
-fn invoke_support<G: X64Generator + ?Sized>(out: &mut G, support_addr: u32) {
+fn invoke_support<G: Generator + ?Sized>(out: &mut G, support_addr: u32) {
     // Every other register holds something, so `RINSN` makes room for the target. The JIT code
     // need not be within reach of a 32-bit displacement from the supports.
     x64asm!(out
@@ -663,7 +615,7 @@ fn invoke_support<G: X64Generator + ?Sized>(out: &mut G, support_addr: u32) {
 ///
 /// This will discard the guest code stack, return the exit code in `al` and the
 /// remaining budget in `RMETER`. `RTEMP` will contain the faulting instruction offset.
-fn terminate<G: X64Generator + ?Sized>(out: &mut G, code: i8) {
+fn terminate<G: Generator + ?Sized>(out: &mut G, code: i8) {
     if code == SIG_EXCEEDED_MAX_INSTRUCTIONS {
         // If we did exceed the budget, the faulting instruction is actually the limit rather than
         // the address of whatever meter validation point we hit.
@@ -680,7 +632,7 @@ fn terminate<G: X64Generator + ?Sized>(out: &mut G, code: i8) {
 /// Terminate the execution if the instruction budget has been exceeded.
 ///
 /// `temp` must contain the address of the next BPF instruction.
-fn bpf_validate_meter<G: X64Generator + ?Sized>(out: &mut G) {
+fn bpf_validate_meter<G: Generator + ?Sized>(out: &mut G) {
     out.meter_checked();
     x64asm!(out
         ; cmp RTEMP, RMETER
@@ -688,232 +640,202 @@ fn bpf_validate_meter<G: X64Generator + ?Sized>(out: &mut G) {
     );
 }
 
-const MAX_JIT_TEMPLATE_SIZE: usize = if cfg!(feature = "tracer") { 64 } else { 48 };
+/// Every template reserves this many relocations, so keep it at the maximum that any template
+/// needs (`templates_fit_max_relocations` checks both directions).
+/// The tracer's prelude takes another one.
+pub(super) const MAX_RELOCATIONS: usize = if cfg!(feature = "tracer") { 4 } else { 3 };
 
-struct JITGenerator<'a> {
-    version: SBPFVersion,
-    template: TemplateBuilder<'a, MAX_JIT_TEMPLATE_SIZE>,
-    /// `None` for an `AuxTemplate`.
-    opcode: Option<TemplateOpcode>,
-    /// Temporary relocations within the code that will be resolved before the template is
-    /// finalized.
+pub(super) const MAX_JIT_TEMPLATE_SIZE: usize = if cfg!(feature = "tracer") { 64 } else { 48 };
+
+/// Distance from the meter adjustment field of a taken branch to its jump field, see
+/// `TemplateRelocationKind::TakenBranch`: the `jmp rel32` follows the `add r64, imm32`.
+const TAKEN_BRANCH_METER_ADJUSTMENT: usize = 5;
+
+#[derive(Clone, Copy, Debug)]
+#[repr(u8)]
+pub(super) enum TemplateRelocationKind {
+    /// The JIT holds a pointer to the second instruction of the eBPF program in `insn`,
+    /// whereas the templates default to addressing where `insn` is updated to point to right
+    /// after the current instruction. This relocation adds the offset of the current instruction
+    /// to the field.
+    InsnOffset,
+    /// When BPF instruction represents a branch, and the branch is taken, the control flow has to
+    /// transfer to the machine code representing the target BPF instruction's code. Offset to this
+    /// machine code is what this relocation must overwrite based on the BPF instruction being
+    /// templated.
     ///
-    /// Template can have further relocations after finalization, however those relocations may only
-    /// be specific to the eBPF instruction being instantiated.
-    relocs: LabelRelocs<SimpleRelocation>,
-    supports: &'static SupportingCode,
+    /// The field `TAKEN_BRANCH_METER_ADJUSTMENT` bytes before it, which `bpf_taken_branch`
+    /// always emits there, gets the offset (in bytes) from the instruction following the branch to
+    /// the branch target.
+    TakenBranch,
+    /// For `jmp ->sig_meter_exceeded`.
+    SigMeterExceeded,
+    /// For `jmp ->sig_invalid_insn`.
+    SigInvalidInsn,
 }
 
-impl<'a> JITGenerator<'a> {
-    fn new(
-        version: SBPFVersion,
-        template: TemplateBuilder<'a, MAX_JIT_TEMPLATE_SIZE>,
-        opcode: Option<TemplateOpcode>,
+/// A relocation that can only be resolved once the template is instantiated for a specific eBPF
+/// instruction at a specific location: a 32-bit field in the template, which holds the addend, to
+/// which the target of the relocation is added.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct TemplateRelocation {
+    /// Offset of the field within the template.
+    pub(super) field: u8,
+    pub(super) kind: TemplateRelocationKind,
+}
+
+impl TemplateRelocationKind {
+    /// For a reference to the global label `name` in a template.
+    pub(super) fn of_global(name: &str) -> Self {
+        match name {
+            "template_taken_branch" => Self::TakenBranch,
+            "sig_meter_exceeded" => Self::SigMeterExceeded,
+            "sig_invalid_insn" => Self::SigInvalidInsn,
+            _ => panic!("global reference to an unknown symbol {}", name),
+        }
+    }
+}
+
+impl TemplateRelocation {
+    /// For the unused entries, which `JitTemplates::emit` does not apply.
+    pub(super) const UNUSED: Self = Self {
+        field: 0,
+        kind: TemplateRelocationKind::InsnOffset,
+    };
+
+    /// `patch` is a relocation reported by `dynasm` at the end of `code`, the template generated so
+    /// far. Sets the field in `code` to the addend, which for relative relocations accounts for
+    /// where the field is in the template, but not for where the template is in the output.
+    pub(super) fn new(
+        kind: TemplateRelocationKind,
+        patch: PatchFields<Relocation>,
+        code: &mut [u8],
     ) -> Self {
+        let location = code.len();
+        let relative = match kind {
+            TemplateRelocationKind::TakenBranch
+            | TemplateRelocationKind::SigMeterExceeded
+            | TemplateRelocationKind::SigInvalidInsn => true,
+            TemplateRelocationKind::InsnOffset => false,
+        };
+        assert!(
+            match patch.relocation.kind() {
+                RelocationKind::Relative => relative,
+                RelocationKind::Absolute => !relative,
+                RelocationKind::RelToAbs | RelocationKind::AbsToRel => false,
+            },
+            "unsupported template relocation"
+        );
+        assert_eq!(
+            patch.relocation.size(),
+            4,
+            "unsupported template relocation"
+        );
+        let reference = if relative {
+            location.checked_sub(usize::from(patch.ref_offset)).unwrap()
+        } else {
+            0
+        };
+        let field = location
+            .checked_sub(usize::from(patch.field_offset))
+            .unwrap();
+        // The template ends no earlier than `location`, so the field is within it. `apply` relies
+        // on this.
+        assert!(
+            field.checked_add(4).unwrap() <= location,
+            "unsupported template relocation"
+        );
+        // `apply` also patches the meter adjustment ahead of the field.
+        if let TemplateRelocationKind::TakenBranch = kind {
+            assert!(
+                field >= TAKEN_BRANCH_METER_ADJUSTMENT,
+                "unsupported template relocation"
+            );
+        }
+        let addend =
+            i32::try_from(patch.target_offset.checked_sub(reference as isize).unwrap()).unwrap();
+        code[field..field.wrapping_add(4)].copy_from_slice(&addend.to_le_bytes());
         Self {
-            version,
-            template,
-            opcode,
-            relocs: LabelRelocs::new(),
-            supports: SupportingCode::get(),
+            field: u8::try_from(field).unwrap(),
+            kind,
         }
     }
 
-    /// Generator for a BPF instruction.
-    fn for_insn(
-        version: SBPFVersion,
-        templates: &'a mut JitTemplates<MAX_JIT_TEMPLATE_SIZE>,
-        opcode: TemplateOpcode,
-    ) -> Self {
-        let template = templates.insn_builder(opcode);
-        template.layout.extra_bpf_insns =
-            ((insn_size(opcode.op()) / 8) as u8).checked_sub(1).unwrap();
-        Self::new(version, template, Some(opcode))
-    }
-
-    /// Resolve all the relocations that can be resolved without knowing the specific eBPF
-    /// instruction.
-    fn finalize(mut self) {
-        self.relocs.resolve(self.template.code_mut(), None);
-    }
-}
-
-impl X64Generator for JITGenerator<'_> {
-    type DynamicLabel = DynamicLabel;
-
-    #[track_caller]
-    fn extend(&mut self, buffer: &[u8]) {
-        self.template.extend(buffer);
-    }
-
-    fn offset(&self) -> usize {
-        self.template.offset()
-    }
-
-    fn push(&mut self, byte: u8) {
-        self.template.push(byte)
-    }
-
-    fn push_i32(&mut self, value: i32) {
-        self.template.extend(&value.to_le_bytes());
-    }
-
-    fn push_i8(&mut self, value: i8) {
-        self.template.push(value as u8);
-    }
-
-    fn global_reloc(
-        &mut self,
-        name: &'static str,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
+    /// Patch the relocation into `out`, a copy of `template` instantiated as `at` describes.
+    #[inline(always)]
+    pub(super) fn apply<const SIZE: usize>(
+        &self,
+        template: &[u8; SIZE],
+        out: &mut [u8; SIZE],
+        at: &Instantiation,
     ) {
-        let patch =
-            PatchFields::<SimpleRelocation>::new(target_offset, field_offset, ref_offset, kind);
-        let kind = match name {
-            "template_taken_branch" => TemplateRelocationKind::TakenBranch,
-            "sig_meter_exceeded" => TemplateRelocationKind::SigMeterExceeded,
-            "sig_invalid_insn" => TemplateRelocationKind::SigInvalidInsn,
-            _ => panic!("global reference to an unknown symbol {}", name),
+        // Computed in `i64`, to which all the inputs convert losslessly, and in which none of the
+        // arithmetic below can overflow: the positions in the output are below `NOOP_DUE` (see
+        // `analyze`), as are the `pc_section` entries, `pc * INSN_SIZE` is an offset into the text
+        // section, and `off` and the addends are at most 32 bits.
+        let target = match self.kind {
+            TemplateRelocationKind::InsnOffset => {
+                (at.pc as i64).wrapping_mul(ebpf::INSN_SIZE as i64)
+            }
+            TemplateRelocationKind::TakenBranch => {
+                let adjustment = i64::from(at.off).wrapping_mul(ebpf::INSN_SIZE as i64);
+                // At least `TAKEN_BRANCH_METER_ADJUSTMENT` (see `new`).
+                let field = usize::from(self.field).wrapping_sub(TAKEN_BRANCH_METER_ADJUSTMENT);
+                add_to_field(template, out, field, adjustment);
+                // The verifier rejects invalid jump offsets, but doing this defensive thing is
+                // faster anyway.
+                let target = at
+                    .pc
+                    .checked_add_signed(isize::from(at.off).wrapping_add(1))
+                    .and_then(|target_pc| at.pc_section.get(target_pc))
+                    .copied()
+                    .unwrap_or(JitTemplates::<SIZE>::INVALID_CALL_TARGET);
+                i64::from(target & !PADDING_DUE).wrapping_sub(at.position as i64)
+            }
+            TemplateRelocationKind::SigMeterExceeded => {
+                (at.sig_meter_exceeded as i64).wrapping_sub(at.position as i64)
+            }
+            TemplateRelocationKind::SigInvalidInsn => {
+                (at.sig_invalid_insn as i64).wrapping_sub(at.position as i64)
+            }
         };
-        self.template.add_relocation(kind, self.offset(), patch);
-    }
-
-    fn template_reloc(
-        &mut self,
-        kind: TemplateRelocationKind,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-    ) {
-        // kind = Absolute DWord
-        let patch =
-            PatchFields::<SimpleRelocation>::new(target_offset, field_offset, ref_offset, 0xC2);
-        self.template.add_relocation(kind, self.offset(), patch);
-    }
-
-    fn dynamic_reloc(
-        &mut self,
-        id: DynamicLabel,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
-    ) {
-        let patch = PatchFields::new(target_offset, field_offset, ref_offset, kind);
-        self.relocs.dynamic_reloc(self.offset(), id, patch);
-    }
-
-    fn new_dynamic_label(&mut self) -> DynamicLabel {
-        self.relocs.new_dynamic_label()
-    }
-
-    fn dynamic_label(&mut self, id: DynamicLabel) {
-        self.relocs.dynamic_label(id, self.offset());
-    }
-
-    fn version(&self) -> SBPFVersion {
-        self.version
-    }
-
-    fn opcode(&self) -> TemplateOpcode {
-        self.opcode
-            .expect("not generating the template for an instruction")
-    }
-
-    fn supports(&self) -> &SupportingCode {
-        self.supports
-    }
-
-    fn bpf_taken_branch(&mut self) {
-        // The `TakenBranch` relocation of the `jmp` also patches the adjustment.
-        x64asm!(self; add RMETER, DWORD 0);
-        let adjustment = self.offset();
-        x64asm!(self; jmp ->template_taken_branch);
-        assert_eq!(
-            self.offset().wrapping_sub(adjustment),
-            TAKEN_BRANCH_METER_ADJUSTMENT,
-            "the adjustment must precede the jump field"
-        );
-    }
-
-    fn meter_checked(&mut self) {
-        self.template.layout.checks_meter = true;
+        add_to_field(template, out, usize::from(self.field), target);
     }
 }
 
-// TODO: when dynasm supports const codegen, we can make these be generated at compile time into an
-// array.
-static JIT_TEMPLATES: [LazyLock<JitTemplates<MAX_JIT_TEMPLATE_SIZE>>; 5] = [
-    LazyLock::new(|| generate_jit_templates(SBPFVersion::V0)),
-    LazyLock::new(|| panic!("dynasm for v1 unlikely to be implemented")),
-    LazyLock::new(|| panic!("dynasm for v2 unlikely to be implemented")),
-    LazyLock::new(|| generate_jit_templates(SBPFVersion::V3)),
-    // TODO: same as v3? maybe Arc-share the v3 templates or something?
-    LazyLock::new(|| generate_jit_templates(SBPFVersion::V4)),
-];
-
-/// JIT templates for the SBPF `version`.
-pub fn jit_templates(version: SBPFVersion) -> &'static JitTemplates<MAX_JIT_TEMPLATE_SIZE> {
-    &JIT_TEMPLATES[version as usize]
-}
-
-fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE_SIZE> {
-    type Templates = JitTemplates<MAX_JIT_TEMPLATE_SIZE>;
-    let mut templates = Templates::empty();
-    for opcode in TemplateOpcode::all() {
-        let mut generator = JITGenerator::for_insn(version, &mut templates, opcode);
-        bpf_insn(&mut generator);
-        generator.finalize();
-    }
-    let generate = |templates: &mut Templates, template, f: fn(&mut JITGenerator)| {
-        let mut generator = JITGenerator::new(version, templates.aux_builder(template), None);
-        f(&mut generator);
-        generator.finalize();
-    };
-    generate(&mut templates, AuxTemplate::ExecutionOverrun, |generator| {
-        load_next_insn_addr(generator);
-        // Running out of budget takes precedence, as in `Interpreter::step`.
-        bpf_validate_meter(generator);
-        terminate(generator, SIG_EXECUTION_OVERRUN);
-    });
-    generate(
-        &mut templates,
-        AuxTemplate::InvalidCallTarget,
-        |generator| {
-            // The code paths that might end up here are expected to update `next_insn`.
-            x64asm!(generator; mov RTEMP, rbp => Frame[BYTE -1].next_insn);
-            #[cfg(feature = "tracer")]
-            invoke_support(generator, generator.supports().trace);
-            // Continues into `InvalidInsn`.
-        },
-    );
-    generate(&mut templates, AuxTemplate::SigInvalidInsn, |generator| {
-        bpf_validate_meter(generator);
-        terminate(generator, SIG_INVALID_INSN);
-    });
-    generate(&mut templates, AuxTemplate::SigMeterExceeded, |generator| {
-        terminate(generator, SIG_EXCEEDED_MAX_INSTRUCTIONS);
-    });
-    generate(
-        &mut templates,
-        AuxTemplate::Noop,
-        |generator| x64asm!(generator; nop),
-    );
-    generate(&mut templates, AuxTemplate::MeterCheckpoint, |generator| {
-        load_next_insn_addr(generator);
-        bpf_validate_meter(generator);
-    });
-    templates
-}
-
-/// The interpreter step for the instructions with `opcode`, of the interpreter for the SBPF
-/// `version`.
-fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
-    let offset = InterpreterGenerator::step_offset(opcode);
+/// Set the 32-bit field of a relocation at `field` in `out` to `value` plus what it holds in
+/// `template`.
+///
+/// Reads `template` rather than `out`, which was just written with wider stores that a load of
+/// the field couldn't be forwarded from.
+///
+/// `field` must be a field of a relocation of the template, or the meter adjustment of
+/// `TemplateRelocationKind::TakenBranch`.
+#[inline(always)]
+fn add_to_field<const SIZE: usize>(
+    template: &[u8; SIZE],
+    out: &mut [u8; SIZE],
+    field: usize,
+    value: i64,
+) {
+    debug_assert!(field.wrapping_add(4) <= SIZE);
     // SAFETY:
+    //
+    // Contract from `<*const u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed on
+    // mathematical integers (without "wrapping around"), must fit in an `isize`.
+    //
+    // Contract from `<*const u8>::add`: If the computed offset is non-zero, then `self` must be
+    // derived from a pointer to some allocation, and the entire memory range between `self` and the
+    // result must be in bounds of that allocation. In particular, this range must not "wrap around"
+    // the edge of the address space.
+    //
+    // Contract from `<*const i32>::read_unaligned`: See `ptr::read_unaligned` for safety concerns
+    // and examples.
+    //
+    // Contract from `ptr::read_unaligned`: `src` must be valid for reads.
+    //
+    // Contract from `ptr::read_unaligned`: `src` must point to a properly initialized value of type
+    // `T`.
     //
     // Contract from `<*mut u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed on
     // mathematical integers (without "wrapping around"), must fit in an `isize`.
@@ -923,417 +845,132 @@ fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> *const u8 {
     // result must be in bounds of that allocation. In particular, this range must not "wrap around"
     // the edge of the address space.
     //
-    // Evidence: `buffer` is the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes,
-    // which is `TemplateOpcode::COUNT` steps of `1 << STEP_SIZE_LOG2` bytes, and `offset` is the
-    // start of the step of an opcode, so less than that. It fits an `isize`, as the allocation
-    // does.
-    unsafe { interpreter(version).buffer.add(offset) }
+    // Contract from `<*mut i32>::write_unaligned`: See `ptr::write_unaligned` for safety concerns
+    // and examples.
+    //
+    // Contract from `ptr::write_unaligned`: `dst` must be valid for writes.
+    //
+    // Evidence: `TemplateRelocation::new` asserts that a field ends within its template, so `field
+    // + 4` is at most the length of the template, and that the meter adjustment of a taken branch,
+    // `TAKEN_BRANCH_METER_ADJUSTMENT` bytes before its field, is within it too. That is at
+    // most `SIZE`, so `field` is an offset within the arrays `template` and `out`, which fits an
+    // `isize`, and the 4 bytes at it are within either array. They are initialized bytes, and any 4
+    // of them are a valid `i32`. `out` is borrowed mutably, so writing to it is allowed.
+    unsafe {
+        let addend = template.as_ptr().add(field).cast::<i32>().read_unaligned();
+        debug_assert!(
+            i32::try_from(i64::from(addend).wrapping_add(value)).is_ok(),
+            "impossible relocation"
+        );
+        let field = out.as_mut_ptr().add(field).cast::<i32>();
+        field.write_unaligned(addend.wrapping_add(value as i32));
+    }
 }
 
-pub(super) struct Interpreter {
-    pub(super) buffer: *mut u8,
-    /// The length of the code of each step, which is followed by padding to the size of the step.
-    #[cfg(feature = "codegen-debug")]
-    pub(super) step_lens: Box<[u8]>,
-}
+/// The interpreter steps are 128 bytes.
+pub(super) const INTERPRETER_STEP_SIZE_LOG2: u8 = 7;
 
-// SAFETY:
-//
-// Contract from `Send`: Types that can be transferred across thread boundaries.
-//
-// Evidence: `buffer` is the only field that is not `Send` itself. It points to the steps, which are
-// read-execute and never freed once the `Interpreter` is constructed, so they can be used from any
-// thread.
-unsafe impl Send for Interpreter {}
-// SAFETY:
-//
-// Contract from `Sync`: Types for which it is safe to share references between threads.
-//
-// Contract from `Sync`: The precise definition is: a type `T` is `Sync` if and only if `&T` is
-// `Send`. In other words, if there is no possibility of undefined behavior (including data races)
-// when passing `&T` references between threads.
-//
-// Evidence: `&Interpreter` only gives access to `buffer`, the address of memory that is never
-// written to or freed once the `Interpreter` is constructed, and to `step_lens`, which is `Sync`,
-// so there is nothing to race on.
-unsafe impl Sync for Interpreter {}
+/// What the space after the code of an interpreter step is filled with: `int3`.
+pub(super) const TRAP_FILL: u8 = 0xcc;
 
-/// Generates the interpreter.
+/// The encoding of an absolute 32-bit relocation, for `Generator::template_reloc`.
+const ABSOLUTE_DWORD: u8 = 0xc2;
+
+/// The address of the code that the global label `name` of an interpreter step refers to.
 ///
-/// This interpreter uses a dispatch table with one step of `1 << STEP_SIZE_LOG2` bytes per
-/// `TemplateOpcode`, each running its instruction and then threading execution to the next one
-/// directly, thus implementing a technique known as direct threading.
-pub(super) struct InterpreterGenerator {
-    buffer: *mut u8,
-    relocs: LabelRelocs<SimpleRelocation>,
-    supports: &'static SupportingCode,
-    offset: usize,
-    version: SBPFVersion,
-    /// Of the step being generated.
-    opcode: TemplateOpcode,
-    /// Is the code generated for this instruction terminal?
-    ///
-    /// No further instructions other than the epilogue expected to appear after this point.
-    terminal: bool,
+/// It is shared by the steps, so it is in the supports, which like the interpreter are in the
+/// first 2 GiB, so within reach.
+pub(super) fn interpreter_global(name: &str) -> usize {
+    let supports = SupportingCode::get();
+    let target = match name {
+        "sig_meter_exceeded" => supports.meter_exceeded,
+        "sig_invalid_insn" => supports.invalid_insn,
+        _ => panic!("global reference to an unknown symbol {}", name),
+    };
+    target as usize
 }
 
-impl InterpreterGenerator {
-    pub(super) const STEP_SIZE_LOG2: u8 = 7; // 128 bytes
-    pub(super) const STEP_TABLE_SIZE: usize = 0x1_0000 * (1 << Self::STEP_SIZE_LOG2);
-
-    /// Offset into the `buffer` for this opcode.
-    fn step_offset(opcode: TemplateOpcode) -> usize {
-        opcode.index() << Self::STEP_SIZE_LOG2
-    }
-
-    fn new(version: SBPFVersion) -> Self {
-        // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
-        let buffer = allocate_pages_low(Self::STEP_TABLE_SIZE)
-            .expect("failed to allocate memory for the interpreter");
-        Self {
-            version,
-            buffer,
-            relocs: LabelRelocs::new(),
-            offset: 0,
-            opcode: TemplateOpcode(0),
-            terminal: false,
-            supports: SupportingCode::get(),
+/// Generate the `AuxTemplate` `template`.
+pub(super) fn aux_template<G: Generator + ?Sized>(out: &mut G, template: AuxTemplate) {
+    match template {
+        AuxTemplate::ExecutionOverrun => {
+            load_next_insn_addr(out);
+            // Running out of budget takes precedence, as in `Interpreter::step`.
+            bpf_validate_meter(out);
+            terminate(out, SIG_EXECUTION_OVERRUN);
+        }
+        AuxTemplate::InvalidCallTarget => {
+            // The code paths that might end up here are expected to update `next_insn`.
+            x64asm!(out; mov RTEMP, rbp => Frame[BYTE -1].next_insn);
+            #[cfg(feature = "tracer")]
+            invoke_support(out, SupportingCode::get().trace);
+            // Continues into `InvalidInsn`.
+        }
+        AuxTemplate::SigInvalidInsn => {
+            bpf_validate_meter(out);
+            terminate(out, SIG_INVALID_INSN);
+        }
+        AuxTemplate::SigMeterExceeded => terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS),
+        AuxTemplate::Noop => x64asm!(out; nop),
+        AuxTemplate::MeterCheckpoint => {
+            load_next_insn_addr(out);
+            bpf_validate_meter(out);
         }
     }
 }
 
-impl X64Generator for InterpreterGenerator {
-    type DynamicLabel = DynamicLabel;
-
-    fn extend(&mut self, buffer: &[u8]) {
-        assert!(!self.terminal);
-        let step_capacity = 1usize << Self::STEP_SIZE_LOG2;
-        let remaining_capacity = step_capacity
-            .checked_sub(self.offset % step_capacity)
-            .unwrap();
-        assert!(buffer.len() <= remaining_capacity, "step is too long!");
-        assert!(self.offset.saturating_add(buffer.len()) <= Self::STEP_TABLE_SIZE);
-        // SAFETY:
-        //
-        // Contract from `<*mut u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed
-        // on mathematical integers (without "wrapping around"), must fit in an `isize`.
-        //
-        // Contract from `<*mut u8>::add`: If the computed offset is non-zero, then `self` must be
-        // derived from a pointer to some allocation, and the entire memory range between `self` and
-        // the result must be in bounds of that allocation. In particular, this range must not "wrap
-        // around" the edge of the address space.
-        //
-        // Evidence: `buffer` is the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes,
-        // and `offset` is at most `STEP_TABLE_SIZE`, per the assertion above. It fits an `isize`,
-        // as the allocation does.
-        let destination = unsafe { self.buffer.add(self.offset) };
-        // SAFETY:
-        //
-        // Contract from `ptr::copy_nonoverlapping`: `src` must be valid for reads of `count *
-        // size_of::<T>()` bytes or that number must be 0.
-        //
-        // Contract from `ptr::copy_nonoverlapping`: `dst` must be valid for writes of `count *
-        // size_of::<T>()` bytes or that number must be 0.
-        //
-        // Contract from `ptr::copy_nonoverlapping`: Both `src` and `dst` must be properly aligned.
-        //
-        // Contract from `ptr::copy_nonoverlapping`: The region of memory beginning at `src` with a
-        // size of `count * size_of::<T>()` bytes must *not* overlap with the region of memory
-        // beginning at `dst` with the same size.
-        //
-        // Evidence: `T` is `u8`, so the pointers are aligned, and the size is `buffer.len()` bytes.
-        // `buffer` is a slice, so valid for reads. The destination range ends within the
-        // `STEP_TABLE_SIZE` bytes of the allocation at `buffer`, per the assertion above, which is
-        // read-write until `generate_interpreter` protects it after the generation, and which
-        // nothing else accesses meanwhile. `buffer` is not of that allocation, which only `self`
-        // refers to, so the regions do not overlap.
-        unsafe { std::ptr::copy_nonoverlapping(buffer.as_ptr(), destination, buffer.len()) };
-        self.offset = self.offset.checked_add(buffer.len()).unwrap();
-    }
-
-    fn offset(&self) -> usize {
-        self.offset
-    }
-
-    fn push(&mut self, byte: u8) {
-        self.extend(&[byte])
-    }
-
-    fn push_i8(&mut self, value: i8) {
-        self.extend(&[value as u8]);
-    }
-
-    fn push_i32(&mut self, value: i32) {
-        self.extend(&value.to_le_bytes());
-    }
-
-    fn global_reloc(
-        &mut self,
-        name: &'static str,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
-    ) {
-        // The code shared by the steps is in the supports, which like the interpreter are in the
-        // first 2 GiB, so within reach.
-        let target = match name {
-            "sig_meter_exceeded" => self.supports.meter_exceeded,
-            "sig_invalid_insn" => self.supports.invalid_insn,
-            _ => panic!("global reference to an unknown symbol {}", name),
-        };
-        let patch =
-            PatchFields::<SimpleRelocation>::new(target_offset, field_offset, ref_offset, kind)
-                .at(self.offset);
-        assert_eq!(patch.relocation.size(), 4, "unsupported relocation");
-        let value = patch.value(
-            (target as usize).wrapping_sub(self.buffer as usize),
-            self.buffer as usize,
-        );
-        let value = i32::try_from(value).expect("supports out of reach of the interpreter");
-        let field = patch.range(0);
-        // SAFETY:
-        //
-        // Contract from `<*mut u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed
-        // on mathematical integers (without "wrapping around"), must fit in an `isize`.
-        //
-        // Contract from `<*mut u8>::add`: If the computed offset is non-zero, then `self` must be
-        // derived from a pointer to some allocation, and the entire memory range between `self` and
-        // the result must be in bounds of that allocation. In particular, this range must not "wrap
-        // around" the edge of the address space.
-        //
-        // Contract from `slice::from_raw_parts_mut`: `data` must be non-null, valid for both reads
-        // and writes for `len * size_of::<T>()` many bytes, and it must be properly aligned. This
-        // means in particular: The entire memory range of this slice must be contained within a
-        // single allocation! Slices can never span across multiple allocations.
-        //
-        // Contract from `slice::from_raw_parts_mut`: `data` must point to `len` consecutive
-        // properly initialized values of type `T`.
-        //
-        // Contract from `slice::from_raw_parts_mut`: The memory referenced by the returned slice
-        // must not be accessed through any other pointer (not derived from the return value) for
-        // the duration of lifetime `'a`. Both read and write accesses are forbidden.
-        //
-        // Contract from `slice::from_raw_parts_mut`: The total size `len * size_of::<T>()` of the
-        // slice must be no larger than `isize::MAX`, and adding that size to `data` must not "wrap
-        // around" the address space. See the safety documentation of `pointer::offset`.
-        //
-        // Evidence: `T` is `u8`, so the pointer is aligned, and the size is 4 bytes. The field is
-        // within the instruction that `extend` has just written into the `STEP_TABLE_SIZE` bytes of
-        // the allocation of `allocate_pages_low` at `buffer`, so the offset is within it and fits
-        // an `isize`. `generate_interpreter` filled the allocation with 0xcc, so it is initialized,
-        // and it is read-write until `generate_interpreter` protects it after the generation.
-        // Nothing else accesses it while the slice lives, which ends at the end of this function.
-        let field = unsafe { std::slice::from_raw_parts_mut(self.buffer.add(field.start), 4) };
-        field.copy_from_slice(&value.to_le_bytes());
-    }
-
-    fn template_reloc(&mut self, _: TemplateRelocationKind, _: isize, _: u8, _: u8) {
-        // Intentionally empty: interpreter does not generate templates.
-    }
-
-    fn dynamic_reloc(
-        &mut self,
-        id: DynamicLabel,
-        target_offset: isize,
-        field_offset: u8,
-        ref_offset: u8,
-        kind: u8,
-    ) {
-        let patch = PatchFields::new(target_offset, field_offset, ref_offset, kind);
-        self.relocs.dynamic_reloc(self.offset, id, patch);
-    }
-
-    fn new_dynamic_label(&mut self) -> DynamicLabel {
-        self.relocs.new_dynamic_label()
-    }
-
-    fn dynamic_label(&mut self, id: DynamicLabel) {
-        self.relocs.dynamic_label(id, self.offset);
-    }
-
-    fn version(&self) -> SBPFVersion {
-        self.version
-    }
-
-    fn opcode(&self) -> TemplateOpcode {
-        self.opcode
-    }
-
-    fn supports(&self) -> &SupportingCode {
-        self.supports
-    }
-
-    fn bpf_taken_branch(&mut self) {
-        x64asm!(self
-            ; movsx RTEMP, WORD REL32_OFF
-            ; lea RMETER, [ RMETER + RTEMP*8 ]
-            ; lea RINSN, [ RINSN + RTEMP*8 ]
-        );
-        self.terminal = true;
-    }
-
-    fn meter_checked(&mut self) { /* every step checks the meter */
-    }
+/// `Generator::bpf_taken_branch` of the JIT templates.
+pub(super) fn jit_taken_branch<G: Generator + ?Sized>(out: &mut G) {
+    // The `TakenBranch` relocation of the `jmp` also patches the adjustment.
+    x64asm!(out; add RMETER, DWORD 0);
+    let adjustment = out.offset();
+    x64asm!(out; jmp ->template_taken_branch);
+    assert_eq!(
+        out.offset().wrapping_sub(adjustment),
+        TAKEN_BRANCH_METER_ADJUSTMENT,
+        "the adjustment must precede the jump field"
+    );
 }
 
-static INTERPRETERS: [LazyLock<Interpreter>; 5] = [
-    LazyLock::new(|| generate_interpreter(SBPFVersion::V0)),
-    LazyLock::new(|| panic!("dynasm for v1 unlikely to be implemented")),
-    LazyLock::new(|| panic!("dynasm for v2 unlikely to be implemented")),
-    LazyLock::new(|| generate_interpreter(SBPFVersion::V3)),
-    LazyLock::new(|| generate_interpreter(SBPFVersion::V4)),
-];
-
-/// The interpreter for the SBPF `version`.
-pub(super) fn interpreter(version: SBPFVersion) -> &'static Interpreter {
-    &INTERPRETERS[version as usize]
+/// `Generator::bpf_taken_branch` of the interpreter steps, which `interpreter_dispatch` follows.
+pub(super) fn interpreter_taken_branch<G: Generator + ?Sized>(out: &mut G) {
+    x64asm!(out
+        ; movsx RTEMP, WORD REL32_OFF
+        ; lea RMETER, [ RMETER + RTEMP*8 ]
+        ; lea RINSN, [ RINSN + RTEMP*8 ]
+    );
 }
 
-fn generate_interpreter(version: SBPFVersion) -> Interpreter {
-    let mut generator = InterpreterGenerator::new(version);
-    let base_addr = i32::try_from(generator.buffer as usize).expect("interpreter in first 2GB");
-    #[cfg(all(feature = "codegen-debug", target_os = "linux"))]
-    // SAFETY:
-    //
-    // Contract from `CodeRecord::new`: The `len` bytes at `start` must be pages of a mapping that
-    // the caller owns.
-    //
-    // Contract from `CodeRecord::new`: Nothing may access these pages while this runs, or rely on
-    // what they held before: they are replaced with a mapping that stays until `release`.
-    //
-    // Evidence: the range is the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes,
-    // which `generator` just made, and which nothing else refers to. Nothing was written to it yet,
-    // and the steps are generated into it afterwards. The mapping stays, as the interpreter is
-    // never freed.
-    let code_record = unsafe {
-        super::debug::CodeRecord::new(
-            &format!("interpreter-{version:?}").to_lowercase(),
-            generator.buffer as usize,
-            InterpreterGenerator::STEP_TABLE_SIZE,
-        )
+/// Generate the end of an interpreter step, which dispatches to the step of the next instruction.
+pub(super) fn interpreter_dispatch(out: &mut InterpreterGenerator) {
+    let base_addr = i32::try_from(out.base() as usize).expect("interpreter in first 2GB");
+    // `insn` points at the last 8 bytes of the instruction just executed.
+    let size = i8::try_from(ebpf::opcode_size(out.opcode().op())).unwrap();
+    let to_last = size.checked_sub(8).unwrap();
+    let next_insn = if size == 8 {
+        RINSN
+    } else {
+        x64asm!(out; lea RTEMP, [ BYTE to_last + RINSN ]);
+        RTEMP
     };
-    // The space after the code of a step traps if it is ever executed.
-    //
-    // SAFETY:
-    //
-    // Contract from `ptr::write_bytes`: `dst` must be valid for writes of `count * size_of::<T>()`
-    // bytes.
-    //
-    // Contract from `ptr::write_bytes`: `dst` must be properly aligned.
-    //
-    // Evidence: `T` is `u8`, so the pointer is aligned, and the size is `STEP_TABLE_SIZE` bytes,
-    // which is the read-write allocation of `allocate_pages_low` at `generator.buffer`. Nothing
-    // else accesses it meanwhile.
-    unsafe {
-        std::ptr::write_bytes(
-            generator.buffer,
-            0xcc,
-            InterpreterGenerator::STEP_TABLE_SIZE,
-        )
-    };
-    #[cfg(feature = "codegen-debug")]
-    let mut step_lens = vec![0; TemplateOpcode::COUNT];
-    for opcode in TemplateOpcode::all() {
-        let step_start = InterpreterGenerator::step_offset(opcode);
-        generator.opcode = opcode;
-        generator.offset = step_start;
-        bpf_insn(&mut generator);
-        generator.terminal = false;
-        // `insn` points at the last 8 bytes of the instruction just executed.
-        let size = i8::try_from(insn_size(opcode.op())).unwrap();
-        let to_last = size.checked_sub(8).unwrap();
-        let next_insn = if size == 8 {
-            RINSN
-        } else {
-            x64asm!(generator; lea RTEMP, [ BYTE to_last + RINSN ]);
-            RTEMP
-        };
-        // Before dispatching the next instruction, check what the JIT does with the meter
-        // checkpoints and the `execution_overrun` template, in the order of `Interpreter::step`.
-        // `meter` and the limit are both the end of the last instruction that may be executed.
-        let overrun = generator.new_dynamic_label();
-        x64asm!(generator
-            ; cmp Rq(next_insn), RMETER
-            ; jae ->sig_meter_exceeded
-            ; cmp Rq(next_insn), rbp => Frame[BYTE -1].text_section_limit
-            ; jae BYTE =>overrun
-            ; movzx RTEMP, WORD [ BYTE to_last + RINSN ]
-            ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
-            ; lea RTEMP, [ DWORD base_addr + RTEMP ]
-            ; add RINSN, BYTE size
-            ; jmp RTEMP
-            ; =>overrun
-            ; lea RTEMP, [ BYTE size + RINSN ]
-            ;; terminate(&mut generator, SIG_EXECUTION_OVERRUN)
-        );
-        let step_len = generator.offset.checked_sub(step_start).unwrap();
-        assert!(
-            step_len <= 1 << InterpreterGenerator::STEP_SIZE_LOG2,
-            "step for {:#x} is too long",
-            opcode.0
-        );
-        #[cfg(feature = "codegen-debug")]
-        {
-            step_lens[opcode.index()] = u8::try_from(step_len).unwrap();
-        }
-    }
-
-    // SAFETY:
-    //
-    // Contract from `slice::from_raw_parts_mut`: `data` must be non-null, valid for both reads and
-    // writes for `len * size_of::<T>()` many bytes, and it must be properly aligned. This means in
-    // particular: The entire memory range of this slice must be contained within a single
-    // allocation! Slices can never span across multiple allocations.
-    //
-    // Contract from `slice::from_raw_parts_mut`: `data` must point to `len` consecutive properly
-    // initialized values of type `T`.
-    //
-    // Contract from `slice::from_raw_parts_mut`: The memory referenced by the returned slice must
-    // not be accessed through any other pointer (not derived from the return value) for the
-    // duration of lifetime `'a`. Both read and write accesses are forbidden.
-    //
-    // Contract from `slice::from_raw_parts_mut`: The total size `len * size_of::<T>()` of the slice
-    // must be no larger than `isize::MAX`, and adding that size to `data` must not "wrap around"
-    // the address space. See the safety documentation of `pointer::offset`.
-    //
-    // Evidence: `T` is `u8`, so the pointer is aligned, and the size is `STEP_TABLE_SIZE` bytes,
-    // which is the read-write allocation of `allocate_pages_low` at `generator.buffer`, so it is
-    // non-null and fits an `isize`. It is initialized, as it was filled with 0xcc above.
-    // `generator.buffer` is not used to access it until `buffer` is last used, by `resolve`.
-    let buffer = unsafe {
-        std::slice::from_raw_parts_mut(generator.buffer, InterpreterGenerator::STEP_TABLE_SIZE)
-    };
-    generator.relocs.resolve(buffer, Some(base_addr as usize));
-
-    #[cfg(feature = "codegen-debug")]
-    let step_lens = step_lens.into_boxed_slice();
-    #[cfg(all(feature = "codegen-debug", target_os = "linux"))]
-    super::debug::finish_interpreter(code_record, version, generator.buffer, &step_lens);
-
-    // SAFETY:
-    //
-    // Contract from `protect_pages`: These pages must be of an allocation that the caller owns.
-    //
-    // Contract from `protect_pages`: While `permissions` apply, nothing may access these pages in a
-    // way that `permissions` do not allow.
-    //
-    // Evidence: the pages are the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes,
-    // which `generator` made, and which the interpreter keeps forever. `buffer` is not used after
-    // this, and the steps are only executed, and read by `codegen::debug`, afterwards.
-    unsafe {
-        protect_pages(
-            generator.buffer,
-            InterpreterGenerator::STEP_TABLE_SIZE,
-            PagePermissions::ReadExecute,
-        )
-    }
-    .expect("failed to make the interpreter executable");
-    Interpreter {
-        buffer: generator.buffer,
-        #[cfg(feature = "codegen-debug")]
-        step_lens,
-    }
+    // Before dispatching the next instruction, check what the JIT does with the meter
+    // checkpoints and the `execution_overrun` template, in the order of `Interpreter::step`.
+    // `meter` and the limit are both the end of the last instruction that may be executed.
+    let overrun = out.new_dynamic_label();
+    x64asm!(out
+        ; cmp Rq(next_insn), RMETER
+        ; jae ->sig_meter_exceeded
+        ; cmp Rq(next_insn), rbp => Frame[BYTE -1].text_section_limit
+        ; jae BYTE =>overrun
+        ; movzx RTEMP, WORD [ BYTE to_last + RINSN ]
+        ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
+        ; lea RTEMP, [ DWORD base_addr + RTEMP ]
+        ; add RINSN, BYTE size
+        ; jmp RTEMP
+        ; =>overrun
+        ; lea RTEMP, [ BYTE size + RINSN ]
+        ;; terminate(out, SIG_EXECUTION_OVERRUN)
+    );
 }
 
 /// The state of an execution. `SupportingCode::entry_point` copies it right below its frame
@@ -1374,10 +1011,10 @@ struct Frame {
 ///
 /// `jit` is the `pc_section` and the machine code (in executable memory) of the JIT output for the
 /// `executable`, or `None` to interpret it.
-pub fn enter<C: crate::vm::ContextObject>(
+pub(super) fn enter<C: ContextObject>(
     executable: &Executable<C>,
     jit: Option<(&[u32], *const u8)>,
-    vm: &mut crate::vm::EbpfVm<C>,
+    vm: &mut EbpfVm<C>,
 ) {
     let version = executable.get_sbpf_version();
     let (bpf_vm_addr, bpf) = executable.get_text_bytes();
@@ -1394,11 +1031,11 @@ pub fn enter<C: crate::vm::ContextObject>(
             let starting_insn = bpf.as_chunks::<{ ebpf::INSN_SIZE }>().0[pc];
             let opcode = TemplateOpcode::of(u64::from_le_bytes(starting_insn));
             (
-                interpreter_step(version, opcode) as usize,
+                generate::interpreter_step(version, opcode) as usize,
                 bpf.as_ptr()
                     .wrapping_add(pc.wrapping_add(1).wrapping_mul(ebpf::INSN_SIZE)),
                 std::ptr::null(),
-                interpreter(version).buffer.cast_const(),
+                generate::interpreter(version).buffer.cast_const(),
             )
         }
     };
@@ -1509,22 +1146,4 @@ pub fn enter<C: crate::vm::ContextObject>(
     let last_pc = last_pc_address.wrapping_sub(bpf.as_ptr() as u64)
         / const { NonZeroU64::new(ebpf::INSN_SIZE as u64).unwrap() };
     finish_execution(vm, exit_code as i8, remaining, r0, last_pc);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Generating the templates panics if any of them needs more than `MAX_RELOCATIONS`, but we
-    /// want this number to also be the lowest possible as well.
-    #[test]
-    fn templates_fit_max_relocations() {
-        for version in [SBPFVersion::V0, SBPFVersion::V3, SBPFVersion::V4] {
-            let templates = jit_templates(version);
-            assert!(templates
-                .layouts
-                .iter()
-                .any(|layout| usize::from(layout.num_relocations) == MAX_RELOCATIONS));
-        }
-    }
 }

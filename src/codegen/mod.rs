@@ -8,7 +8,18 @@
 #[cfg(all(feature = "codegen-debug", target_arch = "x86_64"))]
 pub mod debug;
 #[cfg(target_arch = "x86_64")]
-pub mod x64;
+mod x64;
+#[cfg(target_arch = "x86_64")]
+use x64 as arch;
+
+#[cfg(target_arch = "x86_64")]
+mod generate;
+#[cfg(target_arch = "x86_64")]
+use arch::{TemplateRelocation, TemplateRelocationKind, MAX_RELOCATIONS};
+#[cfg(target_arch = "x86_64")]
+pub use generate::jit_templates;
+#[cfg(target_arch = "x86_64")]
+use generate::{Reg, TemplateBuilder, TemplateOpcode};
 
 use crate::ebpf;
 use crate::elf::Executable;
@@ -16,22 +27,10 @@ use crate::error::{EbpfError, ProgramResult};
 pub use crate::program::JitProgram;
 use crate::program::SBPFVersion;
 use crate::vm::{ContextObject, EbpfVm};
-use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
-use dynasmrt::relocations::{Relocation, RelocationKind};
-use dynasmrt::{AssemblyOffset, DynamicLabel};
 use rand::rngs::SmallRng;
 use rand::{thread_rng, Rng, RngCore, SeedableRng};
-use std::convert::{TryFrom, TryInto};
+use std::convert::TryInto;
 use std::num::NonZeroU64;
-
-/// Size of the instruction with the opcode `op`, in bytes.
-const fn insn_size(op: u8) -> usize {
-    if op == ebpf::LD_DW_IMM {
-        2 * ebpf::INSN_SIZE
-    } else {
-        ebpf::INSN_SIZE
-    }
-}
 
 const SIG_INVALID_INSN: i8 = -1;
 const SIG_EXCEEDED_MAX_INSTRUCTIONS: i8 = -2;
@@ -93,7 +92,7 @@ fn finish_execution<C: ContextObject>(
 #[cfg(target_arch = "x86_64")]
 /// Interpret `executable`, starting at `vm.registers[11]`.
 pub fn interpret<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
-    x64::enter(executable, None, vm)
+    arch::enter(executable, None, vm)
 }
 
 impl JitProgram {
@@ -103,7 +102,7 @@ impl JitProgram {
         executable: &Executable<C>,
         vm: &mut EbpfVm<C>,
     ) {
-        x64::enter(
+        arch::enter(
             executable,
             Some((self.pc_section(), self.text_section().as_ptr())),
             vm,
@@ -111,412 +110,7 @@ impl JitProgram {
     }
 }
 
-/// A BPF register.
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Reg(u8);
-
-impl Reg {
-    /// The number of the BPF registers.
-    const COUNT: usize = 11;
-    const ALL: [Reg; Self::COUNT] = const {
-        let mut out = [Reg(0); Self::COUNT];
-        let mut i = 0;
-        while i < Self::COUNT {
-            out[i] = Reg(i as u8);
-            i += 1;
-        }
-        out
-    };
-
-    /// `None` if there's no such register.
-    const fn new(number: u8) -> Option<Self> {
-        if (number as usize) < Self::COUNT {
-            Some(Reg(number))
-        } else {
-            None
-        }
-    }
-}
-
-/// 16 bits of a BPF instruction: the opcode and registers.
-///
-/// The JIT templates and the interpreter steps use this part of the instruction to dispatch to the
-/// handlers/templates.
-#[derive(Clone, Copy)]
-#[repr(transparent)]
-struct TemplateOpcode(u16);
-
-impl TemplateOpcode {
-    const COUNT: usize = 1 + u16::MAX as usize;
-    /// Of the instruction `insn`.
-    const fn of(insn: u64) -> Self {
-        Self(insn as u16)
-    }
-    /// Iterator over all instructions in order of the dispatch table.
-    fn all() -> impl Iterator<Item = Self> {
-        (0..=u16::MAX).map(Self)
-    }
-    const fn index(self) -> usize {
-        self.0 as usize
-    }
-    const fn op(self) -> u8 {
-        self.0 as u8
-    }
-    /// The destination register field.
-    const fn dst(self) -> Option<Reg> {
-        Reg::new((self.0 >> 8 & 0xf) as u8)
-    }
-    /// The source register field.
-    const fn src(self) -> Option<Reg> {
-        Reg::new((self.0 >> 12) as u8)
-    }
-}
-
-/// Every template reserves this many relocations, so keep it at the maximum that any template
-/// needs (`templates_fit_max_relocations` checks both directions).
-/// The tracer's prelude takes another one.
-const MAX_RELOCATIONS: usize = if cfg!(feature = "tracer") { 4 } else { 3 };
-
-/// Generates a template into the parts of `JitTemplates`.
-struct TemplateBuilder<'a, const SIZE: usize> {
-    layout: &'a mut TemplateLayout,
-    code: &'a mut [u8; SIZE],
-    relocations: &'a mut [TemplateRelocation; MAX_RELOCATIONS],
-}
-
-impl<const SIZE: usize> TemplateBuilder<'_, SIZE> {
-    fn code_mut(&mut self) -> &mut [u8] {
-        &mut self.code[..self.layout.len()]
-    }
-
-    /// Add the relocation `dynasm` reported with `patch` at `location`, which is the current end
-    /// of the code.
-    fn add_relocation<R: Relocation>(
-        &mut self,
-        kind: TemplateRelocationKind,
-        location: usize,
-        patch: PatchFields<R>,
-    ) {
-        let (relocation, addend) = TemplateRelocation::new(kind, location, patch);
-        let field = usize::from(relocation.field);
-        self.code_mut()[field..field.wrapping_add(4)].copy_from_slice(&addend.to_le_bytes());
-        let slot = self
-            .relocations
-            .get_mut(usize::from(self.layout.num_relocations))
-            .expect("template needs more relocations than MAX_RELOCATIONS");
-        *slot = relocation;
-        self.layout.num_relocations = self.layout.num_relocations.checked_add(1).unwrap();
-    }
-
-    #[track_caller]
-    fn extend(&mut self, buffer: &[u8]) {
-        for &byte in buffer {
-            self.push(byte);
-        }
-    }
-
-    fn offset(&self) -> usize {
-        self.layout.len()
-    }
-
-    #[track_caller]
-    fn push(&mut self, byte: u8) {
-        self.code[self.layout.len()] = byte;
-        self.layout.bytes = self.layout.bytes.checked_add(1).unwrap();
-    }
-}
-
-/// Relocations against dynamic labels defined within the code being generated.
-///
-/// These are resolved as soon as the code generation completes: for JIT that's when the template
-/// is finalized, for the interpreter that's once all the steps have been generated.
-struct LabelRelocs<R: Relocation> {
-    labels: LabelRegistry,
-    relocs: RelocRegistry<R>,
-}
-
-impl<R: Relocation + Copy> LabelRelocs<R> {
-    fn new() -> Self {
-        Self {
-            labels: LabelRegistry::new(),
-            relocs: RelocRegistry::new(),
-        }
-    }
-
-    fn new_dynamic_label(&mut self) -> DynamicLabel {
-        self.labels.new_dynamic_label()
-    }
-
-    fn dynamic_label(&mut self, id: DynamicLabel, at: usize) {
-        self.labels.define_dynamic(id, AssemblyOffset(at)).unwrap()
-    }
-
-    fn dynamic_reloc(&mut self, at: usize, id: DynamicLabel, patch: PatchFields<R>) {
-        self.relocs.add_dynamic(id, patch.at(at));
-    }
-
-    /// Patch all the recorded relocations into `buffer` and reset the label state.
-    ///
-    /// `buf_addr` is the address at which `buffer` will reside during execution. `None` means
-    /// that the code is position independent and will get copied elsewhere, in which case only the
-    /// relative relocations are supported.
-    fn resolve(&mut self, buffer: &mut [u8], buf_addr: Option<usize>) {
-        for (loc, id) in self.relocs.take_dynamics() {
-            if buf_addr.is_none() {
-                assert!(
-                    matches!(loc.relocation.kind(), RelocationKind::Relative),
-                    "position independent code may only contain relative label references"
-                );
-            }
-            let target = self.labels.resolve_dynamic(id).unwrap();
-            let range = loc.range(0);
-            loc.patch(&mut buffer[range], buf_addr.unwrap_or(0), target.0)
-                .expect("impossible relocation");
-        }
-        self.labels.clear();
-    }
-}
-
-/// Relocation parameters as produced by `dynasm`, sans the location.
-#[derive(Clone, Copy)]
-struct PatchFields<R> {
-    target_offset: isize,
-    field_offset: u8,
-    ref_offset: u8,
-    relocation: R,
-}
-
-impl<R: Relocation + Copy> PatchFields<R> {
-    fn new(target_offset: isize, field_offset: u8, ref_offset: u8, kind: u8) -> Self {
-        Self {
-            target_offset,
-            field_offset,
-            ref_offset,
-            relocation: R::from_encoding(kind),
-        }
-    }
-
-    /// `at` is the offset right past the instruction containing the field to patch (i.e. the
-    /// offset at the time `dynasm` reports the relocation.)
-    fn at(self, at: usize) -> PatchLoc<R> {
-        PatchLoc::new(
-            AssemblyOffset(at),
-            self.target_offset,
-            self.field_offset,
-            self.ref_offset,
-            self.relocation,
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-#[repr(u8)]
-enum TemplateRelocationKind {
-    /// The JIT holds a pointer to the second instruction of the eBPF program in `insn`,
-    /// whereas the templates default to addressing where `insn` is updated to point to right
-    /// after the current instruction. This relocation adds the offset of the current instruction
-    /// to the field.
-    InsnOffset,
-    /// When BPF instruction represents a branch, and the branch is taken, the control flow has to
-    /// transfer to the machine code representing the target BPF instruction's code. Offset to this
-    /// machine code is what this relocation must overwrite based on the BPF instruction being
-    /// templated.
-    ///
-    /// The field `TAKEN_BRANCH_METER_ADJUSTMENT` bytes before it, which `bpf_taken_branch` always
-    /// emits there, gets the offset (in bytes) from the instruction following the branch to the
-    /// branch target.
-    TakenBranch,
-    /// For `jmp ->sig_meter_exceeded`.
-    SigMeterExceeded,
-    /// For `jmp ->sig_invalid_insn`.
-    SigInvalidInsn,
-}
-
-/// A relocation that can only be resolved once the template is instantiated for a specific eBPF
-/// instruction at a specific location: a 32-bit field in the template, which holds the addend, to
-/// which the target of the relocation is added.
-#[derive(Clone, Copy, Debug)]
-struct TemplateRelocation {
-    /// Offset of the field within the template.
-    field: u8,
-    kind: TemplateRelocationKind,
-}
-
-impl TemplateRelocation {
-    /// For the unused entries, which `JitTemplates::emit` does not apply.
-    const UNUSED: Self = Self {
-        field: 0,
-        kind: TemplateRelocationKind::InsnOffset,
-    };
-
-    /// `patch` is a relocation reported by `dynasm` at `location` within the template. Also
-    /// returns the addend for the field. For relative relocations, it accounts for where the field
-    /// is in the template, but not for where the template is in the output.
-    fn new<R: Relocation>(
-        kind: TemplateRelocationKind,
-        location: usize,
-        patch: PatchFields<R>,
-    ) -> (Self, i32) {
-        let relative = match kind {
-            TemplateRelocationKind::TakenBranch
-            | TemplateRelocationKind::SigMeterExceeded
-            | TemplateRelocationKind::SigInvalidInsn => true,
-            TemplateRelocationKind::InsnOffset => false,
-        };
-        assert!(
-            match patch.relocation.kind() {
-                RelocationKind::Relative => relative,
-                RelocationKind::Absolute => !relative,
-                RelocationKind::RelToAbs | RelocationKind::AbsToRel => false,
-            },
-            "unsupported template relocation"
-        );
-        assert_eq!(
-            patch.relocation.size(),
-            4,
-            "unsupported template relocation"
-        );
-        let reference = if relative {
-            location.checked_sub(usize::from(patch.ref_offset)).unwrap()
-        } else {
-            0
-        };
-        let field = location
-            .checked_sub(usize::from(patch.field_offset))
-            .unwrap();
-        // The template ends no earlier than `location`, so the field is within it. `apply` relies
-        // on this.
-        assert!(
-            field.checked_add(4).unwrap() <= location,
-            "unsupported template relocation"
-        );
-        // `apply` also patches the meter adjustment ahead of the field.
-        if let TemplateRelocationKind::TakenBranch = kind {
-            assert!(
-                field >= TAKEN_BRANCH_METER_ADJUSTMENT,
-                "unsupported template relocation"
-            );
-        }
-        let addend =
-            i32::try_from(patch.target_offset.checked_sub(reference as isize).unwrap()).unwrap();
-        let relocation = Self {
-            field: u8::try_from(field).unwrap(),
-            kind,
-        };
-        (relocation, addend)
-    }
-
-    /// Patch the relocation into `out`, a copy of `template` instantiated as `at` describes.
-    #[inline(always)]
-    fn apply<const SIZE: usize>(
-        &self,
-        template: &[u8; SIZE],
-        out: &mut [u8; SIZE],
-        at: &Instantiation,
-    ) {
-        // Computed in `i64`, to which all the inputs convert losslessly, and in which none of the
-        // arithmetic below can overflow: the positions in the output are below `NOOP_DUE` (see
-        // `analyze`), as are the `pc_section` entries, `pc * INSN_SIZE` is an offset into the text
-        // section, and `off` and the addends are at most 32 bits.
-        let target = match self.kind {
-            TemplateRelocationKind::InsnOffset => {
-                (at.pc as i64).wrapping_mul(ebpf::INSN_SIZE as i64)
-            }
-            TemplateRelocationKind::TakenBranch => {
-                let adjustment = i64::from(at.off).wrapping_mul(ebpf::INSN_SIZE as i64);
-                // At least `TAKEN_BRANCH_METER_ADJUSTMENT` (see `new`).
-                let field = usize::from(self.field).wrapping_sub(TAKEN_BRANCH_METER_ADJUSTMENT);
-                add_to_field(template, out, field, adjustment);
-                // The verifier rejects invalid jump offsets, but doing this defensive thing is
-                // faster anyway.
-                let target = at
-                    .pc
-                    .checked_add_signed(isize::from(at.off).wrapping_add(1))
-                    .and_then(|target_pc| at.pc_section.get(target_pc))
-                    .copied()
-                    .unwrap_or(JitTemplates::<SIZE>::INVALID_CALL_TARGET);
-                i64::from(target & !PADDING_DUE).wrapping_sub(at.position as i64)
-            }
-            TemplateRelocationKind::SigMeterExceeded => {
-                (at.sig_meter_exceeded as i64).wrapping_sub(at.position as i64)
-            }
-            TemplateRelocationKind::SigInvalidInsn => {
-                (at.sig_invalid_insn as i64).wrapping_sub(at.position as i64)
-            }
-        };
-        add_to_field(template, out, usize::from(self.field), target);
-    }
-}
-
-/// Set the 32-bit field of a relocation at `field` in `out` to `value` plus what it holds in
-/// `template`.
-///
-/// Reads `template` rather than `out`, which was just written with wider stores that a load of
-/// the field couldn't be forwarded from.
-///
-/// `field` must be a field of a relocation of the template, or the meter adjustment of
-/// `TemplateRelocationKind::TakenBranch`.
-#[inline(always)]
-fn add_to_field<const SIZE: usize>(
-    template: &[u8; SIZE],
-    out: &mut [u8; SIZE],
-    field: usize,
-    value: i64,
-) {
-    debug_assert!(field.wrapping_add(4) <= SIZE);
-    // SAFETY:
-    //
-    // Contract from `<*const u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed on
-    // mathematical integers (without "wrapping around"), must fit in an `isize`.
-    //
-    // Contract from `<*const u8>::add`: If the computed offset is non-zero, then `self` must be
-    // derived from a pointer to some allocation, and the entire memory range between `self` and the
-    // result must be in bounds of that allocation. In particular, this range must not "wrap around"
-    // the edge of the address space.
-    //
-    // Contract from `<*const i32>::read_unaligned`: See `ptr::read_unaligned` for safety concerns
-    // and examples.
-    //
-    // Contract from `ptr::read_unaligned`: `src` must be valid for reads.
-    //
-    // Contract from `ptr::read_unaligned`: `src` must point to a properly initialized value of type
-    // `T`.
-    //
-    // Contract from `<*mut u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed on
-    // mathematical integers (without "wrapping around"), must fit in an `isize`.
-    //
-    // Contract from `<*mut u8>::add`: If the computed offset is non-zero, then `self` must be
-    // derived from a pointer to some allocation, and the entire memory range between `self` and the
-    // result must be in bounds of that allocation. In particular, this range must not "wrap around"
-    // the edge of the address space.
-    //
-    // Contract from `<*mut i32>::write_unaligned`: See `ptr::write_unaligned` for safety concerns
-    // and examples.
-    //
-    // Contract from `ptr::write_unaligned`: `dst` must be valid for writes.
-    //
-    // Evidence: `TemplateRelocation::new` asserts that a field ends within its template, so `field
-    // + 4` is at most the length of the template, and that the meter adjustment of a taken branch,
-    // `TAKEN_BRANCH_METER_ADJUSTMENT` bytes before its field, is within it too. That is at most
-    // `SIZE`, so `field` is an offset within the arrays `template` and `out`, which fits an
-    // `isize`, and the 4 bytes at it are within either array. They are initialized bytes, and any 4
-    // of them are a valid `i32`. `out` is borrowed mutably, so writing to it is allowed.
-    unsafe {
-        let addend = template.as_ptr().add(field).cast::<i32>().read_unaligned();
-        debug_assert!(
-            i32::try_from(i64::from(addend).wrapping_add(value)).is_ok(),
-            "impossible relocation"
-        );
-        let field = out.as_mut_ptr().add(field).cast::<i32>();
-        field.write_unaligned(addend.wrapping_add(value as i32));
-    }
-}
-
-/// Distance from the meter adjustment field of a taken branch to its jump field, see
-/// `TemplateRelocationKind::TakenBranch`: the `jmp rel32` follows the `add r64, imm32`.
-const TAKEN_BRANCH_METER_ADJUSTMENT: usize = 5;
-
-/// Where a template is instantiated, for `TemplateRelocation::apply`.
+/// Where a template is instantiated, for `arch::TemplateRelocation::apply`.
 struct Instantiation<'a> {
     /// The offsets in the output of the instructions.
     pc_section: &'a [u32],
@@ -575,6 +169,14 @@ enum AuxTemplate {
 
 impl AuxTemplate {
     const COUNT: usize = 6;
+    const ALL: [Self; Self::COUNT] = [
+        Self::ExecutionOverrun,
+        Self::InvalidCallTarget,
+        Self::SigInvalidInsn,
+        Self::SigMeterExceeded,
+        Self::Noop,
+        Self::MeterCheckpoint,
+    ];
     /// Emitted at the start of the output, in this order.
     const SHARED: [Self; 3] = [
         Self::InvalidCallTarget,
