@@ -75,6 +75,8 @@ jobs:
     name: Coverage
     needs: test
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
     env:
       RUSTUP_TOOLCHAIN: nightly
     steps:
@@ -97,7 +99,7 @@ jobs:
       with:
         files: coverage.info
         disable_search: true
-        token: ${{ secrets.CODECOV_TOKEN }}
+        use_oidc: true
         fail_ci_if_error: true
 
   release:
