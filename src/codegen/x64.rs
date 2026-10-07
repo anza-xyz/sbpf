@@ -565,9 +565,9 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             bpf_validate_meter(out);
             x64asm!(out
                 ; add RMETER, BYTE ebpf::INSN_SIZE as i8
-                ; mov Rd(dst), DWORD REL32_IMM
-                ; mov WTEMP, DWORD [ DWORD 4i32 + RINSN ]
-                ;; out.template_reloc(TemplateRelocationKind::InsnOffset, 4, 4, 0)
+                // `RTEMP` points at the second half.
+                ; mov Rd(dst), DWORD [RTEMP - 4]
+                ; mov WTEMP, DWORD [RTEMP + 4]
                 ; shl RTEMP, 32
                 ; or Rq(dst), RTEMP
             )
