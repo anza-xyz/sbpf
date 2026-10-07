@@ -113,8 +113,7 @@ impl<const SIZE: usize> TemplateBuilder<'_, SIZE> {
 
 /// Relocations against dynamic labels defined within the code being generated.
 ///
-/// These are resolved as soon as the code generation completes: for JIT that's when the template
-/// is finalized, for the interpreter that's once all the steps have been generated.
+/// These are resolved once generation of machine code for the BPF instruction is complete.
 struct LabelRelocs<R: Relocation> {
     labels: LabelRegistry,
     relocs: RelocRegistry<R>,
@@ -140,22 +139,20 @@ impl<R: Relocation + Copy> LabelRelocs<R> {
         self.relocs.add_dynamic(id, patch.at(at));
     }
 
-    /// Patch all the recorded relocations into `buffer` and reset the label state.
+    /// Patch all the recorded relocations into `code`, the code generated from offset `start` on,
+    /// and reset the label state.
     ///
-    /// `buf_addr` is the address at which `buffer` will reside during execution. `None` means
-    /// that the code is position independent and will get copied elsewhere, in which case only the
-    /// relative relocations are supported.
-    fn resolve(&mut self, buffer: &mut [u8], buf_addr: Option<usize>) {
+    /// The labels do not outlive the code of an instruction, which gets copied elsewhere, so only
+    /// the relative relocations are supported.
+    fn resolve(&mut self, code: &mut [u8], start: usize) {
         for (loc, id) in self.relocs.take_dynamics() {
-            if buf_addr.is_none() {
-                assert!(
-                    matches!(loc.relocation.kind(), RelocationKind::Relative),
-                    "position independent code may only contain relative label references"
-                );
-            }
+            assert!(
+                matches!(loc.relocation.kind(), RelocationKind::Relative),
+                "position independent code may only contain relative label references"
+            );
             let target = self.labels.resolve_dynamic(id).unwrap();
-            let range = loc.range(0);
-            loc.patch(&mut buffer[range], buf_addr.unwrap_or(0), target.0)
+            let range = loc.range(start);
+            loc.patch(&mut code[range], 0, target.0)
                 .expect("impossible relocation");
         }
         self.labels.clear();
@@ -263,8 +260,8 @@ struct JITGenerator<'a> {
     /// Temporary relocations within the code that will be resolved before the template is
     /// finalized.
     ///
-    /// Template can have further relocations after finalization, however those relocations may only
-    /// be specific to the eBPF instruction being instantiated.
+    /// Template can have further relocations after finalization, however those relocations may
+    /// only be specific to the eBPF instruction being instantiated.
     relocs: LabelRelocs<arch::Relocation>,
 }
 
@@ -298,7 +295,7 @@ impl<'a> JITGenerator<'a> {
     /// Resolve all the relocations that can be resolved without knowing the specific eBPF
     /// instruction.
     fn finalize(mut self) {
-        self.relocs.resolve(self.template.code_mut(), None);
+        self.relocs.resolve(self.template.code_mut(), 0);
     }
 }
 
@@ -596,12 +593,12 @@ impl Generator for InterpreterGenerator {
         // slice must be no larger than `isize::MAX`, and adding that size to `data` must not "wrap
         // around" the address space. See the safety documentation of `pointer::offset`.
         //
-        // Evidence: `T` is `u8`, so the pointer is aligned, and the size is that of the field, which
-        // is within the instruction that `extend` has just written into the `STEP_TABLE_SIZE` bytes
-        // of the allocation of `allocate_pages_low` at `buffer`, so the offset is within it and
-        // fits an `isize`. `generate_interpreter` filled the allocation with `arch::TRAP_FILL`, so
-        // it is initialized, and it is read-write until `generate_interpreter` protects it after
-        // the generation.
+        // Evidence: `T` is `u8`, so the pointer is aligned, and the size is that of the field,
+        // which is within the instruction that `extend` has just written into the
+        // `STEP_TABLE_SIZE` bytes of the allocation of `allocate_pages_low` at `buffer`, so
+        // the offset is within it and fits an `isize`. `generate_interpreter` filled the
+        // allocation with `arch::TRAP_FILL`, so it is initialized, and it is read-write
+        // until `generate_interpreter` protects it after the generation.
         // Nothing else accesses it while the slice lives, which ends at the end of this function.
         let field =
             unsafe { std::slice::from_raw_parts_mut(self.buffer.add(field.start), field.len()) };
@@ -721,40 +718,46 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
             "step for {:#x} is too long",
             opcode.0
         );
+        // SAFETY:
+        //
+        // Contract from `<*mut u8>::add`: The offset in bytes, `count * size_of::<T>()`, computed
+        // on mathematical integers (without "wrapping around"), must fit in an `isize`.
+        //
+        // Contract from `<*mut u8>::add`: If the computed offset is non-zero, then `self` must be
+        // derived from a pointer to some allocation, and the entire memory range between `self` and
+        // the result must be in bounds of that allocation. In particular, this range must not "wrap
+        // around" the edge of the address space.
+        //
+        // Contract from `slice::from_raw_parts_mut`: `data` must be non-null, valid for both reads
+        // and writes for `len * size_of::<T>()` many bytes, and it must be properly aligned. This
+        // means in particular: The entire memory range of this slice must be contained within a
+        // single allocation! Slices can never span across multiple allocations.
+        //
+        // Contract from `slice::from_raw_parts_mut`: `data` must point to `len` consecutive
+        // properly initialized values of type `T`.
+        //
+        // Contract from `slice::from_raw_parts_mut`: The memory referenced by the returned slice
+        // must not be accessed through any other pointer (not derived from the return value) for
+        // the duration of lifetime `'a`. Both read and write accesses are forbidden.
+        //
+        // Contract from `slice::from_raw_parts_mut`: The total size `len * size_of::<T>()` of the
+        // slice must be no larger than `isize::MAX`, and adding that size to `data` must not "wrap
+        // around" the address space. See the safety documentation of `pointer::offset`.
+        //
+        // Evidence: `T` is `u8`, so the pointer is aligned, and the size is `step_len` bytes. The
+        // step is within the `STEP_TABLE_SIZE` bytes of the allocation of `allocate_pages_low` at
+        // `generator.buffer`, as `extend` asserts for the code written into it, so the offset is
+        // within it and fits an `isize`. It is initialized, as the allocation was filled with
+        // `arch::TRAP_FILL` above, and it is read-write until it is protected below. Nothing else
+        // accesses it while the slice lives, which ends with `resolve`.
+        let step =
+            unsafe { std::slice::from_raw_parts_mut(generator.buffer.add(step_start), step_len) };
+        generator.relocs.resolve(step, step_start);
         #[cfg(feature = "codegen-debug")]
         {
             step_lens[opcode.index()] = step_len.try_into().unwrap();
         }
     }
-
-    // SAFETY:
-    //
-    // Contract from `slice::from_raw_parts_mut`: `data` must be non-null, valid for both reads and
-    // writes for `len * size_of::<T>()` many bytes, and it must be properly aligned. This means in
-    // particular: The entire memory range of this slice must be contained within a single
-    // allocation! Slices can never span across multiple allocations.
-    //
-    // Contract from `slice::from_raw_parts_mut`: `data` must point to `len` consecutive properly
-    // initialized values of type `T`.
-    //
-    // Contract from `slice::from_raw_parts_mut`: The memory referenced by the returned slice must
-    // not be accessed through any other pointer (not derived from the return value) for the
-    // duration of lifetime `'a`. Both read and write accesses are forbidden.
-    //
-    // Contract from `slice::from_raw_parts_mut`: The total size `len * size_of::<T>()` of the slice
-    // must be no larger than `isize::MAX`, and adding that size to `data` must not "wrap around"
-    // the address space. See the safety documentation of `pointer::offset`.
-    //
-    // Evidence: `T` is `u8`, so the pointer is aligned, and the size is `STEP_TABLE_SIZE` bytes,
-    // which is the read-write allocation of `allocate_pages_low` at `generator.buffer`, so it is
-    // non-null and fits an `isize`. It is initialized, as it was filled with `arch::TRAP_FILL`
-    // above. `generator.buffer` is not used to access it until `buffer` is last used, by `resolve`.
-    let buffer = unsafe {
-        std::slice::from_raw_parts_mut(generator.buffer, InterpreterGenerator::STEP_TABLE_SIZE)
-    };
-    generator
-        .relocs
-        .resolve(buffer, Some(generator.buffer as usize));
 
     #[cfg(feature = "codegen-debug")]
     let step_lens = step_lens.into_boxed_slice();
@@ -769,8 +772,8 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
     // way that `permissions` do not allow.
     //
     // Evidence: the pages are the allocation of `allocate_pages_low` of `STEP_TABLE_SIZE` bytes,
-    // which `generator` made, and which the interpreter keeps forever. `buffer` is not used after
-    // this, and the steps are only executed, and read by `codegen::debug`, afterwards.
+    // which `generator` made, and which the interpreter keeps forever. The steps are only executed,
+    // and read by `codegen::debug`, afterwards.
     unsafe {
         protect_pages(
             generator.buffer,
