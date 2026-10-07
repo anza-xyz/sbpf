@@ -1194,6 +1194,10 @@ fn test_err_ldxdw_nomem() {
             "unallocated"
         )),
     );
+}
+
+#[test]
+fn test_err_ldxdw_nomem_capped() {
     // The access violation would only be detected after running out of budget.
     test_interpreter_and_jit_asm!(
         "
@@ -4682,6 +4686,261 @@ fn test_direct_stores() {
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 #[test]
+fn test_jmp32_sbpfv0() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // There is no JMP32 class in SBPFv0, which the verifier rejects, so the program is not
+    // verified.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    let program = [
+        [0xb7, 0x00, 0, 0, 0, 0, 0, 0], // mov64 r0, 0
+        [0xb7, 0x10, 0, 0, 1, 0, 0, 0], // mov64 r1, 1
+        [0x16, 0x01, 1, 0, 1, 0, 0, 0], // jeq32 r1, 1, +1
+        [0xb7, 0x00, 0, 0, 1, 0, 0, 0], // mov64 r0, 1
+        [0x95, 0, 0, 0, 0, 0, 0, 0],    // exit
+    ]
+    .concat();
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        &program,
+        Arc::new(BuiltinProgram::new_loader(config)),
+        SBPFVersion::V0,
+        FunctionRegistry::default(),
+    )
+    .unwrap();
+    executable.dynasm_compile().unwrap();
+    for (name, mode) in [
+        ("interpreter", ExecutionMode::Interpreted),
+        ("dynasm jit", ExecutionMode::Jit),
+        ("dynasm interpreter", ExecutionMode::DynasmInterpreted),
+    ] {
+        let mut context_object = TestContextObject::new(10);
+        create_vm!(
+            vm,
+            &executable,
+            &mut context_object,
+            stack,
+            heap,
+            vec![],
+            None
+        );
+        let mut mode = mode;
+        let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+        let (_, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+        let expected = ProgramResult::Err(EbpfError::UnsupportedInstruction);
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "{name}");
+    }
+}
+
+#[test]
+fn test_lddw_exceeding_budget() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // `lddw` counts as one instruction over two slots, which the meter must not count until the
+    // instruction is within the budget: the pc of `ExceededMaxInstructions` is that of the first
+    // instruction past it.
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+        for source in [
+            "
+            lddw r0, 1
+            exit",
+            "
+            mov r0, 0
+            mov r1, 0
+            lddw r2, 1
+            exit",
+            "
+            mov r0, 0
+            lddw r1, 1
+            lddw r2, 2
+            exit",
+        ] {
+            let executable = assemble::<TestContextObject>(
+                source,
+                Arc::new(BuiltinProgram::new_loader(config.clone())),
+            )
+            .unwrap();
+            executable.verify::<RequisiteVerifier>().unwrap();
+            executable.dynasm_compile().unwrap();
+            for budget in 0..5 {
+                let mut results = Vec::new();
+                for (name, mode) in [
+                    ("interpreter", ExecutionMode::Interpreted),
+                    ("dynasm jit", ExecutionMode::Jit),
+                    ("dynasm interpreter", ExecutionMode::DynasmInterpreted),
+                ] {
+                    let mut context_object = TestContextObject::new(budget);
+                    create_vm!(
+                        vm,
+                        &executable,
+                        &mut context_object,
+                        stack,
+                        heap,
+                        vec![],
+                        None
+                    );
+                    let mut mode = mode;
+                    let mut call_frames =
+                        vec![CallFrame::default(); Config::default().max_call_depth];
+                    let (count, result) =
+                        vm.execute_program(&executable, &mut mode, &mut call_frames);
+                    results.push((count, format!("{result:?}"), vm.registers[11]));
+                    assert_eq!(
+                        results[0],
+                        results[results.len() - 1],
+                        "{name}, {sbpf_version:?}, budget {budget}:{source}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_entrypoint_in_lddw() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // Nothing stops an entrypoint from pointing at the second half of an `lddw`, which the JITs
+    // treat as an invalid jump target. Execution has to fail there as in the interpreter.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
+        ..Config::default()
+    };
+    let program = [
+        [0x18, 0x00, 0, 0, 1, 0, 0, 0], // lddw r0, 1
+        [0x00, 0x00, 0, 0, 0, 0, 0, 0],
+        [0x95, 0, 0, 0, 0, 0, 0, 0], // exit
+    ]
+    .concat();
+    let mut function_registry = FunctionRegistry::default();
+    function_registry
+        .register_function(ebpf::hash_symbol_name(b"entrypoint"), *b"entrypoint", 1)
+        .unwrap();
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        &program,
+        Arc::new(BuiltinProgram::new_loader(config)),
+        SBPFVersion::V0,
+        function_registry,
+    )
+    .unwrap();
+    assert_eq!(executable.get_entrypoint_instruction_offset(), 1);
+    executable.verify::<RequisiteVerifier>().unwrap();
+    executable.dynasm_compile().unwrap();
+    let mut results = Vec::new();
+    for (name, mode) in [
+        ("interpreter", ExecutionMode::Interpreted),
+        ("dynasm interpreter", ExecutionMode::DynasmInterpreted),
+        ("dynasm jit", ExecutionMode::Jit),
+    ] {
+        let mut context_object = TestContextObject::new(10);
+        create_vm!(
+            vm,
+            &executable,
+            &mut context_object,
+            stack,
+            heap,
+            vec![],
+            None
+        );
+        let mut mode = mode;
+        let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+        let (count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+        results.push((count, format!("{result:?}"), vm.registers[11]));
+        assert_eq!(results[0], results[results.len() - 1], "{name}");
+    }
+}
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[test]
+fn test_dynasm_compile_cached() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+        let executable = assemble::<TestContextObject>(
+            "
+            mov64 r0, 0
+            mov64 r1, 0
+            add64 r1, 1
+            call function_foo
+            jlt r1, 10, -3
+            exit
+            function_foo:
+            add64 r0, r1
+            exit",
+            Arc::new(BuiltinProgram::new_loader(config)),
+        )
+        .unwrap();
+        executable.dynasm_compile().unwrap();
+        let mut results = Vec::new();
+        for mode in [ExecutionMode::Interpreted, ExecutionMode::Jit] {
+            let mut context_object = TestContextObject::new(100);
+            create_vm!(
+                vm,
+                &executable,
+                &mut context_object,
+                stack,
+                heap,
+                vec![],
+                None
+            );
+            let mut mode = mode;
+            let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+            let (count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+            results.push((count, format!("{result:?}")));
+        }
+        assert_eq!(results[0], results[1], "{sbpf_version:?}");
+        assert_eq!(results[0].1, format!("{:?}", ProgramResult::Ok(55)));
+    }
+}
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[test]
+fn test_dynasm_insn_bias() {
+    // The program chooses the offsets of its instructions and of its branches, which would end up
+    // as displacements in the machine code if they were not biased by a random amount.
+    let source = "
+        mov64 r0, 0
+        mov64 r1, 0
+        add64 r1, 1
+        add64 r0, 0x12345
+        jlt r1, 10, -3
+        jeq r0, 0, 2
+        lddw r2, 0x1122334455667788
+        exit";
+    for sanitize_user_provided_values in [false, true] {
+        let config = Config {
+            noop_instruction_rate: 0,
+            sanitize_user_provided_values,
+            ..Config::default()
+        };
+        let compile = || {
+            let loader = Arc::new(BuiltinProgram::new_loader(config.clone()));
+            let executable = assemble::<TestContextObject>(source, loader).unwrap();
+            executable.dynasm_compile().unwrap();
+            let program = executable.get_compiled_program().unwrap();
+            program.text_section().to_vec()
+        };
+        let (first, second) = (compile(), compile());
+        // Equal by chance with a probability of 2^-30.
+        assert_eq!(first == second, !sanitize_user_provided_values);
+        test_interpreter_and_jit_asm!(
+            source,
+            config,
+            NO_INPUT,
+            TestContextObject::new(35),
+            ProgramResult::Ok(0x12345 * 10),
+        );
+    }
+}
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[test]
 fn test_max_call_depth_zero() {
     use solana_sbpf::vm::{CallFrame, ExecutionMode};
     // FIXME: The interpreter panics.
@@ -4698,8 +4957,17 @@ fn test_max_call_depth_zero() {
         Arc::new(BuiltinProgram::new_loader(config)),
     )
     .unwrap();
-    executable.jit_compile().unwrap();
-    {
+    for (name, mode) in [
+        ("jit", ExecutionMode::Jit),
+        ("dynasm jit", ExecutionMode::Jit),
+        ("dynasm interpreter", ExecutionMode::DynasmInterpreted),
+    ] {
+        match name {
+            "jit" => executable.jit_compile().unwrap(),
+            "dynasm jit" => executable.dynasm_compile().unwrap(),
+            "dynasm interpreter" => {}
+            _ => unreachable!(),
+        }
         let mut context_object = TestContextObject::new(10);
         create_vm!(
             vm,
@@ -4710,11 +4978,11 @@ fn test_max_call_depth_zero() {
             vec![],
             None
         );
+        let mut mode = mode;
         let mut call_frames = vec![CallFrame::default(); 1];
-        let (_, result) =
-            vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut call_frames);
+        let (_, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
         let expected = ProgramResult::Err(EbpfError::CallDepthExceeded);
-        assert_eq!(format!("{result:?}"), format!("{expected:?}"));
-        assert_eq!(vm.registers[11], 0);
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "{name}");
+        assert_eq!(vm.registers[11], 0, "{name}");
     }
 }

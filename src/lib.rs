@@ -11,6 +11,8 @@
 
 //! Virtual machine for SBPF programs.
 #![warn(missing_docs)]
+// For the long `x64asm!` blocks of `codegen`.
+#![recursion_limit = "1024"]
 #![allow(clippy::literal_string_with_formatting_args)]
 #![deny(clippy::arithmetic_side_effects)]
 #![deny(clippy::ptr_as_ptr)]
@@ -26,6 +28,8 @@ extern crate thiserror;
 pub mod aligned_memory;
 mod asm_parser;
 pub mod assembler;
+#[cfg(target_arch = "x86_64")]
+pub mod codegen;
 #[cfg(feature = "debugger")]
 pub mod debugger;
 pub mod disassembler;
@@ -37,7 +41,6 @@ pub mod insn_builder;
 pub mod interpreter;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 pub mod jit;
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 mod memory_management;
 pub mod memory_region;
 pub mod program;

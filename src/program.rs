@@ -3,10 +3,243 @@ use {
     crate::{
         ebpf,
         elf::ElfError,
+        error::EbpfError,
+        memory_management::{
+            allocate_pages_pooled, free_pages_pooled, get_system_page_size, protect_pages,
+            round_to_page_size, PagePermissions,
+        },
         vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
     },
     std::collections::{btree_map::Entry, BTreeMap},
+    std::ptr::NonNull,
 };
+
+/// The JIT output for a program, in a single pooled allocation.
+pub struct JitProgram {
+    /// Size of the pooled allocation: the page-rounded `pc_section`, then the `text_section`.
+    allocation_size: usize,
+    /// Offset in `text_section` for each BPF instruction.
+    ///
+    /// Pointers rather than `&'static` slices, so that no borrow can outlive the allocation.
+    pc_section: NonNull<[u32]>,
+    /// The machine code.
+    ///
+    /// Before `seal` this is the whole capacity of the code pages.
+    text_section: NonNull<[u8]>,
+    /// Whether `seal` has made the sections read-only.
+    sealed: bool,
+    /// Whether the code was produced by `codegen` rather than by the old `jit::JitCompiler`, which
+    /// makes the two incompatible in how they are entered.
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
+    pub(crate) dynasm: bool,
+    /// For the code produced by jit this is a random value by which some randomzation can be
+    /// applied to user data to prevent e.g. JIT spraying.
+    // FIXME: could be shared with old jit for its own encryption key thing.
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
+    pub(crate) random_key: u32,
+    /// What the debugging aids keep of the code, see `codegen::debug`.
+    #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
+    pub(crate) code_record: Option<crate::codegen::debug::CodeRecord>,
+}
+
+// SAFETY: `JitProgram` owns its allocation like a `Box<[u8]>` would, and only the compiler writes
+// to it, through `&mut self` before `seal`, so before the program is shared.
+unsafe impl Send for JitProgram {}
+// SAFETY: see `Send`.
+unsafe impl Sync for JitProgram {}
+
+impl JitProgram {
+    /// Allocate a program with `pc` zeroed entries in the pc section and room for `code_capacity`
+    /// bytes of machine code.
+    pub fn new(pc: usize, code_capacity: usize) -> Self {
+        let page_size = get_system_page_size();
+        let pc_size = round_to_page_size(pc.saturating_mul(std::mem::size_of::<u32>()), page_size);
+        let text_capacity = round_to_page_size(code_capacity, page_size);
+        // Saturating, so that a nonsensical size fails in the allocator rather than wrapping
+        // around to a small allocation.
+        let (raw, allocation_size) = allocate_pages_pooled(pc_size.saturating_add(text_capacity));
+        let raw = NonNull::new(raw).expect("the pooled allocation is never null");
+        // The allocation is page aligned, and the `pc` words fit within `pc_size`, so the
+        // sections are aligned and disjoint.
+        //
+        // SAFETY:
+        //
+        // Contract from `NonNull::add`: the result must be in bounds of the allocation.
+        // Evidence: the allocation has at least `pc_size + text_capacity` bytes, and the result is
+        // at `pc_size`.
+        let text = unsafe { raw.add(pc_size) };
+        let pc_section = NonNull::slice_from_raw_parts(raw.cast::<u32>(), pc);
+        // The pc section relies on zero-initialization to distinguish unfilled forward-jump
+        // targets from filled backward-jump targets in the old JIT. The pool may hand back
+        // recycled memory, so zero just the pc section here.
+        //
+        // SAFETY:
+        //
+        // Contract from `ptr::write_bytes`: the range must be valid for writes.
+        // Evidence: the `pc` words are within the first `pc_size` bytes of the allocation, which
+        // is read-write memory of the pool, and no reference into it exists yet.
+        unsafe { std::ptr::write_bytes(pc_section.cast::<u32>().as_ptr(), 0, pc) };
+        Self {
+            allocation_size,
+            pc_section,
+            text_section: NonNull::slice_from_raw_parts(text, text_capacity),
+            sealed: false,
+            dynasm: false,
+            random_key: 0,
+            #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
+            code_record: None,
+        }
+    }
+
+    /// Offset in `text_section` for each BPF instruction.
+    pub fn pc_section(&self) -> &[u32] {
+        // SAFETY:
+        //
+        // Contract from `NonNull::as_ref`: the pointer must be convertible to a reference, and the
+        // memory not mutated while the reference lives.
+        // Evidence: `pc_section` is within the allocation, which lives as long as `self`, and is
+        // only written to through `&mut self`.
+        unsafe { self.pc_section.as_ref() }
+    }
+
+    /// The machine code, which is executable.
+    pub fn text_section(&self) -> &[u8] {
+        // SAFETY: as for `pc_section`.
+        unsafe { self.text_section.as_ref() }
+    }
+
+    /// The pc section to fill in, which is empty once the program is sealed.
+    pub fn pc_section_mut(&mut self) -> &mut [u32] {
+        if self.sealed {
+            return &mut [];
+        }
+        // SAFETY:
+        //
+        // Contract from `NonNull::as_mut`: the pointer must be convertible to a reference, and the
+        // memory not accessed through other pointers while the reference lives.
+        // Evidence: the section is read-write as `seal` has not protected it, and initialized as
+        // `new` zeroed it. References into it only come from borrowing `self`, which is
+        // exclusively borrowed here.
+        unsafe { self.pc_section.as_mut() }
+    }
+
+    /// The machine code to fill in, which is empty once the program is sealed.
+    pub fn text_section_mut(&mut self) -> &mut [u8] {
+        if self.sealed {
+            return &mut [];
+        }
+        // SAFETY:
+        //
+        // Contract from `NonNull::as_mut`: as for `pc_section_mut`.
+        // Evidence: the section is read-write as `seal` has not protected it, and initialized as
+        // it is mmapped memory of the pool, where a reused block still holds the bytes written
+        // before. The exclusive borrow of `self` rules out other references.
+        unsafe { self.text_section.as_mut() }
+    }
+
+    /// Make the pages read-only and read-execute, with `text_section` shrunk to the `used` length.
+    ///
+    /// Does nothing if the program is already sealed.
+    pub fn seal(&mut self, used: usize) -> Result<(), EbpfError> {
+        if self.sealed {
+            return Ok(());
+        }
+        if used > self.text_section.len() {
+            return Err(EbpfError::ExhaustedTextSegment(used));
+        }
+        let page_size = get_system_page_size();
+        let pc_size = round_to_page_size(std::mem::size_of_val(self.pc_section()), page_size);
+        let code_size = round_to_page_size(used, page_size);
+        let text = self.text_section.as_ptr().cast::<u8>();
+        // SAFETY:
+        //
+        // Contract from `ptr::add`: the result must be in bounds of the allocation.
+        // Evidence: `used` is at most the length of `text_section`, checked above.
+        let unused = unsafe { text.add(used) };
+
+        // Debugger traps in the unused tail of the last code page.
+        //
+        // SAFETY:
+        //
+        // Contract from `ptr::write_bytes`: the range must be valid for writes.
+        // Evidence: `code_size` is `used` rounded up to the page size, and the length of
+        // `text_section` is page-rounded too, so the range is within it. Its pages are read-write,
+        // as nothing has protected them yet, and no reference into them is alive, as references
+        // are only created by borrowing `self`.
+        unsafe { std::ptr::write_bytes(unused, 0xcc, code_size.wrapping_sub(used)) };
+
+        // SAFETY:
+        //
+        // Contract from `protect_pages`: the range must be whole pages of a mapping that the
+        // caller owns, and nothing may access them in a way the new permissions disallow.
+        // Evidence: the pooled allocation is page aligned, starts with `pc_section`, and has the
+        // page-rounded `pc_size` bytes for it. `self` owns the allocation, and the section is only
+        // read after this.
+        unsafe {
+            protect_pages(
+                self.pc_section.as_ptr().cast::<u8>(),
+                pc_size,
+                PagePermissions::Read,
+            )
+        }?;
+
+        // SAFETY: as above, with `text_section` following at the page-rounded `pc_size`, and
+        // `code_size` within it. The section is only read and executed after this.
+        unsafe { protect_pages(text, code_size, PagePermissions::ReadExecute) }?;
+        self.text_section = NonNull::slice_from_raw_parts(self.text_section.cast::<u8>(), used);
+        self.sealed = true;
+        Ok(())
+    }
+
+    /// The length of the host machinecode in bytes
+    pub fn machine_code_length(&self) -> usize {
+        self.text_section().len()
+    }
+
+    /// The total pooled allocation size retained by the compiled program.
+    pub fn mem_size(&self) -> usize {
+        self.allocation_size
+    }
+}
+
+impl Drop for JitProgram {
+    fn drop(&mut self) {
+        #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
+        if let Some(code_record) = self.code_record.take() {
+            // SAFETY:
+            //
+            // Contract from `CodeRecord::release`: the range must still be owned by the caller,
+            // and not accessed while this runs or relied on afterwards.
+            // Evidence: the record is of `text_section`, which is within the allocation that is
+            // only returned to the pool below. Dropping `self` means that nothing executes or
+            // reads the code, and the pool treats the memory as arbitrary bytes.
+            unsafe { code_record.release() };
+        }
+        // SAFETY:
+        //
+        // Contract from `free_pages_pooled`: the pointer and size must identify a full allocation
+        // from `allocate_pages_pooled` that is not freed yet, and no references into it may be
+        // retained.
+        // Evidence: `pc_section` starts at the allocation and `allocation_size` is what
+        // `allocate_pages_pooled` returned with it, both set only by `new`. This is the only
+        // place freeing them, and any reference into them borrows `self`.
+        unsafe {
+            free_pages_pooled(self.pc_section.as_ptr().cast::<u8>(), self.allocation_size);
+        }
+    }
+}
+
+impl std::fmt::Debug for JitProgram {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.write_fmt(format_args!("JitProgram {:?}", self as *const _))
+    }
+}
+
+impl PartialEq for JitProgram {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
+    }
+}
 
 /// Defines a set of sbpf_version of an executable
 #[derive(Debug, PartialEq, PartialOrd, Eq, Clone, Copy)]

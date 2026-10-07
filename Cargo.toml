@@ -28,31 +28,40 @@ combine = "3.8.1"
 gdbstub = { version = "0.6.2", optional = true }
 hash32 = "0.3.1"
 log = "0.4.2"
-rand = { version = "0.8.5", features = ["small_rng"], optional = true }
+rand = { version = "0.8.5", features = ["small_rng"] }
 rustc-demangle = "0.1"
 shuttle = { version = "0.9.3", optional = true }
 thiserror = "2.0.9"
+dynasm = "5.1.0"
+dynasmrt = "5.1.0"
+object = { version = "0.40", optional = true, default-features = false, features = ["write_core", "elf"] }
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["memoryapi", "sysinfoapi", "winnt", "errhandlingapi"], optional = true }
+winapi = { version = "0.3", features = ["memoryapi", "sysinfoapi", "winnt", "errhandlingapi"] }
 
 [target.'cfg(not(windows))'.dependencies]
-libc = { version = "0.2", optional = true }
+libc = "0.2"
 
 [features]
 default = ["jit"]
-jit = ["dep:libc", "dep:winapi", "dep:rand"]
+jit = []
 jit-enable-host-stack-frames = ["jit"]
 fuzzer-not-safe-for-production = ["arbitrary"]
 tracer = []
 debugger = ["dep:gdbstub"]
 shuttle-test = ["dep:shuttle"]
 conf-stack-frame-size = []
+# Compile in the debugging aids of `codegen`.
+#
+# Use the `SBPF_DEBUG_*` environment variables to enable and/or configure them.
+codegen-debug = ["dep:object"]
 
 [dev-dependencies]
+clap = { version = "4", features = ["derive"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 elf = "0.0.10"
 json = "0.12"
+object = { version = "0.40", default-features = false, features = ["read_core", "elf"] }
 rand = { version = "0.8.5", features = ["small_rng"] }
 test_utils = { path = "test_utils/" }
 
@@ -71,3 +80,7 @@ harness = false
 [[bench]]
 name = "vm_execution"
 harness = false
+
+[[example]]
+name = "dynasm_tool"
+required-features = ["codegen-debug"]
