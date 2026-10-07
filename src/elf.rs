@@ -19,13 +19,13 @@ use crate::{
     },
     error::EbpfError,
     memory_region::MemoryRegion,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinProgram, FunctionRegistry, JitProgram, SBPFVersion},
     verifier::Verifier,
     vm::{Config, ContextObject},
 };
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-use crate::{jit::JitCompiler, program::JitProgram};
+use crate::jit::JitCompiler;
 use byteorder::{ByteOrder, LittleEndian};
 use std::{
     collections::BTreeMap,
@@ -514,7 +514,6 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
     }
@@ -670,7 +669,6 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
     }
@@ -844,7 +842,6 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
     }

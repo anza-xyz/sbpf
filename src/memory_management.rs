@@ -307,7 +307,8 @@ pub unsafe fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError>
 /// that code in them can be addressed with sign-extended 32-bit absolute addresses.
 ///
 /// The addresses are picked at random, and existing mappings are never replaced.
-pub fn allocate_pages_low(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
+#[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
+pub(crate) fn allocate_pages_low(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
     /// Same as the allocation granularity of Windows.
     const ALIGNMENT: usize = 64 * 1024;
     /// Well above the NULL area and where non-PIE executables are loaded.

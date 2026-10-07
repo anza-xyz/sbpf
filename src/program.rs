@@ -1,23 +1,16 @@
 //! Common interface for built-in and user supplied programs
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-use crate::{elf::Executable, vm::EbpfVm};
 use {
     crate::{
         ebpf,
         elf::ElfError,
-        vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
-    },
-    std::collections::{btree_map::Entry, BTreeMap},
-};
-#[cfg(target_arch = "x86_64")]
-use {
-    crate::{
         error::EbpfError,
         memory_management::{
             allocate_pages_pooled, free_pages_pooled, get_system_page_size, protect_pages,
             round_to_page_size, PagePermissions,
         },
+        vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
     },
+    std::collections::{btree_map::Entry, BTreeMap},
     std::ptr::NonNull,
 };
 
@@ -37,6 +30,7 @@ pub struct JitProgram {
     sealed: bool,
     /// Whether the code was produced by `codegen` rather than by the old `jit::JitCompiler`, which
     /// makes the two incompatible in how they are entered.
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
     pub(crate) dynasm: bool,
     /// What the debugging aids keep of the code, see `codegen::debug`.
     #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
@@ -52,7 +46,7 @@ unsafe impl Sync for JitProgram {}
 impl JitProgram {
     /// Allocate a program with `pc` zeroed entries in the pc section and room for `code_capacity`
     /// bytes of machine code.
-    pub(crate) fn new(pc: usize, code_capacity: usize) -> Self {
+    pub fn new(pc: usize, code_capacity: usize) -> Self {
         let page_size = get_system_page_size();
         let pc_size = round_to_page_size(pc.saturating_mul(std::mem::size_of::<u32>()), page_size);
         let text_capacity = round_to_page_size(code_capacity, page_size);
@@ -109,7 +103,7 @@ impl JitProgram {
     }
 
     /// The pc section to fill in, which is empty once the program is sealed.
-    pub(crate) fn pc_section_mut(&mut self) -> &mut [u32] {
+    pub fn pc_section_mut(&mut self) -> &mut [u32] {
         if self.sealed {
             return &mut [];
         }
@@ -124,7 +118,7 @@ impl JitProgram {
     }
 
     /// The machine code to fill in, which is empty once the program is sealed.
-    pub(crate) fn text_section_mut(&mut self) -> &mut [u8] {
+    pub fn text_section_mut(&mut self) -> &mut [u8] {
         if self.sealed {
             return &mut [];
         }
@@ -140,7 +134,7 @@ impl JitProgram {
     /// Make the pages read-only and read-execute, with `text_section` shrunk to the `used` length.
     ///
     /// Does nothing if the program is already sealed.
-    pub(crate) fn seal(&mut self, used: usize) -> Result<(), EbpfError> {
+    pub fn seal(&mut self, used: usize) -> Result<(), EbpfError> {
         if self.sealed {
             return Ok(());
         }
@@ -199,17 +193,6 @@ impl JitProgram {
     /// The total pooled allocation size retained by the compiled program.
     pub fn mem_size(&self) -> usize {
         self.allocation_size
-    }
-
-    /// Execute from `vm.registers[11]` with whichever compiler produced this program.
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-    pub(crate) fn run<C: ContextObject>(&self, executable: &Executable<C>, vm: &mut EbpfVm<C>) {
-        if self.dynasm {
-            self.dynasm_invoke(executable, vm);
-        } else {
-            let registers = vm.registers;
-            self.invoke(executable.get_config(), vm, registers);
-        }
     }
 }
 

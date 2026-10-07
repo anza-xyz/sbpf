@@ -454,8 +454,25 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                     let Some(compiled_program) = executable.get_compiled_program() else {
                         return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
                     };
-                    *mode = ExecutionMode::Jit;
-                    break 'execute compiled_program.run(executable, self);
+                    #[cfg(target_arch = "x86_64")]
+                    if compiled_program.dynasm {
+                        break 'execute compiled_program.dynasm_invoke(executable, self);
+                    }
+                    #[cfg(all(
+                        feature = "jit",
+                        not(target_os = "windows"),
+                        target_arch = "x86_64"
+                    ))]
+                    {
+                        let registers = self.registers;
+                        compiled_program.invoke(executable.get_config(), self, registers);
+                        break 'execute;
+                    }
+                    #[allow(unreachable_code)]
+                    {
+                        let _ = compiled_program;
+                        return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
+                    }
                 }
 
                 ExecutionMode::DynasmInterpreted => {

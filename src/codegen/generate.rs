@@ -2,12 +2,16 @@
 //! interpreters, which are both generated lazily, once per SBPF version.
 
 use super::arch::{self, MAX_JIT_TEMPLATE_SIZE};
-use super::{AuxTemplate, JitTemplates, TemplateLayout, TemplateRelocation, TemplateRelocationKind};
+use super::{
+    AuxTemplate, JitTemplates, TemplateLayout, TemplateRelocation, TemplateRelocationKind,
+};
 use crate::memory_management::{allocate_pages_low, protect_pages, PagePermissions};
 use crate::program::SBPFVersion;
 use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
 use dynasmrt::relocations::{Relocation, RelocationKind};
 use dynasmrt::{AssemblyOffset, DynamicLabel};
+#[cfg(feature = "codegen-debug")]
+use std::convert::TryInto;
 use std::sync::LazyLock;
 
 /// A BPF register.
@@ -802,7 +806,7 @@ mod tests {
             assert!(templates
                 .layouts
                 .iter()
-                .any(|layout| usize::from(layout.num_relocations) == MAX_RELOCATIONS));
+                .any(|layout| usize::from(layout.num_relocations) == arch::MAX_RELOCATIONS));
         }
     }
 }

@@ -28,6 +28,7 @@ extern crate thiserror;
 pub mod aligned_memory;
 mod asm_parser;
 pub mod assembler;
+#[cfg(target_arch = "x86_64")]
 pub mod codegen;
 #[cfg(feature = "debugger")]
 pub mod debugger;
@@ -40,7 +41,6 @@ pub mod insn_builder;
 pub mod interpreter;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 pub mod jit;
-#[cfg(target_arch = "x86_64")]
 mod memory_management;
 pub mod memory_region;
 pub mod program;
