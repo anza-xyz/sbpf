@@ -189,7 +189,17 @@ impl<const SIZE: usize> TemplateBuilder<'_, SIZE> {
         &mut self.code[..self.layout.len()]
     }
 
-    fn add_relocation(&mut self, relocation: TemplateRelocation) {
+    /// Add the relocation `dynasm` reported with `patch` at `location`, which is the current end
+    /// of the code.
+    fn add_relocation<R: Relocation>(
+        &mut self,
+        kind: TemplateRelocationKind,
+        location: usize,
+        patch: PatchFields<R>,
+    ) {
+        let (relocation, addend) = TemplateRelocation::new(kind, location, patch);
+        let field = usize::from(relocation.field);
+        self.code_mut()[field..field.wrapping_add(4)].copy_from_slice(&addend.to_le_bytes());
         let slot = self
             .relocations
             .get_mut(usize::from(self.layout.num_relocations))
@@ -300,6 +310,7 @@ impl<R: Relocation + Copy> PatchFields<R> {
 }
 
 #[derive(Clone, Copy, Debug)]
+#[repr(u8)]
 enum TemplateRelocationKind {
     /// The JIT holds a pointer to the second instruction of the eBPF program in `insn`,
     /// whereas the templates default to addressing where `insn` is updated to point to right
@@ -310,21 +321,24 @@ enum TemplateRelocationKind {
     /// transfer to the machine code representing the target BPF instruction's code. Offset to this
     /// machine code is what this relocation must overwrite based on the BPF instruction being
     /// templated.
+    ///
+    /// The field `TAKEN_BRANCH_METER_ADJUSTMENT` bytes before it, which `bpf_taken_branch` always
+    /// emits there, gets the offset (in bytes) from the instruction following the branch to the
+    /// branch target.
     TakenBranch,
-    /// Offset (in bytes) from the instruction following the branch to the branch target.
-    TakenBranchMeterAdjustment,
+    /// For `jmp ->sig_meter_exceeded`.
+    SigMeterExceeded,
+    /// For `jmp ->sig_invalid_insn`.
+    SigInvalidInsn,
 }
 
 /// A relocation that can only be resolved once the template is instantiated for a specific eBPF
-/// instruction at a specific location: a 32-bit field in the template, set to the target of the
-/// relocation plus `addend`.
+/// instruction at a specific location: a 32-bit field in the template, which holds the addend, to
+/// which the target of the relocation is added.
 #[derive(Clone, Copy, Debug)]
 struct TemplateRelocation {
     /// Offset of the field within the template.
     field: u8,
-    /// For relative relocations, this already accounts for where the field is in the template,
-    /// but not for where the template is in the output.
-    addend: i32,
     kind: TemplateRelocationKind,
 }
 
@@ -332,20 +346,22 @@ impl TemplateRelocation {
     /// For the unused entries, which `JitTemplates::emit` does not apply.
     const UNUSED: Self = Self {
         field: 0,
-        addend: 0,
         kind: TemplateRelocationKind::InsnOffset,
     };
 
-    /// `patch` is a relocation reported by `dynasm` at `location` within the template.
+    /// `patch` is a relocation reported by `dynasm` at `location` within the template. Also
+    /// returns the addend for the field. For relative relocations, it accounts for where the field
+    /// is in the template, but not for where the template is in the output.
     fn new<R: Relocation>(
         kind: TemplateRelocationKind,
         location: usize,
         patch: PatchFields<R>,
-    ) -> Self {
+    ) -> (Self, i32) {
         let relative = match kind {
-            TemplateRelocationKind::TakenBranch => true,
-            TemplateRelocationKind::InsnOffset
-            | TemplateRelocationKind::TakenBranchMeterAdjustment => false,
+            TemplateRelocationKind::TakenBranch
+            | TemplateRelocationKind::SigMeterExceeded
+            | TemplateRelocationKind::SigInvalidInsn => true,
+            TemplateRelocationKind::InsnOffset => false,
         };
         assert!(
             match patch.relocation.kind() {
@@ -374,54 +390,115 @@ impl TemplateRelocation {
             field.checked_add(4).unwrap() <= location,
             "unsupported template relocation"
         );
-        Self {
-            field: u8::try_from(field).unwrap(),
-            addend: i32::try_from(patch.target_offset.checked_sub(reference as isize).unwrap())
-                .unwrap(),
-            kind,
+        // `apply` also patches the meter adjustment ahead of the field.
+        if let TemplateRelocationKind::TakenBranch = kind {
+            assert!(
+                field >= TAKEN_BRANCH_METER_ADJUSTMENT,
+                "unsupported template relocation"
+            );
         }
+        let addend =
+            i32::try_from(patch.target_offset.checked_sub(reference as isize).unwrap()).unwrap();
+        let relocation = Self {
+            field: u8::try_from(field).unwrap(),
+            kind,
+        };
+        (relocation, addend)
     }
 
-    /// Patch the relocation into `template`, instantiated for the instruction `insn` at `pc`, at
-    /// `template_start` in the output.
+    /// Patch the relocation into `out`, a copy of `template` instantiated as `at` describes.
     #[inline(always)]
     fn apply<const SIZE: usize>(
         &self,
-        template: &mut [u8; SIZE],
-        template_start: usize,
-        pc: usize,
-        insn: u64,
-        pc_section: &[u32],
+        template: &[u8; SIZE],
+        out: &mut [u8; SIZE],
+        at: &Instantiation,
     ) {
         // Computed in `i64`, to which all the inputs convert losslessly, and in which none of the
-        // arithmetic below can overflow: `template_start` is below `NOOP_DUE` (see `analyze`), as
-        // are the `pc_section` entries, `pc * INSN_SIZE` is an offset into the text section, and
-        // `off` and `addend` are at most 32 bits.
-        let off = (insn >> 16) as i16;
+        // arithmetic below can overflow: the positions in the output are below `NOOP_DUE` (see
+        // `analyze`), as are the `pc_section` entries, `pc * INSN_SIZE` is an offset into the text
+        // section, and `off` and the addends are at most 32 bits.
         let target = match self.kind {
-            TemplateRelocationKind::InsnOffset => (pc as i64).wrapping_mul(ebpf::INSN_SIZE as i64),
-            TemplateRelocationKind::TakenBranchMeterAdjustment => {
-                i64::from(off).wrapping_mul(ebpf::INSN_SIZE as i64)
+            TemplateRelocationKind::InsnOffset => {
+                (at.pc as i64).wrapping_mul(ebpf::INSN_SIZE as i64)
             }
             TemplateRelocationKind::TakenBranch => {
+                let adjustment = i64::from(at.off).wrapping_mul(ebpf::INSN_SIZE as i64);
+                // At least `TAKEN_BRANCH_METER_ADJUSTMENT` (see `new`).
+                let field = usize::from(self.field).wrapping_sub(TAKEN_BRANCH_METER_ADJUSTMENT);
+                add_to_field(template, out, field, adjustment);
                 // The verifier rejects invalid jump offsets, but doing this defensive thing is
                 // faster anyway.
-                let target = pc
-                    .checked_add_signed(isize::from(off).wrapping_add(1))
-                    .and_then(|target_pc| pc_section.get(target_pc))
+                let target = at
+                    .pc
+                    .checked_add_signed(isize::from(at.off).wrapping_add(1))
+                    .and_then(|target_pc| at.pc_section.get(target_pc))
                     .copied()
                     .unwrap_or(JitTemplates::<SIZE>::INVALID_CALL_TARGET);
-                i64::from(target & !PADDING_DUE).wrapping_sub(template_start as i64)
+                i64::from(target & !PADDING_DUE).wrapping_sub(at.position as i64)
+            }
+            TemplateRelocationKind::SigMeterExceeded => {
+                (at.sig_meter_exceeded as i64).wrapping_sub(at.position as i64)
+            }
+            TemplateRelocationKind::SigInvalidInsn => {
+                (at.sig_invalid_insn as i64).wrapping_sub(at.position as i64)
             }
         };
-        let value = target.wrapping_add(i64::from(self.addend));
-        debug_assert!(i32::try_from(value).is_ok(), "impossible relocation");
-        // Never clamps (see `new`), but `min` elides a bounds check.
-        let max_field = const { SIZE - 4 };
-        debug_assert!(usize::from(self.field) <= max_field);
-        let field = usize::from(self.field).min(max_field);
-        template[field..field.wrapping_add(4)].copy_from_slice(&(value as i32).to_le_bytes());
+        add_to_field(template, out, usize::from(self.field), target);
     }
+}
+
+/// Set the 32-bit field of a relocation at `field` in `out` to `value` plus what it holds in
+/// `template`.
+///
+/// Reads `template` rather than `out`, which was just written with wider stores that a load of
+/// the field couldn't be forwarded from.
+///
+/// `field` must be a field of a relocation of the template, or the meter adjustment of
+/// `TemplateRelocationKind::TakenBranch`.
+#[inline(always)]
+fn add_to_field<const SIZE: usize>(
+    template: &[u8; SIZE],
+    out: &mut [u8; SIZE],
+    field: usize,
+    value: i64,
+) {
+    debug_assert!(field.wrapping_add(4) <= SIZE);
+    // SAFETY:
+    //
+    // Contract from `ptr::add`, `ptr::read_unaligned` and `ptr::write_unaligned`: the 4 bytes at
+    // `field` must be within `template` and `out`.
+    // Evidence: `TemplateRelocation::new` asserts that the fields end within the template, which
+    // is at most `SIZE` bytes, and that the meter adjustment of a taken branch is within it too.
+    unsafe {
+        let addend = template.as_ptr().add(field).cast::<i32>().read_unaligned();
+        debug_assert!(
+            i32::try_from(i64::from(addend).wrapping_add(value)).is_ok(),
+            "impossible relocation"
+        );
+        let field = out.as_mut_ptr().add(field).cast::<i32>();
+        field.write_unaligned(addend.wrapping_add(value as i32));
+    }
+}
+
+/// Distance from the meter adjustment field of a taken branch to its jump field, see
+/// `TemplateRelocationKind::TakenBranch`: the `jmp rel32` follows the `add r64, imm32`.
+const TAKEN_BRANCH_METER_ADJUSTMENT: usize = 5;
+
+/// Where a template is instantiated, for `TemplateRelocation::apply`.
+struct Instantiation<'a> {
+    /// The offsets in the output of the instructions.
+    pc_section: &'a [u32],
+    /// The offset in the output of `AuxTemplate::SigInvalidInsn`.
+    sig_invalid_insn: usize,
+    /// Likewise for `AuxTemplate::SigMeterExceeded`.
+    sig_meter_exceeded: usize,
+    /// The offset in the output the template is at.
+    position: usize,
+    /// Of the instruction the template is instantiated for.
+    pc: usize,
+    /// The `off` field of the instruction.
+    off: i16,
 }
 
 /// What the first pass of `JitTemplates::compile` needs to know of a template, apart from the
@@ -453,8 +530,12 @@ enum AuxTemplate {
     /// Appended after the last instruction, as if it was at `pc = program.len()`.
     ExecutionOverrun,
     /// For `pc_section` entries that are not valid jump targets (e.g. the second halves of 16
-    /// byte instructions.)
+    /// byte instructions.) Continues into `InvalidInsn`, which follows it.
     InvalidCallTarget,
+    /// Where the templates of invalid instructions continue, as if they were at its `pc`.
+    SigInvalidInsn,
+    /// Where the templates continue when the instruction meter is exceeded.
+    SigMeterExceeded,
     /// Inserted between the other templates to diversify the output.
     Noop,
     /// Inserted ahead of an instruction (and instantiated for it) to check the instruction meter.
@@ -462,7 +543,13 @@ enum AuxTemplate {
 }
 
 impl AuxTemplate {
-    const COUNT: usize = 4;
+    const COUNT: usize = 6;
+    /// Emitted at the start of the output, in this order.
+    const SHARED: [Self; 3] = [
+        Self::InvalidCallTarget,
+        Self::SigInvalidInsn,
+        Self::SigMeterExceeded,
+    ];
     /// Index within `JitTemplates`.
     const fn index(self) -> usize {
         TemplateOpcode::COUNT.wrapping_add(self as usize)
@@ -517,6 +604,16 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         }
     }
 
+    /// The offsets in the output of the `AuxTemplate::SHARED` templates, which start it.
+    fn shared_offsets(&self) -> [usize; AuxTemplate::SHARED.len()] {
+        let mut end = 0usize;
+        AuxTemplate::SHARED.map(|template| {
+            let start = end;
+            end = end.wrapping_add(self.aux_layout(template).len());
+            start
+        })
+    }
+
     fn builder(&mut self, index: usize) -> TemplateBuilder<'_, SIZE> {
         TemplateBuilder {
             layout: &mut self.layouts[index],
@@ -558,7 +655,9 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         // `position` saturates so that an absurdly large output fails the check at the end.
         let mut pc_sec = Vec::with_capacity(program.len());
         let mut position = 0usize;
-        position = position.wrapping_add(self.aux_layout(AuxTemplate::InvalidCallTarget).len());
+        for template in AuxTemplate::SHARED {
+            position = position.wrapping_add(self.aux_layout(template).len());
+        }
         position = position
             .wrapping_add(start_padding.wrapping_mul(self.aux_layout(AuxTemplate::Noop).len()));
         // Introduce checkpoints at certain points in the code; the instruction meter is otherwise
@@ -620,17 +719,22 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         #[cfg(all(feature = "codegen-debug", target_arch = "x86_64", target_os = "linux"))]
         debug::map_jit_text(&mut program);
 
-        let mut position = 0;
         let text = program.text_section_mut();
-        self.emit_aux(
-            text,
-            &mut position,
-            &pc_sec,
-            0,
-            AuxTemplate::InvalidCallTarget,
-        );
+        let [invalid_call_target, sig_invalid_insn, sig_meter_exceeded] = self.shared_offsets();
+        debug_assert_eq!(invalid_call_target, Self::INVALID_CALL_TARGET as usize);
+        let mut at = Instantiation {
+            pc_section: &pc_sec,
+            sig_invalid_insn,
+            sig_meter_exceeded,
+            position: 0,
+            pc: 0,
+            off: 0,
+        };
+        for template in AuxTemplate::SHARED {
+            self.emit_aux(text, &mut at, template);
+        }
         for _ in 0..start_padding {
-            self.emit_aux(text, &mut position, &pc_sec, 0, AuxTemplate::Noop);
+            self.emit_aux(text, &mut at, AuxTemplate::Noop);
         }
 
         let bpf = executable.get_text_bytes().1;
@@ -642,31 +746,21 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             for _ in 0..self.insn_layout(opcode).extra_bpf_insns {
                 program_iter.next();
             }
+            at.pc = pc;
+            at.off = (insn >> 16) as i16;
             if entry & PADDING_DUE != 0 {
                 if entry & NOOP_DUE != 0 {
-                    self.emit_aux(text, &mut position, &pc_sec, pc, AuxTemplate::Noop);
+                    self.emit_aux(text, &mut at, AuxTemplate::Noop);
                 }
                 if entry & CHECKPOINT_DUE != 0 {
-                    self.emit_aux(
-                        text,
-                        &mut position,
-                        &pc_sec,
-                        pc,
-                        AuxTemplate::MeterCheckpoint,
-                    );
+                    self.emit_aux(text, &mut at, AuxTemplate::MeterCheckpoint);
                 }
             }
-            self.emit(text, &mut position, &pc_sec, pc, insn, opcode.index());
+            self.emit(text, &mut at, opcode.index());
         }
-        let pc = program_insns.len();
-        self.emit_aux(
-            text,
-            &mut position,
-            &pc_sec,
-            pc,
-            AuxTemplate::ExecutionOverrun,
-        );
-        debug_assert_eq!(position, output_len);
+        at.pc = program_insns.len();
+        self.emit_aux(text, &mut at, AuxTemplate::ExecutionOverrun);
+        debug_assert_eq!(at.position, output_len);
         for entry in &mut pc_sec {
             *entry &= !PADDING_DUE;
         }
@@ -687,36 +781,21 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         self.layouts[template.index()]
     }
 
-    /// Write the `template` instantiated for `pc` at `position` in `text`, see `emit`.
+    /// Write the `template` to `text`, see `emit`.
     #[inline(always)]
-    fn emit_aux(
-        &self,
-        text: &mut [u8],
-        position: &mut usize,
-        pc_section: &[u32],
-        pc: usize,
-        template: AuxTemplate,
-    ) {
-        self.emit(text, position, pc_section, pc, 0, template.index());
+    fn emit_aux(&self, text: &mut [u8], at: &mut Instantiation, template: AuxTemplate) {
+        self.emit(text, at, template.index());
     }
 
-    /// Write the template at `index` instantiated for the instruction `insn` at `pc` at `position`
-    /// in `text`, and advance `position` past it.
+    /// Write the template at `index` to `text`, instantiated as `at` describes, and advance
+    /// `at.position` past it.
     ///
-    /// `text` must have at least `SIZE` bytes from `position` on.
+    /// `text` must have at least `SIZE` bytes from `at.position` on.
     #[inline(always)]
-    fn emit(
-        &self,
-        text: &mut [u8],
-        position: &mut usize,
-        pc_section: &[u32],
-        pc: usize,
-        insn: u64,
-        index: usize,
-    ) {
+    fn emit(&self, text: &mut [u8], at: &mut Instantiation, index: usize) {
         let layout = self.layouts[index];
         let len = layout.len();
-        let start = *position;
+        let start = at.position;
         let out = text
             .get_mut(start..)
             .and_then(|rest| rest.first_chunk_mut::<SIZE>())
@@ -733,8 +812,8 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         }
         let relocations = &self.relocations[index][..usize::from(layout.num_relocations)];
         for relocation in relocations {
-            relocation.apply(out, start, pc, insn, pc_section);
+            relocation.apply(&self.code[index], out, at);
         }
-        *position = start.wrapping_add(len);
+        at.position = start.wrapping_add(len);
     }
 }

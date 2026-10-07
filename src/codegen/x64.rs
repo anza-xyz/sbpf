@@ -260,8 +260,7 @@ fn conditional_branch<G: X64Generator + ?Sized>(
 /// Terminate execution for an instruction that is not valid.
 fn invalid_insn<G: X64Generator + ?Sized>(out: &mut G) {
     load_next_insn_addr(out);
-    bpf_validate_meter(out);
-    terminate(out, SIG_INVALID_INSN)
+    x64asm!(out; jmp ->sig_invalid_insn);
 }
 
 /// Build the code to execute the BPF instruction.
@@ -529,10 +528,7 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
                 (false, _) => invoke_support(out, out.supports().v0_call_imm),
                 (true, 1) => invoke_support(out, out.supports().call_imm),
                 (true, 0) => invoke_support(out, out.supports().syscall),
-                (true, _) => {
-                    bpf_validate_meter(out);
-                    terminate(out, SIG_INVALID_INSN)
-                }
+                (true, _) => x64asm!(out; jmp ->sig_invalid_insn),
             }
         }
         ebpf::CALL_REG => {
@@ -565,7 +561,6 @@ fn bpf_insn<G: X64Generator + ?Sized>(out: &mut G) {
             bpf_validate_meter(out);
             x64asm!(out
                 ; add RMETER, BYTE ebpf::INSN_SIZE as i8
-                // `RTEMP` points at the second half.
                 ; mov Rd(dst), DWORD [RTEMP - 4]
                 ; mov WTEMP, DWORD [RTEMP + 4]
                 ; shl RTEMP, 32
@@ -687,12 +682,9 @@ fn terminate<G: X64Generator + ?Sized>(out: &mut G, code: i8) {
 /// `temp` must contain the address of the next BPF instruction.
 fn bpf_validate_meter<G: X64Generator + ?Sized>(out: &mut G) {
     out.meter_checked();
-    let within_budget = out.new_dynamic_label();
     x64asm!(out
         ; cmp RTEMP, RMETER
-        ; jbe BYTE =>within_budget
-        ;; terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS)
-        ; =>within_budget
+        ; ja ->sig_meter_exceeded
     );
 }
 
@@ -782,10 +774,11 @@ impl X64Generator for JITGenerator<'_> {
             PatchFields::<SimpleRelocation>::new(target_offset, field_offset, ref_offset, kind);
         let kind = match name {
             "template_taken_branch" => TemplateRelocationKind::TakenBranch,
+            "sig_meter_exceeded" => TemplateRelocationKind::SigMeterExceeded,
+            "sig_invalid_insn" => TemplateRelocationKind::SigInvalidInsn,
             _ => panic!("global reference to an unknown symbol {}", name),
         };
-        self.template
-            .add_relocation(TemplateRelocation::new(kind, self.offset(), patch));
+        self.template.add_relocation(kind, self.offset(), patch);
     }
 
     fn template_reloc(
@@ -798,8 +791,7 @@ impl X64Generator for JITGenerator<'_> {
         // kind = Absolute DWord
         let patch =
             PatchFields::<SimpleRelocation>::new(target_offset, field_offset, ref_offset, 0xC2);
-        self.template
-            .add_relocation(TemplateRelocation::new(kind, self.offset(), patch));
+        self.template.add_relocation(kind, self.offset(), patch);
     }
 
     fn dynamic_reloc(
@@ -836,10 +828,14 @@ impl X64Generator for JITGenerator<'_> {
     }
 
     fn bpf_taken_branch(&mut self) {
-        x64asm!(self
-            ; add RMETER, DWORD 0
-            ;; self.template_reloc(TemplateRelocationKind::TakenBranchMeterAdjustment, 0, 4, 0)
-            ; jmp ->template_taken_branch
+        // The `TakenBranch` relocation of the `jmp` also patches the adjustment.
+        x64asm!(self; add RMETER, DWORD 0);
+        let adjustment = self.offset();
+        x64asm!(self; jmp ->template_taken_branch);
+        assert_eq!(
+            self.offset().wrapping_sub(adjustment),
+            TAKEN_BRANCH_METER_ADJUSTMENT,
+            "the adjustment must precede the jump field"
         );
     }
 
@@ -889,12 +885,18 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
         |generator| {
             // The code paths that might end up here are expected to update `next_insn`.
             x64asm!(generator; mov RTEMP, rbp => Frame[BYTE -1].next_insn);
-            bpf_validate_meter(generator);
             #[cfg(feature = "tracer")]
             invoke_support(generator, generator.supports().trace);
-            terminate(generator, SIG_INVALID_INSN);
+            // Continues into `InvalidInsn`.
         },
     );
+    generate(&mut templates, AuxTemplate::SigInvalidInsn, |generator| {
+        bpf_validate_meter(generator);
+        terminate(generator, SIG_INVALID_INSN);
+    });
+    generate(&mut templates, AuxTemplate::SigMeterExceeded, |generator| {
+        terminate(generator, SIG_EXCEEDED_MAX_INSTRUCTIONS);
+    });
     generate(
         &mut templates,
         AuxTemplate::Noop,
@@ -1025,12 +1027,36 @@ impl X64Generator for InterpreterGenerator {
     fn global_reloc(
         &mut self,
         name: &'static str,
-        _target_offset: isize,
-        _field_offset: u8,
-        _ref_offset: u8,
-        _kind: u8,
+        target_offset: isize,
+        field_offset: u8,
+        ref_offset: u8,
+        kind: u8,
     ) {
-        panic!("global reference to an unknown symbol {}", name);
+        // The code shared by the steps is in the supports, which like the interpreter are in the
+        // first 2 GiB, so within reach.
+        let target = match name {
+            "sig_meter_exceeded" => self.supports.meter_exceeded,
+            "sig_invalid_insn" => self.supports.invalid_insn,
+            _ => panic!("global reference to an unknown symbol {}", name),
+        };
+        let patch =
+            PatchFields::<SimpleRelocation>::new(target_offset, field_offset, ref_offset, kind)
+                .at(self.offset);
+        assert_eq!(patch.relocation.size(), 4, "unsupported relocation");
+        let value = patch.value(
+            (target as usize).wrapping_sub(self.buffer as usize),
+            self.buffer as usize,
+        );
+        let value = i32::try_from(value).expect("supports out of reach of the interpreter");
+        let field = patch.range(0);
+        // SAFETY:
+        //
+        // Contract from `slice::from_raw_parts_mut`: the memory must be valid, initialized and not
+        // otherwise accessed for the lifetime of the slice.
+        // Evidence: the field is within the instruction that `extend` has just written into the
+        // read-write `STEP_TABLE_SIZE` bytes at `buffer`, which are not borrowed anywhere.
+        let field = unsafe { std::slice::from_raw_parts_mut(self.buffer.add(field.start), 4) };
+        field.copy_from_slice(&value.to_le_bytes());
     }
 
     fn template_reloc(&mut self, _: TemplateRelocationKind, _: isize, _: u8, _: u8) {
@@ -1147,10 +1173,10 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
         // Before dispatching the next instruction, check what the JIT does with the meter
         // checkpoints and the `execution_overrun` template, in the order of `Interpreter::step`.
         // `meter` and the limit are both the end of the last instruction that may be executed.
-        let (exceeded, overrun) = (generator.new_dynamic_label(), generator.new_dynamic_label());
+        let overrun = generator.new_dynamic_label();
         x64asm!(generator
             ; cmp Rq(next_insn), RMETER
-            ; jae BYTE =>exceeded
+            ; jae ->sig_meter_exceeded
             ; cmp Rq(next_insn), rbp => Frame[BYTE -1].text_section_limit
             ; jae BYTE =>overrun
             ; movzx RTEMP, WORD [ BYTE to_last + RINSN ]
@@ -1158,8 +1184,6 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
             ; lea RTEMP, [ DWORD base_addr + RTEMP ]
             ; add RINSN, BYTE size
             ; jmp RTEMP
-            ; =>exceeded
-            ;; terminate(&mut generator, SIG_EXCEEDED_MAX_INSTRUCTIONS)
             ; =>overrun
             ; lea RTEMP, [ BYTE size + RINSN ]
             ;; terminate(&mut generator, SIG_EXECUTION_OVERRUN)

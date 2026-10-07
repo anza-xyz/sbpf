@@ -105,7 +105,7 @@ pub struct RelocationInfo {
     pub kind: String,
     /// Offset of the 32-bit field in the template.
     pub field_offset: usize,
-    /// Added to the target of the relocation.
+    /// What the field holds in the template, to which the target of the relocation is added.
     pub addend: i32,
 }
 
@@ -181,16 +181,21 @@ pub fn template(version: SBPFVersion, opcode: u16) -> Template {
     let index = TemplateOpcode(opcode).index();
     let layout = templates.layouts[index];
     let relocations = &templates.relocations[index][..usize::from(layout.num_relocations)];
+    let code = templates.code[index][..layout.len()].to_vec();
     Template {
-        code: templates.code[index][..layout.len()].to_vec(),
         relocations: relocations
             .iter()
-            .map(|relocation| RelocationInfo {
-                kind: format!("{:?}", relocation.kind),
-                field_offset: usize::from(relocation.field),
-                addend: relocation.addend,
+            .map(|relocation| {
+                let field = usize::from(relocation.field);
+                let addend = *code[field..].first_chunk::<4>().unwrap();
+                RelocationInfo {
+                    kind: format!("{:?}", relocation.kind),
+                    field_offset: field,
+                    addend: i32::from_le_bytes(addend),
+                }
             })
             .collect(),
+        code,
     }
 }
 
@@ -335,12 +340,16 @@ fn jit_symbols<const SIZE: usize, C: ContextObject>(
     let bpf = executable.get_text_bytes().1;
     let loader = BuiltinProgram::<DummyContextObject>::new_mock();
 
-    let mut named = vec![(
-        "invalid_jump_target".to_string(),
-        start
-            .checked_add(JitTemplates::<SIZE>::INVALID_CALL_TARGET as usize)
-            .unwrap(),
-    )];
+    let names = [
+        "invalid_call_target",
+        "sig_invalid_insn",
+        "sig_meter_exceeded",
+    ];
+    let mut named: Vec<_> = names
+        .iter()
+        .zip(templates.shared_offsets())
+        .map(|(name, offset)| (name.to_string(), start.checked_add(offset).unwrap()))
+        .collect();
     for (pc, &offset) in program.pc_section().iter().enumerate() {
         // The second halves of `lddw` have no code.
         if offset == JitTemplates::<SIZE>::INVALID_CALL_TARGET {
@@ -361,9 +370,10 @@ fn jit_symbols<const SIZE: usize, C: ContextObject>(
     named.push(("execution_overrun".to_string(), overrun));
 
     let mut symbols = sized_symbols(named, start.checked_add(text.len()).unwrap());
-    // The padding that may follow the first template is not part of it.
-    let invalid_len = templates.aux_layout(AuxTemplate::InvalidCallTarget).len();
-    symbols[0].size = symbols[0].size.min(invalid_len);
+    // The padding that may follow the shared templates is not part of the last of them.
+    let last = AuxTemplate::SHARED.len().checked_sub(1).unwrap();
+    let last_len = templates.aux_layout(AuxTemplate::SHARED[last]).len();
+    symbols[last].size = symbols[last].size.min(last_len);
     symbols
 }
 

@@ -27,6 +27,10 @@ pub(in crate::codegen) struct SupportingCode {
     /// SBPFv0 `CALL_REG`, which computes the register from the immediate.
     pub(super) v0_callx: u32,
     pub(super) entry_point: u32,
+    /// Where the interpreter steps continue when the instruction meter is exceeded.
+    pub(super) meter_exceeded: u32,
+    /// Where the interpreter steps of invalid instructions continue.
+    pub(super) invalid_insn: u32,
     /// See `SupportingCode::divide`.
     pub(super) divide: [[[u32; Reg::COUNT]; Reg::COUNT]; 4],
     /// Loads, by log2 of the access size, destination and source register.
@@ -70,6 +74,8 @@ impl SupportingCode {
             ("v0_callx".to_string(), self.v0_callx as usize),
             ("syscall".to_string(), self.syscall as usize),
             ("entry_point".to_string(), self.entry_point as usize),
+            ("meter_exceeded".to_string(), self.meter_exceeded as usize),
+            ("invalid_insn".to_string(), self.invalid_insn as usize),
         ];
         for (reg, callx) in self.callx.iter().enumerate() {
             symbols.push((format!("callx_r{reg}"), *callx as usize));
@@ -153,6 +159,7 @@ impl SupportingCode {
     /// Assemble the supporting code to run from the address `base`.
     fn assemble(base: u32) -> (SupportingCode, Vec<u8>) {
         let mut out = Asm::new(usize::try_from(base).unwrap());
+        let (meter_exceeded, invalid_insn) = Self::signals(&mut out, base);
         let [call_internal_label, meter_checked, target_checked] =
             [(); 3].map(|()| out.new_dynamic_label());
         #[cfg_attr(not(feature = "codegen-debug"), allow(unused_variables))]
@@ -181,6 +188,8 @@ impl SupportingCode {
             store_imm,
             store_reg,
             entry_point: Self::entry_point(&mut out, base),
+            meter_exceeded,
+            invalid_insn,
             divide: Self::divides(&mut out, base),
             #[cfg(feature = "codegen-debug")]
             code_range: base..base.wrapping_add(u32::try_from(out.offset().0).unwrap()),
@@ -205,13 +214,11 @@ impl SupportingCode {
         target_checked: DynamicLabel,
     ) -> u32 {
         let start = address(out, base, true);
-        let [exceeded, outside, too_deep, interpreted, resolved] =
-            [(); 5].map(|()| out.new_dynamic_label());
+        let [outside, too_deep, interpreted, resolved] = [(); 4].map(|()| out.new_dynamic_label());
         let insn_mask = (ebpf::INSN_SIZE as i8).checked_neg().unwrap();
         x64asm!(out
             ; =>label
-            ; cmp RTEMP, RMETER
-            ; ja =>exceeded
+            ;; validate_meter(out)
             ; =>meter_checked
             ; sub rax, rbp => Frame[BYTE -1].text_section
             ; cmp rax, rbp => Frame[BYTE -1].text_section_len
@@ -268,8 +275,6 @@ impl SupportingCode {
             ; add QWORD rbp => Frame[BYTE -1].calls_remaining, 1
             // `invoke_support` restores the `RINSN` of the caller.
             ; ret
-            ; =>exceeded
-            ;; terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS)
             ; =>outside
             ;; terminate(out, SIG_CALL_OUTSIDE_TEXT_SEGMENT)
             ; =>too_deep
@@ -345,6 +350,19 @@ impl SupportingCode {
             }
         }
         divide
+    }
+
+    /// Targets for `jmp ->sig_meter_exceeded` and `jmp ->sig_invalid_insn`.
+    fn signals(out: &mut Asm, base: u32) -> (u32, u32) {
+        let meter_exceeded = address(out, base, false);
+        x64asm!(out
+            ; ->sig_meter_exceeded:
+            ;; terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS)
+        );
+        let invalid_insn = address(out, base, false);
+        validate_meter(out);
+        terminate(out, SIG_INVALID_INSN);
+        (meter_exceeded, invalid_insn)
     }
 
     fn entry_point(out: &mut Asm, base: u32) -> u32 {
@@ -692,12 +710,9 @@ fn terminate(out: &mut Asm, code: i8) {
 
 /// Like the JIT templates' `bpf_validate_meter`.
 fn validate_meter(out: &mut Asm) {
-    let within_budget = out.new_dynamic_label();
     x64asm!(out
         ; cmp RTEMP, RMETER
-        ; jbe BYTE =>within_budget
-        ;; terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS)
-        ; =>within_budget
+        ; ja ->sig_meter_exceeded
     );
 }
 
