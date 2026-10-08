@@ -4,14 +4,10 @@ use {
         ebpf,
         elf::ElfError,
         error::EbpfError,
-        memory_management::{
-            allocate_pages_pooled, free_pages_pooled, get_system_page_size, protect_pages,
-            round_to_page_size, PagePermissions,
-        },
+        memory_management::{get_system_page_size, round_to_page_size, Mapping, Read, ReadExecute},
         vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
     },
     std::collections::{btree_map::Entry, BTreeMap},
-    std::ptr::NonNull,
 };
 
 /// Defines a set of sbpf_version of an executable
@@ -230,191 +226,124 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
     }
 }
 
-/// The JIT output for a program, in a single pooled allocation.
-pub struct JitProgram {
-    /// Size of the pooled allocation.
-    allocation_size: usize,
-    /// Offset to each BPF instruction's machine code within `text_section`.
-    pc_section: NonNull<[u32]>,
-    /// The executable machine code.
-    text_section: NonNull<[u8]>,
-    /// Whether [`Self::seal`] has been invoked.
-    sealed: bool,
+/// A program that is in progress of being written out.
+pub struct UnsealedJitProgram {
+    /// Offsets to each BPF instruction's machine code within `text_section`.
+    pc_section: Mapping,
+    /// The machine code.
+    text_section: Mapping,
 }
 
-// SAFETY: `JitProgram` owns its allocation like a `Box<[u8]>` would, and only the JIT compiler
-// writes to it, through `&mut self` before `seal`, before the program is shared.
-unsafe impl Send for JitProgram {}
-// SAFETY: see the `Send` implementation.
-unsafe impl Sync for JitProgram {}
-
-impl JitProgram {
+impl UnsealedJitProgram {
     /// Allocate a program with `pc` zeroed entries in the pc section and room for `code_capacity`
     /// bytes of machine code.
     pub fn new(pc: usize, code_capacity: usize) -> Self {
         let page_size = get_system_page_size();
-        let pc_size = round_to_page_size(pc.saturating_mul(std::mem::size_of::<u32>()), page_size);
+        let pc_len = pc.saturating_mul(std::mem::size_of::<u32>());
+        let pc_size = round_to_page_size(pc_len, page_size);
         let text_capacity = round_to_page_size(code_capacity, page_size);
-        let (raw, allocation_size) = allocate_pages_pooled(pc_size.saturating_add(text_capacity));
-        let raw = NonNull::new(raw).expect("the pooled allocation is never null");
-        // SAFETY:
-        //
-        // Contract from `NonNull::add`: The offset in bytes, `count * size_of::<T>()`, computed on
-        // mathematical integers (without “wrapping around”), must fit in an `isize`.
-        //
-        // Contract from `NonNull::add`: Let result be `self.addr() + count * size_of::<T>()`,
-        // computed on mathematical integers. This must fit in a `usize`.
-        //
-        // Contract from `NonNull::add`: If the computed offset is non-zero, then `self` must be
-        // derived from a pointer to some allocation, and the entire memory range between self and
-        // `result` (i.e., `self.addr()..result`) must be in bounds of that allocation.
-        //
-        // Evidence: the offset is within bounds of an allocated object.
-        let text = unsafe { raw.add(pc_size) };
-        let pc_section = NonNull::slice_from_raw_parts(raw.cast::<u32>(), pc);
+        let mapping = Mapping::pooled(pc_size.saturating_add(text_capacity));
+        let Ok([pc_section, text_section]) =
+            mapping.split([0..pc_len, pc_size..pc_size.saturating_add(text_capacity)])
+        else {
+            unreachable!("mapping split failed for some reason");
+        };
+        let mut program = Self {
+            pc_section,
+            text_section,
+        };
         // The pc section relies on zero-initialization to distinguish unfilled forward-jump
         // targets from filled backward-jump targets in the old JIT. The pool may hand back
         // recycled memory. Zero just the pc section here.
-        //
-        // SAFETY:
-        //
-        // Contract from `ptr::write_bytes`: `dst` must be valid for writes of `count *
-        // size_of::<T>()` bytes.
-        //
-        // Evidence: the `pc` words are within the first `pc_size` bytes of the allocation, which
-        // is read-write memory of the pool, and no other reference into it exists yet.
-        //
-        // Contract from `ptr::write_bytes`: `dst` must be properly aligned.
-        //
-        // Evidence: `pc_section` is aligned to a page boundary.
-        unsafe { std::ptr::write_bytes(pc_section.cast::<u32>().as_ptr(), 0, pc) };
-        Self {
-            allocation_size,
-            pc_section,
-            text_section: NonNull::slice_from_raw_parts(text, text_capacity),
-            sealed: false,
-        }
+        program.pc_section.fill(0);
+        program
     }
 
     /// Offset in `text_section` for each BPF instruction.
+    #[inline]
     pub fn pc_section(&self) -> &[u32] {
-        // SAFETY:
-        //
-        // Contract from `NonNull::as_ref`: When calling this method, you have to ensure that
-        // the pointer is [convertible to a reference](std::ptr#pointer-to-reference-conversion).
-        //
-        // Evidence: `pc_section` is within the allocation, which lives as long as `self`, and is
-        // only written to through `&mut self`.
-        unsafe { self.pc_section.as_ref() }
+        unsafe {
+            // SAFETY: u32 has the same invariants as u8
+            let (&[], out, &[]) = self.pc_section.align_to() else {
+                unreachable!("pc_section can't be unaligned to u32");
+            };
+            out
+        }
     }
 
-    /// The machine code, which is executable.
+    /// The machine code.
+    #[inline]
     pub fn text_section(&self) -> &[u8] {
-        // SAFETY: as for `pc_section`.
-        unsafe { self.text_section.as_ref() }
+        &self.text_section
     }
 
-    /// The pc section to fill in, which is empty once the program is sealed.
+    /// The pc section to fill in.
+    #[inline]
     pub fn pc_section_mut(&mut self) -> &mut [u32] {
-        if self.sealed {
-            return &mut [];
+        // FIXME: if there are more of such casts in the code, consider `bytemuck`.
+        unsafe {
+            // SAFETY: u32 has the same invariants as u8
+            let (&mut [], out, &mut []) = self.pc_section.align_to_mut() else {
+                unreachable!("pc_section can't be unaligned to u32");
+            };
+            out
         }
-        // SAFETY:
-        //
-        // Contract from `NonNull::as_mut`: When calling this method, you have to ensure that
-        // the pointer is [convertible to a reference](std::ptr#pointer-to-reference-conversion).
-        //
-        // Evidence: the section is read-write as `seal` has not yet protected it, and initialized
-        // (`new` zeroed it.) References into it only come from borrowing `self`, which is
-        // exclusively borrowed here.
-        unsafe { self.pc_section.as_mut() }
     }
 
-    /// The machine code to fill in, which is empty once the program is sealed.
+    /// The machine code to fill in.
+    #[inline]
     pub fn text_section_mut(&mut self) -> &mut [u8] {
-        if self.sealed {
-            return &mut [];
-        }
-        // SAFETY:
-        //
-        // Contract from `NonNull::as_mut`: When calling this method, you have to ensure that
-        // the pointer is [convertible to a reference](std::ptr#pointer-to-reference-conversion).
-        //
-        // Evidence: the section is read-write as `seal` has not protected it, and initialized as
-        // it is mmapped memory of the pool, where a reused block still holds the bytes written
-        // in the last use (or zeroed if it was a freshly allocated page.) The exclusive borrow of
-        // `self` rules out other references.
-        unsafe { self.text_section.as_mut() }
+        &mut self.text_section
     }
 
-    /// Make the pages read-only and read-execute, with `text_section` shrunk to the `used` length.
-    ///
-    /// Does nothing if the program is already sealed.
-    pub fn seal(&mut self, used: usize) -> Result<(), EbpfError> {
-        if self.sealed {
-            return Ok(());
-        }
-        if used > self.text_section.len() {
+    /// Make the pc section read-only and the text section, shrunk to the `used` length,
+    /// executable.
+    pub fn seal(self, used: usize) -> Result<JitProgram, EbpfError> {
+        let Self {
+            pc_section,
+            mut text_section,
+        } = self;
+        if used > text_section.len() {
             return Err(EbpfError::ExhaustedTextSegment(used));
         }
-        let page_size = get_system_page_size();
-        let pc_size = round_to_page_size(std::mem::size_of_val(self.pc_section()), page_size);
-        let code_size = round_to_page_size(used, page_size);
-        let text = self.text_section.as_ptr().cast::<u8>();
-        // SAFETY:
-        //
-        // Contract from `NonNull::add`: The offset in bytes, `count * size_of::<T>()`, computed on
-        // mathematical integers (without “wrapping around”), must fit in an `isize`.
-        //
-        // Contract from `NonNull::add`: Let result be `self.addr() + count * size_of::<T>()`,
-        // computed on mathematical integers. This must fit in a `usize`.
-        //
-        // Contract from `NonNull::add`: If the computed offset is non-zero, then `self` must be
-        // derived from a pointer to some allocation, and the entire memory range between self and
-        // `result` (i.e., `self.addr()..result`) must be in bounds of that allocation.
-        //
-        // Evidence: `used` does not exceed the size of alocated text section, as checked above.
-        let unused = unsafe { text.add(used) };
-
         // Debugger traps in the unused tail of the last code page.
-        //
-        // SAFETY:
-        //
-        // Contract from `ptr::write_bytes`: `dst` must be valid for writes of `count *
-        // size_of::<T>()` bytes.
-        //
-        // Evidence: `code_size` is `used` rounded up to the page size, and the length of
-        // `text_section` is the same, so the range is within it. Its pages are read-write,
-        // (`!self.sealed`), and no reference into them is alive, as references are only created by
-        // borrowing `self`.
-        //
-        // Contract from `ptr::write_bytes`: `dst` must be properly aligned.
-        //
-        // Evidence: `T` is u8 and writes are always aligned.
-        unsafe { std::ptr::write_bytes(unused, 0xcc, code_size.wrapping_sub(used)) };
+        let code_size = round_to_page_size(used, get_system_page_size());
+        text_section[used..code_size].fill(0xcc);
+        text_section.truncate(used);
+        Ok(JitProgram {
+            pc_section: pc_section.protect()?,
+            text_section: text_section.protect()?,
+        })
+    }
+}
 
-        // SAFETY:
-        //
-        // Contract from `protect_pages`: These pages must be of an allocation that the caller owns.
-        //
-        // Evidence: by construction of `JitProgram`.
-        //
-        // Contract from `protect_page`: While `permissions` apply, nothing may access these pages
-        // in a way that `permissions` do not allow.
-        //
-        // Evidence: Once `sealed` is set only shared read-only references are handed out by this
-        // type.
+/// A ready-to-execute JIT program.
+///
+/// See [`UnsealedJitProgram::seal`].
+pub struct JitProgram {
+    /// Offset to each BPF instruction's machine code within `text_section`.
+    pc_section: Mapping<Read>,
+    /// The executable machine code.
+    text_section: Mapping<ReadExecute>,
+}
+
+impl JitProgram {
+    /// Offset in `text_section` for each BPF instruction.
+    #[inline]
+    pub fn pc_section(&self) -> &[u32] {
         unsafe {
-            self.sealed = true;
-            protect_pages(
-                self.pc_section.as_ptr().cast::<u8>(),
-                pc_size,
-                PagePermissions::Read,
-            )?;
-            protect_pages(text, code_size, PagePermissions::ReadExecute)?;
-        };
-        self.text_section = NonNull::slice_from_raw_parts(self.text_section.cast::<u8>(), used);
-        Ok(())
+            // SAFETY: u32 has the same invariants as u8
+            let (&[], out, &[]) = self.pc_section.align_to() else {
+                unreachable!("pc_section can't be unaligned to u32");
+            };
+            out
+        }
+    }
+
+    /// The executable machine code.
+    #[inline]
+    pub fn text_section(&self) -> &[u8] {
+        &self.text_section
     }
 
     /// The length of the host machinecode in bytes
@@ -424,28 +353,7 @@ impl JitProgram {
 
     /// The total pooled allocation size retained by the compiled program.
     pub fn mem_size(&self) -> usize {
-        self.allocation_size
-    }
-}
-
-impl Drop for JitProgram {
-    fn drop(&mut self) {
-        // SAFETY:
-        //
-        // Contract from `free_pages_pooled`: The pointer and size must identify a full allocation
-        // previously returned by [`allocate_pages_pooled`] and not already returned to the pool.
-        //
-        // Evidence: `Self::new` is the only code that sets the arguments being passed here and they
-        // cannot be tampered with.
-        //
-        // Contract from `free_pages_pooled`: The caller must not retain any reference into the
-        // allocation after calling `free`; subsequent `alloc` calls may hand the same memory to
-        // another owner.
-        //
-        // Evidence: `JitProgram` conceptually owns the allocated data and we're in its `drop`.
-        unsafe {
-            free_pages_pooled(self.pc_section.as_ptr().cast::<u8>(), self.allocation_size);
-        }
+        self.text_section.mapped_len()
     }
 }
 
@@ -691,4 +599,39 @@ macro_rules! declare_builtin_function {
             })?
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn jit_program_sections() {
+        let page_size = get_system_page_size();
+        let mut program = UnsealedJitProgram::new(3, page_size + 1);
+        assert_eq!(program.pc_section(), [0; 3]);
+        assert_eq!(program.text_section().len(), 2 * page_size);
+        program.pc_section_mut().copy_from_slice(&[1, 2, 3]);
+        program.text_section_mut()[..2].copy_from_slice(&[0x90, 0xc3]);
+        assert!(matches!(
+            UnsealedJitProgram::new(3, page_size + 1).seal(2 * page_size + 1),
+            Err(EbpfError::ExhaustedTextSegment(_))
+        ));
+        let program = program.seal(2).unwrap();
+        assert_eq!(program.pc_section(), [1, 2, 3]);
+        assert_eq!(program.text_section(), [0x90, 0xc3]);
+        assert_eq!(program.machine_code_length(), 2);
+        assert!(program.mem_size() >= 3 * page_size);
+    }
+
+    /// The pc section of a program is zeroed even if its pages are reused.
+    #[test]
+    fn jit_program_pc_section_zeroed() {
+        for _ in 0..4 {
+            let mut program = UnsealedJitProgram::new(16, 16);
+            assert!(program.pc_section().iter().all(|&pc| pc == 0));
+            program.pc_section_mut().fill(u32::MAX);
+            program.seal(0).unwrap();
+        }
+    }
 }
