@@ -594,6 +594,7 @@ impl UnalignedMemoryMapping {
 #[derive(Debug)]
 pub struct AlignedMemoryMapping {
     regions: Vec<MemoryRegion>,
+    virtual_address_bits: u32,
 }
 
 impl AlignedMemoryMapping {
@@ -602,8 +603,11 @@ impl AlignedMemoryMapping {
     /// # Safety
     ///
     /// Refer to [`MemoryMapping::new_uninitialized`].
-    pub unsafe fn new(regions: Vec<MemoryRegion>) -> Result<Self, EbpfError> {
-        let mut mapping = Self::new_uninitialized(regions);
+    pub unsafe fn new(
+        regions: Vec<MemoryRegion>,
+        region_size: Option<usize>,
+    ) -> Result<Self, EbpfError> {
+        let mut mapping = Self::new_uninitialized(regions, region_size);
         mapping.initialize()?;
         Ok(mapping)
     }
@@ -613,8 +617,17 @@ impl AlignedMemoryMapping {
     /// # Safety
     ///
     /// Refer to [`MemoryMapping::new_uninitialized`].
-    pub unsafe fn new_uninitialized(regions: Vec<MemoryRegion>) -> Self {
-        Self { regions }
+    pub unsafe fn new_uninitialized(
+        regions: Vec<MemoryRegion>,
+        region_size: Option<usize>,
+    ) -> Self {
+        let virtual_address_bits = region_size
+            .map(|size| size.trailing_zeros())
+            .unwrap_or(ebpf::VIRTUAL_ADDRESS_BITS as u32);
+        Self {
+            regions,
+            virtual_address_bits,
+        }
     }
 
     /// Initialize the memory mapping by sorting its regions and filling gaps
@@ -628,7 +641,7 @@ impl AlignedMemoryMapping {
                 .get(expected_region_index)
                 .unwrap()
                 .vm_addr
-                .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
+                .checked_shr(self.virtual_address_bits)
                 .unwrap_or(0) as usize;
             if actual_region_index > expected_region_index {
                 self.regions.insert(
@@ -650,7 +663,7 @@ impl AlignedMemoryMapping {
     /// Returns the `MemoryRegion` which may contain the given address.
     #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
-        let index = vm_addr.wrapping_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32) as usize;
+        let index = vm_addr.wrapping_shr(self.virtual_address_bits) as usize;
         if index < self.regions.len() {
             // Safety: bounds check above
             let region = unsafe { self.regions.get_unchecked(index) };
@@ -672,12 +685,12 @@ impl AlignedMemoryMapping {
     ) -> Result<(), EbpfError> {
         let begin_index = region
             .vm_addr
-            .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
+            .checked_shr(self.virtual_address_bits)
             .unwrap_or(0) as usize;
         let end_index = region
             .vm_addr
             .saturating_add((region.len() as u64).saturating_sub(1))
-            .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
+            .checked_shr(self.virtual_address_bits)
             .unwrap_or(0) as usize;
         if begin_index != index || end_index != index {
             return Err(EbpfError::InvalidMemoryRegion(index));
@@ -738,9 +751,15 @@ impl MemoryMapping {
         config: &Config,
         sbpf_version: SBPFVersion,
         access_violation_handler: AccessViolationHandler,
+        region_size: Option<usize>,
     ) -> Result<Self, EbpfError> {
-        let mut mapping =
-            Self::new_uninitialized(regions, config, sbpf_version, access_violation_handler);
+        let mut mapping = Self::new_uninitialized(
+            regions,
+            config,
+            sbpf_version,
+            access_violation_handler,
+            region_size,
+        );
         mapping.initialize()?;
         Ok(mapping)
     }
@@ -760,9 +779,13 @@ impl MemoryMapping {
         config: &Config,
         sbpf_version: SBPFVersion,
         access_violation_handler: AccessViolationHandler,
+        region_size: Option<usize>,
     ) -> Self {
         let ty = if sbpf_version >= SBPFVersion::V4 || config.aligned_memory_mapping {
-            MemoryMappingType::Aligned(AlignedMemoryMapping::new_uninitialized(regions))
+            MemoryMappingType::Aligned(AlignedMemoryMapping::new_uninitialized(
+                regions,
+                region_size,
+            ))
         } else {
             debug_assert!(
                 sbpf_version <= SBPFVersion::V3,
@@ -793,12 +816,14 @@ impl MemoryMapping {
         regions: Vec<MemoryRegion>,
         config: &Config,
         sbpf_version: SBPFVersion,
+        region_size: Option<usize>,
     ) -> Result<Self, EbpfError> {
         Self::new_with_access_violation_handler(
             regions,
             config,
             sbpf_version,
             Box::new(default_access_violation_handler),
+            region_size,
         )
     }
 
@@ -1204,7 +1229,7 @@ mod test {
                 aligned_memory_mapping,
                 ..Config::default()
             };
-            let m = unsafe { MemoryMapping::new(vec![], &config, SBPFVersion::V3) }.unwrap();
+            let m = unsafe { MemoryMapping::new(vec![], &config, SBPFVersion::V3, None) }.unwrap();
             assert_error!(
                 m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 8),
                 "AccessViolation"
@@ -1229,6 +1254,7 @@ mod test {
                     ],
                     &config,
                     SBPFVersion::V3,
+                    None,
                 )
                 .unwrap()
             };
@@ -1265,6 +1291,7 @@ mod test {
                     ],
                     &config,
                     SBPFVersion::V3,
+                    None,
                 )
             },
             "InvalidMemoryRegion(1)"
@@ -1277,6 +1304,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
         }
         .is_ok());
@@ -1308,6 +1336,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1396,6 +1425,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1436,6 +1466,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V4,
+                None,
             )
             .unwrap()
         };
@@ -1476,6 +1507,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1501,6 +1533,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1527,6 +1560,7 @@ mod test {
                 vec![MemoryRegion::new(&raw mut mem1, ebpf::MM_REGION_SIZE)],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1547,6 +1581,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1569,6 +1604,7 @@ mod test {
                 vec![MemoryRegion::new(&raw const mem1, ebpf::MM_REGION_SIZE)],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1587,6 +1623,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1610,6 +1647,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1633,6 +1671,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V3,
+                None,
             )
             .unwrap()
         };
@@ -1726,6 +1765,7 @@ mod test {
                 ],
                 &config,
                 SBPFVersion::V4,
+                None,
             )
             .unwrap()
         };
@@ -1811,6 +1851,7 @@ mod test {
                         vec.extend_from_slice(&original);
                         region.redirect(&raw mut vec[..]);
                     }),
+                    None,
                 )
                 .unwrap()
             };
@@ -1855,6 +1896,7 @@ mod test {
                         vec.extend_from_slice(&original);
                         region.redirect(&raw mut vec[..]);
                     }),
+                    None,
                 )
                 .unwrap()
             };
@@ -1909,6 +1951,7 @@ mod test {
                         vec.extend_from_slice(&original1);
                         region.redirect(&raw mut vec[..]);
                     }),
+                    None,
                 )
                 .unwrap()
             };
@@ -1931,6 +1974,7 @@ mod test {
                 &config,
                 SBPFVersion::V4,
                 Box::new(default_access_violation_handler),
+                None,
             )
             .unwrap()
         };
@@ -1950,6 +1994,7 @@ mod test {
                 &config,
                 SBPFVersion::V4,
                 Box::new(default_access_violation_handler),
+                None,
             )
             .unwrap()
         };
@@ -1967,6 +2012,7 @@ mod test {
                 vec![MemoryRegion::new(&raw const original, region)],
                 &config,
                 SBPFVersion::V4,
+                None,
             )
             .unwrap()
         };
@@ -1996,6 +2042,7 @@ mod test {
                 &config,
                 SBPFVersion::V4,
                 Box::new(default_access_violation_handler),
+                None,
             )
             .unwrap()
         };

@@ -313,7 +313,7 @@ pub enum RuntimeEnvironmentSlot {
 /// ];
 ///;
 /// context_object.memory_mapping = unsafe {
-///     MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap()
+///     MemoryMapping::new(regions, executable.get_config(), sbpf_version, None).unwrap()
 /// };
 ///
 /// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
@@ -603,8 +603,9 @@ mod tests {
         }
         let version = SBPFVersion::V4;
         let config = Config::default();
-        let mut context_object =
-            unsafe { DummyContextObject(MemoryMapping::new(vec![], &config, version).unwrap()) };
+        let mut context_object = unsafe {
+            DummyContextObject(MemoryMapping::new(vec![], &config, version, None).unwrap())
+        };
         let env = super::EbpfVm::new(
             Arc::new(BuiltinProgram::new_mock()),
             version,
