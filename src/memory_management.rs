@@ -302,6 +302,13 @@ pub unsafe fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError>
     Ok(raw.cast::<u8>())
 }
 
+/// Unmap the pages of an allocation.
+///
+/// # Safety
+///
+/// - `raw` and `size_in_bytes` must be a mapping that [`allocate_pages`] or
+///   [`allocate_pages_low`] created, which is not freed already.
+/// - Nothing may access the allocation afterwards.
 pub unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) -> Result<(), EbpfError> {
     #[cfg(not(target_os = "windows"))]
     libc_error_guard!(munmap, raw.cast::<c_void>(), size_in_bytes);
@@ -322,6 +329,14 @@ pub enum PagePermissions {
     ReadExecute,
 }
 
+/// Set the access `permissions` of the pages containing any part of the `size_in_bytes` bytes at
+/// `raw`, which must be aligned to a page boundary.
+///
+/// # Safety
+///
+/// - These pages must be of an allocation that the caller owns.
+/// - While `permissions` apply, nothing may access these pages in a way that `permissions` do not
+///   allow.
 pub unsafe fn protect_pages(
     raw: *mut u8,
     size_in_bytes: usize,

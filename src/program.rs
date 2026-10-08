@@ -242,7 +242,10 @@ pub struct JitProgram {
     sealed: bool,
 }
 
+// SAFETY: `JitProgram` owns its allocation like a `Box<[u8]>` would, and only the JIT compiler
+// writes to it, through `&mut self` before `seal`, before the program is shared.
 unsafe impl Send for JitProgram {}
+// SAFETY: see the `Send` implementation.
 unsafe impl Sync for JitProgram {}
 
 impl JitProgram {
@@ -254,11 +257,36 @@ impl JitProgram {
         let text_capacity = round_to_page_size(code_capacity, page_size);
         let (raw, allocation_size) = allocate_pages_pooled(pc_size.saturating_add(text_capacity));
         let raw = NonNull::new(raw).expect("the pooled allocation is never null");
+        // SAFETY:
+        //
+        // Contract from `NonNull::add`: The offset in bytes, `count * size_of::<T>()`, computed on
+        // mathematical integers (without “wrapping around”), must fit in an `isize`.
+        //
+        // Contract from `NonNull::add`: Let result be `self.addr() + count * size_of::<T>()`,
+        // computed on mathematical integers. This must fit in a `usize`.
+        //
+        // Contract from `NonNull::add`: If the computed offset is non-zero, then `self` must be
+        // derived from a pointer to some allocation, and the entire memory range between self and
+        // `result` (i.e., `self.addr()..result`) must be in bounds of that allocation.
+        //
+        // Evidence: the offset is within bounds of an allocated object.
         let text = unsafe { raw.add(pc_size) };
         let pc_section = NonNull::slice_from_raw_parts(raw.cast::<u32>(), pc);
         // The pc section relies on zero-initialization to distinguish unfilled forward-jump
         // targets from filled backward-jump targets in the old JIT. The pool may hand back
         // recycled memory. Zero just the pc section here.
+        //
+        // SAFETY:
+        //
+        // Contract from `ptr::write_bytes`: `dst` must be valid for writes of `count *
+        // size_of::<T>()` bytes.
+        //
+        // Evidence: the `pc` words are within the first `pc_size` bytes of the allocation, which
+        // is read-write memory of the pool, and no other reference into it exists yet.
+        //
+        // Contract from `ptr::write_bytes`: `dst` must be properly aligned.
+        //
+        // Evidence: `pc_section` is aligned to a page boundary.
         unsafe { std::ptr::write_bytes(pc_section.cast::<u32>().as_ptr(), 0, pc) };
         Self {
             allocation_size,
@@ -270,11 +298,19 @@ impl JitProgram {
 
     /// Offset in `text_section` for each BPF instruction.
     pub fn pc_section(&self) -> &[u32] {
+        // SAFETY:
+        //
+        // Contract from `NonNull::as_ref`: When calling this method, you have to ensure that
+        // the pointer is [convertible to a reference](std::ptr#pointer-to-reference-conversion).
+        //
+        // Evidence: `pc_section` is within the allocation, which lives as long as `self`, and is
+        // only written to through `&mut self`.
         unsafe { self.pc_section.as_ref() }
     }
 
     /// The machine code, which is executable.
     pub fn text_section(&self) -> &[u8] {
+        // SAFETY: as for `pc_section`.
         unsafe { self.text_section.as_ref() }
     }
 
@@ -283,6 +319,14 @@ impl JitProgram {
         if self.sealed {
             return &mut [];
         }
+        // SAFETY:
+        //
+        // Contract from `NonNull::as_mut`: When calling this method, you have to ensure that
+        // the pointer is [convertible to a reference](std::ptr#pointer-to-reference-conversion).
+        //
+        // Evidence: the section is read-write as `seal` has not yet protected it, and initialized
+        // (`new` zeroed it.) References into it only come from borrowing `self`, which is
+        // exclusively borrowed here.
         unsafe { self.pc_section.as_mut() }
     }
 
@@ -291,6 +335,15 @@ impl JitProgram {
         if self.sealed {
             return &mut [];
         }
+        // SAFETY:
+        //
+        // Contract from `NonNull::as_mut`: When calling this method, you have to ensure that
+        // the pointer is [convertible to a reference](std::ptr#pointer-to-reference-conversion).
+        //
+        // Evidence: the section is read-write as `seal` has not protected it, and initialized as
+        // it is mmapped memory of the pool, where a reused block still holds the bytes written
+        // in the last use (or zeroed if it was a freshly allocated page.) The exclusive borrow of
+        // `self` rules out other references.
         unsafe { self.text_section.as_mut() }
     }
 
@@ -308,12 +361,49 @@ impl JitProgram {
         let pc_size = round_to_page_size(std::mem::size_of_val(self.pc_section()), page_size);
         let code_size = round_to_page_size(used, page_size);
         let text = self.text_section.as_ptr().cast::<u8>();
+        // SAFETY:
+        //
+        // Contract from `NonNull::add`: The offset in bytes, `count * size_of::<T>()`, computed on
+        // mathematical integers (without “wrapping around”), must fit in an `isize`.
+        //
+        // Contract from `NonNull::add`: Let result be `self.addr() + count * size_of::<T>()`,
+        // computed on mathematical integers. This must fit in a `usize`.
+        //
+        // Contract from `NonNull::add`: If the computed offset is non-zero, then `self` must be
+        // derived from a pointer to some allocation, and the entire memory range between self and
+        // `result` (i.e., `self.addr()..result`) must be in bounds of that allocation.
+        //
+        // Evidence: `used` does not exceed the size of alocated text section, as checked above.
         let unused = unsafe { text.add(used) };
 
-        // x64 debugger traps in the unused tail of the last code page.
-        // FIXME: this should be architecture-independent somehow.
+        // Debugger traps in the unused tail of the last code page.
+        //
+        // SAFETY:
+        //
+        // Contract from `ptr::write_bytes`: `dst` must be valid for writes of `count *
+        // size_of::<T>()` bytes.
+        //
+        // Evidence: `code_size` is `used` rounded up to the page size, and the length of
+        // `text_section` is the same, so the range is within it. Its pages are read-write,
+        // (`!self.sealed`), and no reference into them is alive, as references are only created by
+        // borrowing `self`.
+        //
+        // Contract from `ptr::write_bytes`: `dst` must be properly aligned.
+        //
+        // Evidence: `T` is u8 and writes are always aligned.
         unsafe { std::ptr::write_bytes(unused, 0xcc, code_size.wrapping_sub(used)) };
 
+        // SAFETY:
+        //
+        // Contract from `protect_pages`: These pages must be of an allocation that the caller owns.
+        //
+        // Evidence: by construction of `JitProgram`.
+        //
+        // Contract from `protect_page`: While `permissions` apply, nothing may access these pages
+        // in a way that `permissions` do not allow.
+        //
+        // Evidence: Once `sealed` is set only shared read-only references are handed out by this
+        // type.
         unsafe {
             self.sealed = true;
             protect_pages(
@@ -340,6 +430,19 @@ impl JitProgram {
 
 impl Drop for JitProgram {
     fn drop(&mut self) {
+        // SAFETY:
+        //
+        // Contract from `free_pages_pooled`: The pointer and size must identify a full allocation
+        // previously returned by [`allocate_pages_pooled`] and not already returned to the pool.
+        //
+        // Evidence: `Self::new` is the only code that sets the arguments being passed here and they
+        // cannot be tampered with.
+        //
+        // Contract from `free_pages_pooled`: The caller must not retain any reference into the
+        // allocation after calling `free`; subsequent `alloc` calls may hand the same memory to
+        // another owner.
+        //
+        // Evidence: `JitProgram` conceptually owns the allocated data and we're in its `drop`.
         unsafe {
             free_pages_pooled(self.pc_section.as_ptr().cast::<u8>(), self.allocation_size);
         }
