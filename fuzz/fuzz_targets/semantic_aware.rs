@@ -12,16 +12,16 @@ pub struct Register(u8);
 
 impl Register {
     #[cfg(feature = "only-verified")]
-    fn to_dst(&self) -> u8 {
+    fn get_dst(&self) -> u8 {
         self.0 % 10 // cannot write to r10
     }
 
     #[cfg(not(feature = "only-verified"))]
-    fn to_dst(&self) -> u8 {
+    fn get_dst(&self) -> u8 {
         self.0 % 11 // cannot write to r10, but we'll try anyways
     }
 
-    fn to_src(&self) -> u8 {
+    fn get_src(&self) -> u8 {
         self.0 % 11
     }
 }
@@ -77,7 +77,7 @@ pub enum FuzzedInstruction {
     Modulo(Arch, Register, FuzzedNonZeroSource),
     BitXor(Arch, Register, FuzzedSource),
     Mov(Arch, Register, FuzzedSource),
-    SRS(Arch, Register, FuzzedSource),
+    Srs(Arch, Register, FuzzedSource),
     SwapBytes(Register, Endian, SwapSize),
     #[cfg(feature = "only-verified")]
     // load only has lddw; there are no other variants, and it needs to be split
@@ -115,16 +115,16 @@ pub type FuzzProgram = Vec<FuzzedInstruction>;
 
 fn complete_alu_insn<'i>(insn: Move<'i>, dst: &Register, src: &FuzzedSource) {
     match src {
-        FuzzedSource::Reg(r) => insn.set_dst(dst.to_dst()).set_src(r.to_src()).push(),
-        FuzzedSource::Imm(imm) => insn.set_dst(dst.to_dst()).set_imm(*imm as i64).push(),
+        FuzzedSource::Reg(r) => insn.set_dst(dst.get_dst()).set_src(r.get_src()).push(),
+        FuzzedSource::Imm(imm) => insn.set_dst(dst.get_dst()).set_imm(*imm as i64).push(),
     };
 }
 
 fn complete_alu_insn_shift<'i>(insn: Move<'i>, dst: &Register, src: &FuzzedSource, max: i64) {
     match src {
-        FuzzedSource::Reg(r) => insn.set_dst(dst.to_dst()).set_src(r.to_src()).push(),
+        FuzzedSource::Reg(r) => insn.set_dst(dst.get_dst()).set_src(r.get_src()).push(),
         FuzzedSource::Imm(imm) => insn
-            .set_dst(dst.to_dst())
+            .set_dst(dst.get_dst())
             .set_imm((*imm as i64).rem_euclid(max))
             .push(),
     };
@@ -132,9 +132,9 @@ fn complete_alu_insn_shift<'i>(insn: Move<'i>, dst: &Register, src: &FuzzedSourc
 
 fn complete_alu_insn_nonzero<'i>(insn: Move<'i>, dst: &Register, src: &FuzzedNonZeroSource) {
     match src {
-        FuzzedNonZeroSource::Reg(r) => insn.set_dst(dst.to_dst()).set_src(r.to_src()).push(),
+        FuzzedNonZeroSource::Reg(r) => insn.set_dst(dst.get_dst()).set_src(r.get_src()).push(),
         FuzzedNonZeroSource::Imm(imm) => insn
-            .set_dst(dst.to_dst())
+            .set_dst(dst.get_dst())
             .set_imm(i32::from(*imm) as i64)
             .push(),
     };
@@ -142,9 +142,9 @@ fn complete_alu_insn_nonzero<'i>(insn: Move<'i>, dst: &Register, src: &FuzzedNon
 
 fn complete_pqr_insn<'i>(insn: Pqr<'i>, dst: &Register, src: &FuzzedNonZeroSource) {
     match src {
-        FuzzedNonZeroSource::Reg(r) => insn.set_dst(dst.to_dst()).set_src(r.to_src()).push(),
+        FuzzedNonZeroSource::Reg(r) => insn.set_dst(dst.get_dst()).set_src(r.get_src()).push(),
         FuzzedNonZeroSource::Imm(imm) => insn
-            .set_dst(dst.to_dst())
+            .set_dst(dst.get_dst())
             .set_imm(i32::from(*imm) as i64)
             .push(),
     };
@@ -299,7 +299,7 @@ pub fn make_program(
                 Arch::X32 => complete_alu_insn_shift(code.right_shift(s.into(), *a), d, s, 32),
             },
             FuzzedInstruction::Negate(a, d) => {
-                code.negate(*a).set_dst(d.to_dst()).push();
+                code.negate(*a).set_dst(d.get_dst()).push();
             }
             FuzzedInstruction::Modulo(a, d, s) => {
                 complete_alu_insn_nonzero(code.modulo(s.into(), *a), d, s)
@@ -308,7 +308,7 @@ pub fn make_program(
                 complete_alu_insn(code.bit_xor(s.into(), *a), d, s)
             }
             FuzzedInstruction::Mov(a, d, s) => complete_alu_insn(code.mov(s.into(), *a), d, s),
-            FuzzedInstruction::SRS(a, d, s) => match a {
+            FuzzedInstruction::Srs(a, d, s) => match a {
                 Arch::X64 => {
                     complete_alu_insn_shift(code.signed_right_shift(s.into(), *a), d, s, 64)
                 }
@@ -318,7 +318,7 @@ pub fn make_program(
             },
             FuzzedInstruction::SwapBytes(d, e, s) => {
                 code.swap_bytes(*e)
-                    .set_dst(d.to_dst())
+                    .set_dst(d.get_dst())
                     .set_imm(*s as i64)
                     .push();
             }
@@ -326,7 +326,7 @@ pub fn make_program(
             FuzzedInstruction::Load(d, imm1, imm2) => {
                 // lddw is split in two
                 code.load(MemSize::DoubleWord)
-                    .set_dst(d.to_dst())
+                    .set_dst(d.get_dst())
                     .set_imm(*imm1 as i64)
                     .push()
                     .load(MemSize::Word)
@@ -338,7 +338,7 @@ pub fn make_program(
             FuzzedInstruction::Load(d, m, imm) => {
                 // For testing: generate potentially invalid/malformed LDDW variants
                 // (not split into two instructions as required by spec)
-                code.load(*m).set_dst(d.to_dst()).set_imm(*imm).push();
+                code.load(*m).set_dst(d.get_dst()).set_imm(*imm).push();
             }
             #[cfg(not(feature = "only-verified"))]
             FuzzedInstruction::LoadAbs(m, imm) => {
@@ -347,7 +347,7 @@ pub fn make_program(
             #[cfg(not(feature = "only-verified"))]
             FuzzedInstruction::LoadInd(m, s, imm) => {
                 code.load_ind(*m)
-                    .set_src(s.to_src())
+                    .set_src(s.get_src())
                     .set_imm(*imm as i64)
                     .push();
             }
@@ -355,15 +355,15 @@ pub fn make_program(
             FuzzedInstruction::LoadX(d, m, s, off) => {
                 // Automatically uses V2 encoding when move_memory_instruction_classes() is true
                 code.load_x(*m)
-                    .set_dst(d.to_dst())
-                    .set_src(s.to_src())
+                    .set_dst(d.get_dst())
+                    .set_src(s.get_src())
                     .set_off(*off)
                     .push();
             }
             FuzzedInstruction::Store(d, m, off, imm) => {
                 // Automatically uses V2 encoding when move_memory_instruction_classes() is true
                 code.store(*m)
-                    .set_dst(d.to_dst())
+                    .set_dst(d.get_dst())
                     .set_off(*off)
                     .set_imm(*imm as i64)
                     .push();
@@ -371,29 +371,29 @@ pub fn make_program(
             FuzzedInstruction::StoreX(d, m, off, s) => {
                 // Automatically uses V2 encoding when move_memory_instruction_classes() is true
                 code.store_x(*m)
-                    .set_dst(d.to_dst())
+                    .set_dst(d.get_dst())
                     .set_off(*off)
-                    .set_src(s.to_src())
+                    .set_src(s.get_src())
                     .push();
             }
             FuzzedInstruction::Jump(off) => {
                 code.jump_unconditional()
-                    .set_off(fix_jump(&prog, *off, pos, len, sbpf_version))
+                    .set_off(fix_jump(prog, *off, pos, len, sbpf_version))
                     .push();
             }
             FuzzedInstruction::JumpC(d, c, s, off) => {
                 match s {
                     FuzzedSource::Reg(r) => code
                         .jump_conditional(*c, s.into())
-                        .set_dst(d.to_dst())
-                        .set_src(r.to_src())
-                        .set_off(fix_jump(&prog, *off, pos, len, sbpf_version))
+                        .set_dst(d.get_dst())
+                        .set_src(r.get_src())
+                        .set_off(fix_jump(prog, *off, pos, len, sbpf_version))
                         .push(),
                     FuzzedSource::Imm(imm) => code
                         .jump_conditional(*c, s.into())
-                        .set_dst(d.to_dst())
+                        .set_dst(d.get_dst())
                         .set_imm(*imm as i64)
-                        .set_off(fix_jump(&prog, *off, pos, len, sbpf_version))
+                        .set_off(fix_jump(prog, *off, pos, len, sbpf_version))
                         .push(),
                 };
             }
@@ -405,8 +405,8 @@ pub fn make_program(
                     }
                     FuzzedSource::Reg(r) => {
                         // CALL_REG (callx) - automatically handles version-specific register encoding
-                        // Registers are restricted to 0-9 (not 10), so we use to_dst()
-                        let reg = r.to_dst();
+                        // Registers are restricted to 0-9 (not 10), so we use get_dst()
+                        let reg = r.get_dst();
                         code.call_reg()
                             .set_dst(reg)
                             .set_src(reg)
@@ -426,21 +426,21 @@ pub fn make_program(
                 match s {
                     FuzzedSource::Reg(r) => code
                         .jump_conditional_32(*c, Source::Reg)
-                        .set_dst(d.to_dst())
-                        .set_src(r.to_src())
-                        .set_off(fix_jump(&prog, *off, pos, len, sbpf_version))
+                        .set_dst(d.get_dst())
+                        .set_src(r.get_src())
+                        .set_off(fix_jump(prog, *off, pos, len, sbpf_version))
                         .push(),
                     FuzzedSource::Imm(imm) => code
                         .jump_conditional_32(*c, Source::Imm)
-                        .set_dst(d.to_dst())
+                        .set_dst(d.get_dst())
                         .set_imm(*imm as i64)
-                        .set_off(fix_jump(&prog, *off, pos, len, sbpf_version))
+                        .set_off(fix_jump(prog, *off, pos, len, sbpf_version))
                         .push(),
                 };
             }
             FuzzedInstruction::Hor64Imm(d, imm) => {
                 code.hor64_imm()
-                    .set_dst(d.to_dst())
+                    .set_dst(d.get_dst())
                     .set_imm(*imm as i64)
                     .push();
             }
