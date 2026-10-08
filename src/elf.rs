@@ -19,13 +19,11 @@ use crate::{
     },
     error::EbpfError,
     memory_region::MemoryRegion,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinProgram, FunctionRegistry, JitProgram, SBPFVersion},
     verifier::Verifier,
     vm::{Config, ContextObject},
 };
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-use crate::jit::{JitCompiler, JitProgram};
 use byteorder::{ByteOrder, LittleEndian};
 use std::{
     collections::BTreeMap,
@@ -305,8 +303,7 @@ pub struct Executable<C: ContextObject> {
     /// Loader built-in program
     loader: Arc<BuiltinProgram<C>>,
     /// Compiled program and argument
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-    compiled_program: std::sync::Mutex<Option<Arc<JitProgram>>>,
+    pub(crate) compiled_program: std::sync::Mutex<Option<Arc<JitProgram>>>,
 }
 
 impl<C: PartialEq + ContextObject> PartialEq for Executable<C> {
@@ -320,23 +317,14 @@ impl<C: PartialEq + ContextObject> PartialEq for Executable<C> {
             && self.function_registry == other.function_registry
             && *self.loader == *other.loader
             && {
-                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-                {
-                    // In order to avoid a deadlock comparing self with self, we gotta make sure
-                    // that we clone at least one Arc out of the lock before comparing...
-                    let other = other.get_compiled_program();
-                    let this = self
-                        .compiled_program
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    *this == other
-                }
-                #[cfg(not(all(
-                    feature = "jit",
-                    not(target_os = "windows"),
-                    target_arch = "x86_64"
-                )))]
-                true
+                // In order to avoid a deadlock comparing self with self, we gotta make sure
+                // that we clone at least one Arc out of the lock before comparing...
+                let other = other.get_compiled_program();
+                let this = self
+                    .compiled_program
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                *this == other
             }
     }
 }
@@ -410,7 +398,6 @@ impl<C: ContextObject> Executable<C> {
     ///
     /// This function will not block the calling thread even if there is a concurrent ongoing call
     /// to [`Self::jit_compile`].
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
     pub fn get_compiled_program(&self) -> Option<Arc<JitProgram>> {
         let guard = self
             .compiled_program
@@ -429,35 +416,11 @@ impl<C: ContextObject> Executable<C> {
         Ok(())
     }
 
-    /// JIT compile the executable
-    ///
-    /// This function does not ensure fully sequentially consistent execution ordering between calls
-    /// to it and related calls such as [`Self::get_compiled_program`] or
-    /// [`Self::take_compiled_program`].
-    ///
-    /// This means that there can be some non-trivial interactions in ordering between calls to this
-    /// function and a `get_compiled_program`: concurrent calls to `get_compiled_program` will
-    /// return the previous compiled program or `None` for the duration of the compilation process
-    /// and is only guaranteed to start returning the newly compiled `JitProgram` after this
-    /// function returns.
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-    pub fn jit_compile(&self) -> Result<(), crate::error::EbpfError> {
-        let jit = JitCompiler::<C>::new(self)?;
-        let compiled = Arc::new(jit.compile()?);
-        let mut guard = self
-            .compiled_program
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *guard = Some(compiled);
-        Ok(())
-    }
-
     /// Remove the compiled program.
     ///
     /// Note that the results can be unpredictable in presence of concurrent ongoing calls to
     /// [`Self::jit_compile`]: based on exact execution ordering this function may take out the
     /// previous program (or `None`) that shorly afterwards gets replaced by a compiled program.
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
     pub fn take_compiled_program(&self) -> Option<Arc<JitProgram>> {
         let mut guard = self
             .compiled_program
@@ -506,7 +469,6 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
     }
@@ -662,7 +624,6 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
     }
@@ -836,7 +797,6 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
     }
@@ -857,12 +817,9 @@ impl<C: ContextObject> Executable<C> {
             // bpf functions
             .saturating_add(self.function_registry.mem_size());
 
-        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-        {
-            // compiled programs
-            let prog = self.compiled_program.lock().unwrap_or_else(|e| e.into_inner());
-            total = total.saturating_add(prog.as_ref().map_or(0, |program| program.mem_size()));
-        }
+        // compiled programs
+        let prog = self.compiled_program.lock().unwrap_or_else(|e| e.into_inner());
+        total = total.saturating_add(prog.as_ref().map_or(0, |program| program.mem_size()));
 
         total
     }
