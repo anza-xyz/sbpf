@@ -163,7 +163,7 @@ fn main() {
     ];
 
     context_object.memory_mapping =
-        unsafe { MemoryMapping::new(regions, config, sbpf_version).unwrap() };
+        unsafe { MemoryMapping::new(regions, config, sbpf_version, None).unwrap() };
 
     let mut vm = EbpfVm::new(
         executable.get_loader().clone(),
