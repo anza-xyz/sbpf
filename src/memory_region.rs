@@ -621,6 +621,7 @@ impl AlignedMemoryMapping {
         regions: Vec<MemoryRegion>,
         region_size: Option<usize>,
     ) -> Self {
+        debug_assert!(region_size.unwrap_or(2).is_multiple_of(2));
         let virtual_address_bits = region_size
             .map(|size| size.trailing_zeros())
             .unwrap_or(ebpf::VIRTUAL_ADDRESS_BITS as u32);
@@ -2183,5 +2184,39 @@ mod test {
         };
 
         assert!(matches!(mapping.ty, MemoryMappingType::Aligned(_)));
+    }
+
+    #[test]
+    fn test_different_region_sizes() {
+        let mem1 = b"solana";
+        let mem2 = b"is";
+        let mem3 = b"cool";
+        let mem4 = b"innit?";
+        for region_size in [128 * 1024 * 1024, 256 * 1024 * 1024] {
+            let mut mapping = unsafe {
+                AlignedMemoryMapping::new_uninitialized(
+                    vec![
+                        MemoryRegion::new(&raw const mem1[..], region_size),
+                        MemoryRegion::new(&raw const mem2[..], 2 * region_size),
+                        MemoryRegion::new(&raw const mem3[..], 3 * region_size),
+                    ],
+                    Some(region_size as usize),
+                )
+            };
+
+            mapping.initialize().unwrap();
+            let (index, region) = mapping.find_region(2 * region_size).unwrap();
+            assert_eq!(index, 2);
+            assert_eq!(region.host_buffer().ptr().cast::<u8>(), mem2.as_ptr());
+            let mut new_region = region.clone();
+            unsafe {
+                new_region.redirect(&raw const mem4[..]);
+                mapping.replace_region(2, new_region).unwrap();
+            }
+
+            let (index, region) = mapping.find_region(2 * region_size).unwrap();
+            assert_eq!(index, 2);
+            assert_eq!(region.host_buffer().ptr().cast::<u8>(), mem4.as_ptr());
+        }
     }
 }
