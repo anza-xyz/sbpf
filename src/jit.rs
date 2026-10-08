@@ -30,7 +30,7 @@ use crate::{
     elf::Executable,
     error::{EbpfError, ProgramResult},
     memory_region::MemoryMapping,
-    program::{BuiltinFunction, JitProgram},
+    program::{BuiltinFunction, JitProgram, UnsealedJitProgram},
     vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm, RuntimeEnvironmentSlot},
     x86::{
         FenceType, X86IndirectAccess, X86Instruction,
@@ -272,7 +272,7 @@ struct Jump {
 
 /// Temporary object which stores the compilation context
 pub struct JitCompiler<'a, C: ContextObject> {
-    result: JitProgram,
+    result: UnsealedJitProgram,
     text_section_jumps: Vec<Jump>,
     anchors: [*const u8; ANCHOR_COUNT],
     offset_in_text_section: usize,
@@ -326,7 +326,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         let immediate_value_key = diversification_rng.gen::<i64>();
 
         Ok(Self {
-            result: JitProgram::new(pc, code_length_estimate),
+            result: UnsealedJitProgram::new(pc, code_length_estimate),
             text_section_jumps: vec![],
             anchors: [std::ptr::null(); ANCHOR_COUNT],
             offset_in_text_section: 0,
@@ -812,8 +812,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 5)));
 
         self.resolve_jumps();
-        self.result.seal(self.offset_in_text_section)?;
-        Ok(self.result)
+        self.result.seal(self.offset_in_text_section)
     }
 
     /// Some user provided constants can skip sanitization, returns `false` for those
