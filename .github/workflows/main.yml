@@ -123,6 +123,8 @@ jobs:
   pr-status:
     name: PR CI Status
     needs:
+      - fmt
+      - clippy
       - test
       - coverage
     if: ${{ always() && github.event_name == 'pull_request' }}
