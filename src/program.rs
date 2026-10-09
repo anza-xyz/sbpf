@@ -3,9 +3,15 @@ use {
     crate::{
         ebpf,
         elf::ElfError,
+        error::EbpfError,
+        memory_management::{
+            allocate_pages_pooled, free_pages_pooled, get_system_page_size, protect_pages,
+            round_to_page_size, PagePermissions,
+        },
         vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
     },
     std::collections::{btree_map::Entry, BTreeMap},
+    std::ptr::NonNull,
 };
 
 /// Defines a set of sbpf_version of an executable
@@ -221,6 +227,134 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
                 )
             },
         ))
+    }
+}
+
+/// The JIT output for a program, in a single pooled allocation.
+pub struct JitProgram {
+    /// Size of the pooled allocation.
+    allocation_size: usize,
+    /// Offset to each BPF instruction's machine code within `text_section`.
+    pc_section: NonNull<[u32]>,
+    /// The executable machine code.
+    text_section: NonNull<[u8]>,
+    /// Whether [`Self::seal`] has been invoked.
+    sealed: bool,
+}
+
+unsafe impl Send for JitProgram {}
+unsafe impl Sync for JitProgram {}
+
+impl JitProgram {
+    /// Allocate a program with `pc` zeroed entries in the pc section and room for `code_capacity`
+    /// bytes of machine code.
+    pub fn new(pc: usize, code_capacity: usize) -> Self {
+        let page_size = get_system_page_size();
+        let pc_size = round_to_page_size(pc.saturating_mul(std::mem::size_of::<u32>()), page_size);
+        let text_capacity = round_to_page_size(code_capacity, page_size);
+        let (raw, allocation_size) = allocate_pages_pooled(pc_size.saturating_add(text_capacity));
+        let raw = NonNull::new(raw).expect("the pooled allocation is never null");
+        let text = unsafe { raw.add(pc_size) };
+        let pc_section = NonNull::slice_from_raw_parts(raw.cast::<u32>(), pc);
+        // The pc section relies on zero-initialization to distinguish unfilled forward-jump
+        // targets from filled backward-jump targets in the old JIT. The pool may hand back
+        // recycled memory. Zero just the pc section here.
+        unsafe { std::ptr::write_bytes(pc_section.cast::<u32>().as_ptr(), 0, pc) };
+        Self {
+            allocation_size,
+            pc_section,
+            text_section: NonNull::slice_from_raw_parts(text, text_capacity),
+            sealed: false,
+        }
+    }
+
+    /// Offset in `text_section` for each BPF instruction.
+    pub fn pc_section(&self) -> &[u32] {
+        unsafe { self.pc_section.as_ref() }
+    }
+
+    /// The machine code, which is executable.
+    pub fn text_section(&self) -> &[u8] {
+        unsafe { self.text_section.as_ref() }
+    }
+
+    /// The pc section to fill in, which is empty once the program is sealed.
+    pub fn pc_section_mut(&mut self) -> &mut [u32] {
+        if self.sealed {
+            return &mut [];
+        }
+        unsafe { self.pc_section.as_mut() }
+    }
+
+    /// The machine code to fill in, which is empty once the program is sealed.
+    pub fn text_section_mut(&mut self) -> &mut [u8] {
+        if self.sealed {
+            return &mut [];
+        }
+        unsafe { self.text_section.as_mut() }
+    }
+
+    /// Make the pages read-only and read-execute, with `text_section` shrunk to the `used` length.
+    ///
+    /// Does nothing if the program is already sealed.
+    pub fn seal(&mut self, used: usize) -> Result<(), EbpfError> {
+        if self.sealed {
+            return Ok(());
+        }
+        if used > self.text_section.len() {
+            return Err(EbpfError::ExhaustedTextSegment(used));
+        }
+        let page_size = get_system_page_size();
+        let pc_size = round_to_page_size(std::mem::size_of_val(self.pc_section()), page_size);
+        let code_size = round_to_page_size(used, page_size);
+        let text = self.text_section.as_ptr().cast::<u8>();
+        let unused = unsafe { text.add(used) };
+
+        // x64 debugger traps in the unused tail of the last code page.
+        // FIXME: this should be architecture-independent somehow.
+        unsafe { std::ptr::write_bytes(unused, 0xcc, code_size.wrapping_sub(used)) };
+
+        unsafe {
+            self.sealed = true;
+            protect_pages(
+                self.pc_section.as_ptr().cast::<u8>(),
+                pc_size,
+                PagePermissions::Read,
+            )?;
+            protect_pages(text, code_size, PagePermissions::ReadExecute)?;
+        };
+        self.text_section = NonNull::slice_from_raw_parts(self.text_section.cast::<u8>(), used);
+        Ok(())
+    }
+
+    /// The length of the host machinecode in bytes
+    pub fn machine_code_length(&self) -> usize {
+        self.text_section().len()
+    }
+
+    /// The total pooled allocation size retained by the compiled program.
+    pub fn mem_size(&self) -> usize {
+        self.allocation_size
+    }
+}
+
+impl Drop for JitProgram {
+    fn drop(&mut self) {
+        unsafe {
+            free_pages_pooled(self.pc_section.as_ptr().cast::<u8>(), self.allocation_size);
+        }
+    }
+}
+
+impl std::fmt::Debug for JitProgram {
+    fn fmt(&self, fmt: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        fmt.write_fmt(format_args!("JitProgram {:?}", self as *const _))
+    }
+}
+
+impl PartialEq for JitProgram {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self, other)
     }
 }
 
