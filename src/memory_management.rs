@@ -16,14 +16,17 @@ extern crate libc;
 use libc::c_void;
 
 #[cfg(target_os = "windows")]
-use winapi::{
-    ctypes::c_void,
-    shared::minwindef,
-    um::{
-        errhandlingapi::GetLastError,
-        memoryapi::{VirtualAlloc, VirtualFree, VirtualProtect},
-        sysinfoapi::{GetSystemInfo, SYSTEM_INFO},
-        winnt,
+use {
+    core::ffi::c_void,
+    windows_sys::Win32::{
+        Foundation::GetLastError,
+        System::{
+            Memory::{
+                VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
+                MEM_RESET, PAGE_EXECUTE_READ, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
+            },
+            SystemInformation::{GetSystemInfo, SYSTEM_INFO},
+        },
     },
 };
 
@@ -281,25 +284,41 @@ pub fn round_to_page_size(value: usize, page_size: usize) -> usize {
 
 pub unsafe fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
     let mut raw: *mut c_void = std::ptr::null_mut();
-    #[cfg(not(target_os = "windows"))]
-    libc_error_guard!(
-        mmap,
-        &mut raw,
-        size_in_bytes,
-        libc::PROT_READ | libc::PROT_WRITE,
-        libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-        -1,
-        0,
-    );
-    #[cfg(target_os = "windows")]
-    winapi_error_guard!(
-        VirtualAlloc,
-        &mut raw,
-        size_in_bytes,
-        winnt::MEM_RESERVE | winnt::MEM_COMMIT,
-        winnt::PAGE_READWRITE,
-    );
-    Ok(raw.cast::<u8>())
+    cfg_select! {
+        windows => {
+            winapi_error_guard!(
+                VirtualAlloc,
+                &mut raw,
+                size_in_bytes,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+            );
+        }
+        target_os = "linux" => {
+            libc_error_guard!(
+                mmap,
+                &mut raw,
+                size_in_bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_ANONYMOUS | libc::MAP_SHARED,
+                -1,
+                0,
+            );
+            libc_error_guard!(madvise, raw, size_in_bytes, libc::MADV_DONTFORK);
+        }
+        _ => {
+            libc_error_guard!(
+                mmap,
+                &mut raw,
+                size_in_bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                -1,
+                0,
+            );
+        }
+    }
+    Ok(raw.cast())
 }
 
 pub unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) -> Result<(), EbpfError> {
@@ -310,7 +329,7 @@ pub unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) -> Result<(), EbpfE
         VirtualFree,
         raw.cast::<c_void>(),
         size_in_bytes,
-        winnt::MEM_RELEASE, // winnt::MEM_DECOMMIT
+        MEM_RELEASE,
     );
     Ok(())
 }
@@ -338,12 +357,12 @@ pub unsafe fn protect_pages(
     }
     #[cfg(target_os = "windows")]
     {
-        let mut old: minwindef::DWORD = 0;
-        let ptr_old: *mut minwindef::DWORD = &mut old;
+        let mut old: PAGE_PROTECTION_FLAGS = 0;
+        let ptr_old: *mut PAGE_PROTECTION_FLAGS = &mut old;
         let prot = match permissions {
-            PagePermissions::Read => winnt::PAGE_READONLY,
-            PagePermissions::ReadWrite => winnt::PAGE_READWRITE,
-            PagePermissions::ReadExecute => winnt::PAGE_EXECUTE_READ,
+            PagePermissions::Read => PAGE_READONLY,
+            PagePermissions::ReadWrite => PAGE_READWRITE,
+            PagePermissions::ReadExecute => PAGE_EXECUTE_READ,
         };
         winapi_error_guard!(
             VirtualProtect,
@@ -374,14 +393,14 @@ pub unsafe fn madvise(raw: *mut u8, size_in_bytes: usize, advice: Advice) -> Res
     {
         let mut ptr = raw.cast::<c_void>();
         let advice = match advice {
-            Advice::DontNeed => winnt::MEM_RESET,
+            Advice::DontNeed => MEM_RESET,
         };
         winapi_error_guard!(
             VirtualAlloc,
             &mut ptr,
             size_in_bytes,
             advice,
-            winnt::PAGE_READWRITE,
+            PAGE_READWRITE,
         );
     }
 
