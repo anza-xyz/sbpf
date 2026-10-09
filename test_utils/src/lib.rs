@@ -53,16 +53,17 @@ impl ContextObject for TestContextObject {
     }
 
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping> {
-        ptr::NonNull::from_ref(&mut self.memory_mapping)
+        ptr::NonNull::from_ref(&self.memory_mapping)
     }
 }
 
 impl TestContextObject {
     /// Initialize with instruction meter
     pub fn new(remaining: u64) -> Self {
-        let mut new = TestContextObject::default();
-        new.remaining = remaining;
-        new
+        TestContextObject {
+            remaining,
+            ..Default::default()
+        }
     }
 }
 
@@ -249,7 +250,7 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
         MemoryRegion::new(&raw mut *heap.as_slice_mut(), ebpf::MM_HEAP_START),
     ]
     .into_iter()
-    .chain(additional_regions.into_iter())
+    .chain(additional_regions)
     .collect();
 
     Ok(unsafe {

@@ -11,9 +11,43 @@ on:
       - main
 
 jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update --no-self-update
+      - run: find . -name Cargo.toml | xargs -I'Cargo.toml' cargo fmt --all --manifest-path Cargo.toml -- --check
+
+  clippy:
+    name: Clippy
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+        partition: [1, 2, 3]
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      RUSTFLAGS: "-Dwarnings -Cinstrument-coverage"
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup update --no-self-update
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad
+        with:
+          tool: cargo-hack
+      - run: find . -name Cargo.toml | xargs -I'Cargo.toml' cargo hack --partition ${{ matrix.partition }}/3 --each-feature clippy --manifest-path Cargo.toml --tests
+        # NOTE: command below modifies `Cargo.toml` files, so run last.
+      - run: find . -name Cargo.toml | xargs -I'Cargo.toml' cargo hack --remove-dev-deps --partition ${{ matrix.partition }}/3 --feature-powerset clippy --manifest-path Cargo.toml --all
+
   test:
     name: Test
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
     strategy:
       matrix:
         os: [macos-latest, ubuntu-latest, windows-latest]
@@ -31,33 +65,12 @@ jobs:
       # To update a tool version bump the hash here as needed.
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad
         with:
-          tool: nextest,grcov
+          tool: nextest,grcov,cargo-hack
 
-      - run: cargo fmt --all -- --check
-        if: matrix.rust == 'beta'
-      - run: cargo clippy --all --tests -- --deny=warnings
-        if: matrix.rust == 'beta'
-      - run: cargo fmt --all --manifest-path cli/Cargo.toml -- --check
-        if: matrix.rust == 'beta'
-      - run: cargo clippy --all --tests --manifest-path cli/Cargo.toml -- --deny=warnings
-        if: matrix.rust == 'beta'
-
-      - run: cargo build --verbose
-        # FIXME: this is not doing much of anything... maybe check? or run the test suite with this
-        # enabled?
-      - run: cargo build --features="shuttle-test"
       - run: cargo nextest run --no-fail-fast
       - run: cargo nextest run --features="tracer,debugger" --no-fail-fast
-      - run: cargo build --manifest-path cli/Cargo.toml --verbose
-        # FIXME: this is not doing much of anything… maybe run a small subset of fuzzers' tests?
-        # not using bininstall for cargo-fuzz as it seems to grab one for a random target...
-      - run: cargo install cargo-fuzz
-      - run: cargo fuzz build
-        if: matrix.rust == 'nightly' && matrix.os != 'windows-latest'
-
-      - run: cargo bench -- --quick --nocapture
-      - shell: bash
-        run: |
+      - run: cargo bench -- --quick --noplot --discard-baseline --nocapture
+      - run: |
           grcov $(find . -name "sbpf-*.profraw" -print) \
             --branch \
             --ignore-not-existing \
@@ -65,6 +78,12 @@ jobs:
             --binary-path ./target/debug \
             --output-types lcov \
             -o lcov.info
+
+      - run: find . -name Cargo.toml -not -path './fuzz/*' | xargs -I'Cargo.toml' cargo hack --remove-dev-deps --each-feature build --manifest-path Cargo.toml
+      - run: cargo install cargo-fuzz
+      - run: cargo fuzz build
+        if: matrix.rust == 'nightly' && matrix.os != 'windows-latest'
+
       - uses: actions/upload-artifact@v4
         with:
           name: coverage-${{ matrix.os }}-${{ matrix.rust }}
@@ -89,8 +108,7 @@ jobs:
       with:
         pattern: coverage-*
         path: coverage
-    - shell: bash
-      run: |
+    - run: |
         grcov coverage \
           --source-dir $PWD/src \
           --output-types lcov \
@@ -117,11 +135,8 @@ jobs:
     - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
       with:
         persist-credentials: false
-    - name: Doc and package
-      run: |
-        cargo doc
-        cargo package
-      shell: bash
+    - run: cargo doc
+    - run: cargo package
     - name: Generate SLSA provenance
       uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26  # v4.1.0
       env:
