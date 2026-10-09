@@ -1194,6 +1194,10 @@ fn test_err_ldxdw_nomem() {
             "unallocated"
         )),
     );
+}
+
+#[test]
+fn test_err_ldxdw_nomem_capped() {
     // The access violation would only be detected after running out of budget.
     test_interpreter_and_jit_asm!(
         "
@@ -4677,6 +4681,127 @@ fn test_direct_stores() {
             TestContextObject::new(12),
             ProgramResult::Ok(0x8877665643efcda8),
         );
+    }
+}
+
+#[test]
+fn test_lddw_exceeding_budget() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // `lddw` counts as one instruction over two slots, which the meter must not count until the
+    // instruction is within the budget: the pc of `ExceededMaxInstructions` is that of the first
+    // instruction past it.
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+        for source in [
+            r#"
+            lddw r0, 1
+            exit
+            "#,
+            r#"
+            mov r0, 0
+            mov r1, 0
+            lddw r2, 1
+            exit
+            "#,
+            r#"
+            mov r0, 0
+            lddw r1, 1
+            lddw r2, 2
+            exit
+            "#,
+        ] {
+            let executable = assemble::<TestContextObject>(
+                source,
+                Arc::new(BuiltinProgram::new_loader(config.clone())),
+            )
+            .unwrap();
+            executable.verify::<RequisiteVerifier>().unwrap();
+            executable.jit_compile().unwrap();
+            for budget in 0..5 {
+                let mut results = Vec::new();
+                for (name, mode) in [
+                    ("interpreter", ExecutionMode::Interpreted),
+                    ("jit", ExecutionMode::Jit),
+                ] {
+                    let mut context_object = TestContextObject::new(budget);
+                    create_vm!(
+                        vm,
+                        &executable,
+                        &mut context_object,
+                        stack,
+                        heap,
+                        vec![],
+                        None
+                    );
+                    let mut mode = mode;
+                    let mut call_frames =
+                        vec![CallFrame::default(); Config::default().max_call_depth];
+                    let (count, result) =
+                        vm.execute_program(&executable, &mut mode, &mut call_frames);
+                    results.push((count, format!("{result:?}"), vm.registers[11]));
+                    assert_eq!(
+                        results[0],
+                        results[results.len() - 1],
+                        "{name}, {sbpf_version:?}, budget {budget}:{source}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_entrypoint_in_lddw() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // Nothing stops an entrypoint from pointing at the second half of an `lddw`, which the JITs
+    // treat as an invalid jump target. Execution has to fail there as in the interpreter.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
+        ..Config::default()
+    };
+    let program = [
+        [0x18, 0x00, 0, 0, 1, 0, 0, 0], // lddw r0, 1
+        [0x00, 0x00, 0, 0, 0, 0, 0, 0],
+        [0x95, 0, 0, 0, 0, 0, 0, 0], // exit
+    ]
+    .concat();
+    let mut function_registry = FunctionRegistry::default();
+    function_registry
+        .register_function(ebpf::hash_symbol_name(b"entrypoint"), *b"entrypoint", 1)
+        .unwrap();
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        &program,
+        Arc::new(BuiltinProgram::new_loader(config)),
+        SBPFVersion::V0,
+        function_registry,
+    )
+    .unwrap();
+    assert_eq!(executable.get_entrypoint_instruction_offset(), 1);
+    executable.verify::<RequisiteVerifier>().unwrap();
+    executable.jit_compile().unwrap();
+    let mut results = Vec::new();
+    for (name, mode) in [
+        ("interpreter", ExecutionMode::Interpreted),
+        ("jit", ExecutionMode::Jit),
+    ] {
+        let mut context_object = TestContextObject::new(10);
+        create_vm!(
+            vm,
+            &executable,
+            &mut context_object,
+            stack,
+            heap,
+            vec![],
+            None
+        );
+        let mut mode = mode;
+        let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+        let (count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+        results.push((count, format!("{result:?}"), vm.registers[11]));
+        assert_eq!(results[0], results[results.len() - 1], "{name}");
     }
 }
 
