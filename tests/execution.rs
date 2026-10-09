@@ -4718,3 +4718,47 @@ fn test_max_call_depth_zero() {
         assert_eq!(vm.registers[11], 0);
     }
 }
+
+/// The JIT's budget-exceeded path decremented the instruction meter one extra
+/// time in the epilogue without a matching increment in the handler, so
+/// `due_insn_count` reported budget + 1 while the interpreter reported budget.
+/// The saturating subtraction in `consume()` masked the difference from
+/// `instruction_count`, so the `test_interpreter_and_jit` macro now checks
+/// `due_insn_count` directly on every test that uses it.
+#[test]
+fn test_jit_exceeded_due_insn_count_matches_interpreter() {
+    let config = Config::default();
+    let loader = Arc::new(BuiltinProgram::new_loader(config));
+    let executable = assemble(
+        "
+        add64 r10, 0
+        ja -1
+        exit",
+        loader,
+    )
+    .unwrap();
+
+    let budget: u64 = 5;
+    let mut context_object = TestContextObject::new(budget);
+    create_vm!(
+        vm,
+        &executable,
+        &mut context_object,
+        stack,
+        heap,
+        vec![],
+        None
+    );
+    let mut call_frames =
+        vec![solana_sbpf::vm::CallFrame::default(); Config::default().max_call_depth];
+    let (_, result_interpreter) = vm.execute_program(
+        &executable,
+        &mut solana_sbpf::vm::ExecutionMode::Interpreted,
+        &mut call_frames,
+    );
+    assert!(matches!(
+        result_interpreter,
+        ProgramResult::Err(EbpfError::ExceededMaxInstructions)
+    ));
+    assert_eq!(vm.due_insn_count, budget);
+}

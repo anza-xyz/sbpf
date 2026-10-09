@@ -1519,6 +1519,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.set_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS);
         self.emit_set_exception_kind(EbpfError::ExceededMaxInstructions);
         self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_SCRATCH)); // REGISTER_SCRATCH = REGISTER_INSTRUCTION_METER;
+        // Cancel the epilogue's decrement so due_insn_count matches the interpreter.
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER += 1;
         // Fall through
 
         // Epilogue for errors
