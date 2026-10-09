@@ -284,25 +284,41 @@ pub fn round_to_page_size(value: usize, page_size: usize) -> usize {
 
 pub unsafe fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
     let mut raw: *mut c_void = std::ptr::null_mut();
-    #[cfg(not(target_os = "windows"))]
-    libc_error_guard!(
-        mmap,
-        &mut raw,
-        size_in_bytes,
-        libc::PROT_READ | libc::PROT_WRITE,
-        libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-        -1,
-        0,
-    );
-    #[cfg(target_os = "windows")]
-    winapi_error_guard!(
-        VirtualAlloc,
-        &mut raw,
-        size_in_bytes,
-        MEM_RESERVE | MEM_COMMIT,
-        PAGE_READWRITE,
-    );
-    Ok(raw.cast::<u8>())
+    cfg_select! {
+        windows => {
+            winapi_error_guard!(
+                VirtualAlloc,
+                &mut raw,
+                size_in_bytes,
+                MEM_RESERVE | MEM_COMMIT,
+                PAGE_READWRITE,
+            );
+        }
+        target_os = "linux" => {
+            libc_error_guard!(
+                mmap,
+                &mut raw,
+                size_in_bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_ANONYMOUS | libc::MAP_SHARED,
+                -1,
+                0,
+            );
+            libc_error_guard!(madvise, raw, size_in_bytes, libc::MADV_DONTFORK);
+        }
+        _ => {
+            libc_error_guard!(
+                mmap,
+                &mut raw,
+                size_in_bytes,
+                libc::PROT_READ | libc::PROT_WRITE,
+                libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
+                -1,
+                0,
+            );
+        }
+    }
+    Ok(raw.cast())
 }
 
 pub unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) -> Result<(), EbpfError> {
