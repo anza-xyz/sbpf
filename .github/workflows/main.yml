@@ -120,6 +120,27 @@ jobs:
         use_oidc: true
         fail_ci_if_error: true
 
+  pr-status:
+    name: PR CI Status
+    needs:
+      - test
+      - coverage
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check required jobs
+        env:
+          JOB_RESULTS: ${{ toJSON(needs) }}
+        run: |
+          status=0
+          while read -r job result; do
+            echo "$job $result"
+            if [[ "$result" == failure || "$result" == cancelled ]]; then
+              status=1
+            fi
+          done < <(jq -r 'to_entries[] | "\(.key) \(.value.result)"' <<< "$JOB_RESULTS")
+          exit "$status"
+
   release:
     name: Release
     needs: test
