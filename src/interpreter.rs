@@ -132,11 +132,16 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
     /// Translate between the virtual machines' pc value and the pc value used by the debugger
     #[cfg(feature = "debugger")]
     pub fn get_dbg_pc(&self) -> u64 {
+        self.get_dbg_pc_base() + self.reg[11] * ebpf::INSN_SIZE as u64
+    }
+
+    #[cfg(feature = "debugger")]
+    pub(crate) fn get_dbg_pc_base(&self) -> u64 {
         // V3+ ELFs place .text at its real vaddr (e.g. 0x1_0000_0000) in the on-disk
         // sh_addr/p_vaddr, which is also what LLDB uses when it loads the .so.debug.
         // Pre-V3 ELFs have .text at sh_addr=0 in the file (the runtime adds MM_REGION_SIZE
         // itself), so reporting a file-offset-style PC happens to line up with LLDB's view.
-        let base = if self
+        if self
             .executable
             .get_sbpf_version()
             .enable_lower_rodata_vaddr()
@@ -144,8 +149,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             self.executable.get_text_section_vaddr()
         } else {
             self.executable.get_text_section_offset()
-        };
-        base + self.reg[11] * ebpf::INSN_SIZE as u64
+        }
     }
 
     fn push_frame(&mut self, config: &Config) -> bool {
