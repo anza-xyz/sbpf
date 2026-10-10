@@ -416,3 +416,25 @@ fn v2_lddw_replaced_with_hor() {
         );
     }
 }
+
+#[test]
+fn v2_le_disabled() {
+    for (version, expected) in [
+        (SBPFVersion::V0, true),
+        (SBPFVersion::V1, true),
+        (SBPFVersion::V2, false),
+        (SBPFVersion::V3, true),
+        (SBPFVersion::V4, true),
+    ] {
+        let exe = executable(&[insn(ebpf::LE, 1, 0, 0, 16)], version);
+        let analysis = Analysis::from_executable(&exe).unwrap();
+
+        assert_eq!(
+            analysis
+                .dfg_reverse_edges
+                .contains_key(&DfgNode::InstructionNode(0)),
+            expected,
+            "SBPF: {version:?}",
+        );
+    }
+}
