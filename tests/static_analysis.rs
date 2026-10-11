@@ -364,24 +364,20 @@ fn v2_moved_alu_opcodes_dfg() {
             let exe = executable(code, version);
             let analysis = Analysis::from_executable(&exe).unwrap();
 
-            let has_mem_dep = |pc| {
-                analysis
-                    .dfg_reverse_edges
-                    .get(&DfgNode::InstructionNode(pc))
-                    .is_some_and(|edges| edges.iter().any(|e| e.resource == DataResource::Memory))
-            };
-
-            // SIMD-0173 and SIMD-0174: ALU opcodes of MUL, DIV and MOD get replaced with memory instructions
-            let bad = code
-                .iter()
-                .enumerate()
-                .find(|&(pc, _)| expected_alu && has_mem_dep(pc));
-
-            if let Some((pc, insn)) = bad {
-                panic!(
-                    "SBPF: {version:?}, unexpected memory dependency at pc {pc}, opc: {:#x}",
+            for (pc, insn) in code.iter().enumerate() {
+                assert_eq!(
+                    analysis
+                        .dfg_reverse_edges
+                        .get(&DfgNode::InstructionNode(pc))
+                        .is_some_and(|edges| edges
+                            .iter()
+                            // SIMD-0173 and SIMD-0174: non-V2 MUL, DIV and MOD opcodes are conflicting with
+                            // ST, STX and LDX classes, so we check that these are not parsed as memory operations
+                            .all(|edge| edge.resource != DataResource::Memory)),
+                    expected_alu,
+                    "SBPF: {version:?}, pc:{pc}, opc: {:#x}",
                     insn[0]
-                )
+                );
             }
         }
     }
@@ -415,7 +411,7 @@ fn v2_lddw_replaced_with_hor() {
             .contains_key(&DfgNode::InstructionNode(2));
 
         assert!(
-            lddw_parsed == lddw_expected && hor_parsed == !lddw_expected,
+            lddw_parsed == lddw_expected && hor_parsed != lddw_expected,
             "SBPF: {:?}",
             version
         );
