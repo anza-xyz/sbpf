@@ -1164,9 +1164,11 @@ impl<'a> Analysis<'a> {
                         | ebpf::RSH64_IMM
                         | ebpf::XOR64_IMM
                         | ebpf::ARSH64_IMM
-                        | ebpf::NEG32
-                        | ebpf::NEG64
                         | ebpf::BE => {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::NEG32 | ebpf::NEG64 if !sbpf_version.disable_neg() => {
                             bind(&mut state, insn, false, DataResource::Register(insn.dst));
                             bind(&mut state, insn, true, DataResource::Register(insn.dst));
                         }

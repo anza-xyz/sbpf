@@ -324,14 +324,19 @@ fn v2_memory_class_guarded_dfg() {
             ];
             let exe = executable(code, version);
             let analysis = Analysis::from_executable(&exe).unwrap();
-            assert!(
-                code.iter().enumerate().all(|(pc, _)| analysis
-                    .dfg_reverse_edges
-                    .contains_key(&DfgNode::InstructionNode(pc))
-                    == expected),
-                "SBPF: {:?}",
-                version
-            )
+
+            for (pc, insn) in code.iter().enumerate() {
+                assert!(
+                    analysis
+                        .dfg_reverse_edges
+                        .contains_key(&DfgNode::InstructionNode(pc))
+                        == expected,
+                    "SBPF: {:?}, pc: {}, opc: {:#x}",
+                    version,
+                    pc,
+                    insn[0]
+                )
+            }
         }
     }
 }
@@ -366,7 +371,7 @@ fn v2_moved_alu_opcodes_dfg() {
                     .is_some_and(|edges| edges.iter().any(|e| e.resource == DataResource::Memory))
             };
 
-            // According to SIMD-0173, ALU opcodes of MUL, DIV and MOD get replaced with memory instructions
+            // SIMD-0173 and SIMD-0174: ALU opcodes of MUL, DIV and MOD get replaced with memory instructions
             let bad = code
                 .iter()
                 .enumerate()
@@ -436,5 +441,37 @@ fn v2_le_disabled() {
             expected,
             "SBPF: {version:?}",
         );
+    }
+}
+
+#[test]
+fn v2_neg_disabled() {
+    for (version, expected) in [
+        (SBPFVersion::V0, true),
+        (SBPFVersion::V1, true),
+        (SBPFVersion::V2, false),
+        (SBPFVersion::V3, true),
+        (SBPFVersion::V4, true),
+    ] {
+        let exe = executable(
+            &[insn(ebpf::NEG32, 1, 0, 0, 0), insn(ebpf::NEG64, 2, 0, 0, 0)],
+            version,
+        );
+        let analysis = Analysis::from_executable(&exe).unwrap();
+
+        for pc in [0, 1] {
+            assert_eq!(
+                analysis
+                    .dfg_reverse_edges
+                    .get(&DfgNode::InstructionNode(pc))
+                    .is_some_and(|edges| edges
+                        .iter()
+                        // SIMD-0173 and SIMD-0174: NEG64 conflicts with ST_4B_IMM
+                        // so we check for an edge with a memory resource
+                        .all(|edge| edge.resource != DataResource::Memory)),
+                expected,
+                "SBPF: {version:?}, pc: {pc}"
+            );
+        }
     }
 }
