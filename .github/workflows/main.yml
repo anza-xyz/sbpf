@@ -89,7 +89,7 @@ jobs:
       - run: cargo fuzz build
         if: matrix.rust == 'nightly' && matrix.os != 'windows-latest'
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: coverage-${{ matrix.os }}-${{ matrix.rust }}
           path: lcov.info
@@ -109,7 +109,7 @@ jobs:
       with:
         tool: grcov
     - name: Download test coverage
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
       with:
         pattern: coverage-*
         path: coverage
@@ -118,7 +118,7 @@ jobs:
           --source-dir $PWD/src \
           --output-types lcov \
           --output-path coverage.info
-    - uses: codecov/codecov-action@v5
+    - uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac  # v5.5.5
       with:
         files: coverage.info
         disable_search: true
