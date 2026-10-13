@@ -4725,6 +4725,11 @@ fn test_max_call_depth_zero() {
 /// The saturating subtraction in `consume()` masked the difference from
 /// `instruction_count`, so the `test_interpreter_and_jit` macro now checks
 /// `due_insn_count` directly on every test that uses it.
+///
+/// The macro's check is relative (interpreter vs JIT), so this test also pins
+/// the interpreter's absolute value. The pin cannot live in the macro: a
+/// syscall resets `due_insn_count` mid-run, so on exhaustion after a syscall
+/// the due count is the post-syscall tally, not the budget.
 #[test]
 fn test_jit_exceeded_due_insn_count_matches_interpreter() {
     let config = Config::default();
