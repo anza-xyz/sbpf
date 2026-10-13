@@ -292,27 +292,47 @@ pub struct UnsealedJitProgram {
 
 impl UnsealedJitProgram {
     /// Allocate a program with `pc` zeroed entries in the pc section and room for `code_capacity`
-    /// bytes of machine code.
+    /// bytes of machine code, in pooled pages.
     pub fn new(pc: usize, code_capacity: usize) -> Self {
-        let page_size = get_system_page_size();
-        let pc_len = pc.saturating_mul(std::mem::size_of::<u32>());
-        let pc_size = round_to_page_size(pc_len, page_size);
-        let text_capacity = round_to_page_size(code_capacity, page_size);
-        let mapping = Mapping::pooled(pc_size.saturating_add(text_capacity));
-        let Ok([pc_section, text_section]) =
-            mapping.split([0..pc_len, pc_size..pc_size.saturating_add(text_capacity)])
-        else {
-            unreachable!("mapping split failed for some reason");
-        };
-        let mut program = Self {
-            pc_section,
-            text_section,
-        };
+        let mapping = Mapping::pooled(Self::mapping_len(pc, code_capacity));
+        let mut program = Self::in_mapping(mapping, pc, code_capacity);
         // The pc section relies on zero-initialization to distinguish unfilled forward-jump
         // targets from filled backward-jump targets in the old JIT. The pool may hand back
         // recycled memory. Zero just the pc section here.
         program.pc_section.fill(0);
         program
+    }
+
+    /// The length of the mapping of a program with `pc` entries in the pc section and room for
+    /// `code_capacity` bytes of machine code: the pc section, and the text section after it, each
+    /// in whole pages.
+    pub(crate) fn mapping_len(pc: usize, code_capacity: usize) -> usize {
+        let (_, pc_size, text_capacity) = Self::layout(pc, code_capacity);
+        pc_size.saturating_add(text_capacity)
+    }
+
+    /// A program with `pc` entries in the pc section and room for `code_capacity` bytes of machine
+    /// code in `mapping`, which must be at least `mapping_len` long. The pc section holds what the
+    /// mapping does.
+    pub(crate) fn in_mapping(mapping: Mapping, pc: usize, code_capacity: usize) -> Self {
+        let (pc_len, pc_size, text_capacity) = Self::layout(pc, code_capacity);
+        let text = pc_size..pc_size.saturating_add(text_capacity);
+        let Ok([pc_section, text_section]) = mapping.split([0..pc_len, text]) else {
+            panic!("the mapping of a program is shorter than its `mapping_len`");
+        };
+        Self {
+            pc_section,
+            text_section,
+        }
+    }
+
+    /// The length of the pc section, and the page-rounded lengths of both sections.
+    fn layout(pc: usize, code_capacity: usize) -> (usize, usize, usize) {
+        let page_size = get_system_page_size();
+        let pc_len = pc.saturating_mul(std::mem::size_of::<u32>());
+        let pc_size = round_to_page_size(pc_len, page_size);
+        let text_capacity = round_to_page_size(code_capacity, page_size);
+        (pc_len, pc_size, text_capacity)
     }
 
     /// Offset in `text_section` for each BPF instruction.
@@ -369,6 +389,8 @@ impl UnsealedJitProgram {
         Ok(JitProgram {
             pc_section: pc_section.protect()?,
             text_section: text_section.protect()?,
+            dynasm: false,
+            random_key: 0,
         })
     }
 }
@@ -381,6 +403,15 @@ pub struct JitProgram {
     pc_section: Mapping<Read>,
     /// The executable machine code.
     text_section: Mapping<ReadExecute>,
+    /// Whether the code was produced by `codegen` rather than by the old `jit::JitCompiler`, which
+    /// call it differently.
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
+    pub(crate) dynasm: bool,
+    /// For the code produced by jit this is a random value by which some randomzation can be
+    /// applied to user data to prevent e.g. JIT spraying.
+    // FIXME: could be shared with old jit for its own encryption key thing.
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
+    pub(crate) random_key: u32,
 }
 
 impl JitProgram {
