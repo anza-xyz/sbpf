@@ -6,7 +6,7 @@
 
 extern crate solana_sbpf;
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[cfg(target_arch = "x86_64")]
 mod x86_64 {
     use criterion::{criterion_group, Criterion, Throughput};
     use solana_sbpf::{
@@ -93,10 +93,24 @@ mod x86_64 {
         executable
     }
 
-    fn bench_compile(c: &mut Criterion, name: &str, executable: &Executable<TestContextObject>) {
+    fn bench_compile(
+        c: &mut Criterion,
+        name: &str,
+        executable: &Executable<TestContextObject>,
+        jit_supported: bool,
+    ) {
+        let templates = solana_sbpf::codegen::jit_templates(executable.get_sbpf_version());
         let mut group = c.benchmark_group(format!("compile/{name}"));
         group.throughput(Throughput::Bytes(executable.get_text_bytes().1.len() as u64));
-        group.bench_function("jit", |b| b.iter(|| executable.jit_compile().unwrap()));
+        #[cfg(all(feature = "jit", not(target_os = "windows")))]
+        if jit_supported {
+            group.bench_function("jit", |b| b.iter(|| executable.jit_compile().unwrap()));
+        }
+        #[cfg(not(all(feature = "jit", not(target_os = "windows"))))]
+        let _ = jit_supported;
+        group.bench_function("parrot", |b| {
+            b.iter(|| templates.compile(executable).unwrap())
+        });
         group.finish();
     }
 
@@ -105,6 +119,7 @@ mod x86_64 {
             c,
             "relative_call_sbpfv0",
             &elf_executable("tests/elfs/relative_call_sbpfv0.so"),
+            true,
         );
     }
 
@@ -113,11 +128,12 @@ mod x86_64 {
             c,
             "relative_call_sbpfv3",
             &elf_executable("tests/elfs/relative_call.so"),
+            true,
         );
     }
 
     fn bench_compile_large(c: &mut Criterion) {
-        bench_compile(c, "large", &sbpfv3_executable(&sbpfv3_text(4096)));
+        bench_compile(c, "large", &sbpfv3_executable(&sbpfv3_text(4096)), true);
     }
 
     fn bench_compile_10mib_empty(c: &mut Criterion) {
@@ -125,6 +141,7 @@ mod x86_64 {
             c,
             "10mib_empty",
             &sbpfv3_executable(&filled_text(EMPTY_INSN)),
+            true,
         );
     }
 
@@ -133,6 +150,7 @@ mod x86_64 {
             c,
             "10mib_smallest",
             &sbpfv3_executable(&filled_text(SMALLEST_INSN)),
+            true,
         );
     }
 
@@ -141,7 +159,20 @@ mod x86_64 {
             c,
             "10mib_largest",
             &sbpfv3_executable(&filled_text(LARGEST_INSN)),
+            true,
         );
+    }
+
+    fn bench_compile_10mib_random(c: &mut Criterion) {
+        use rand::{rngs::SmallRng, Rng, SeedableRng};
+        let mut rng = SmallRng::seed_from_u64(0);
+        let text: Vec<u8> = (0..10 << 20 >> 3)
+            .flat_map(|_| {
+                let (low, imm) = (rng.gen::<u16>(), rng.gen::<u32>());
+                (u64::from(low) | u64::from(imm) << 32).to_le_bytes()
+            })
+            .collect();
+        bench_compile(c, "10mib_random", &sbpfv3_executable(&text), false);
     }
 
     criterion_group!(
@@ -153,11 +184,11 @@ mod x86_64 {
         bench_compile_10mib_empty,
         bench_compile_10mib_smallest,
         bench_compile_10mib_largest,
+        bench_compile_10mib_random,
     );
 }
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-criterion::criterion_main!(x86_64::benches);
-
-#[cfg(not(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64")))]
-fn main() {}
+cfg_select! {
+    target_arch = "x86_64" => { criterion::criterion_main!(x86_64::benches); }
+    _ => { fn main() {} }
+}

@@ -60,6 +60,19 @@ fn bench_backends(
         executable.jit_compile().unwrap();
         bench("jit", ExecutionMode::Jit, &mut []);
     }
+    #[cfg(target_arch = "x86_64")]
+    if !matches!(
+        executable.get_sbpf_version(),
+        SBPFVersion::V1 | SBPFVersion::V2
+    ) {
+        bench(
+            "parrot_interpreter",
+            ExecutionMode::ParrotInterpreted,
+            &mut call_frames,
+        );
+        executable.parrot_compile().unwrap();
+        bench("parrot_jit", ExecutionMode::Jit, &mut []);
+    }
     group.finish();
 }
 
