@@ -398,7 +398,7 @@ macro_rules! test_interpreter_and_jit {
         let original_budget = context_object.remaining;
         $executable.verify::<RequisiteVerifier>().unwrap();
         let host_buffer = $crate::memory_region::HostMemoryObject::host($mem);
-        let mut jit_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
+        let original_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
         let $crate::test_utils::ExecutionOutcome {
             instruction_count: instruction_count_interpreter,
             result: result_interpreter,
@@ -413,10 +413,15 @@ macro_rules! test_interpreter_and_jit {
             $run
         };
         #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-        {
+        for parrot in [false, true] {
+            let mode_name = if parrot { "parrot jit" } else { "jit" };
             context_object.remaining = original_budget;
-            #[allow(unused_mut)]
-            let compilation_result = $executable.jit_compile();
+            let mut jit_input_mem = original_input_mem.clone();
+            let compilation_result = if parrot {
+                $executable.parrot_compile()
+            } else {
+                $executable.jit_compile()
+            };
             use $crate::memory_region::HostBuffer;
             let mem = match host_buffer {
                 HostBuffer::Immutable(_) => HostBuffer::Immutable(&raw const jit_input_mem[..]),
@@ -437,14 +442,14 @@ macro_rules! test_interpreter_and_jit {
                     let mut diverged = false;
                     if format!("{:?}", result_interpreter) != format!("{:?}", result_jit) {
                         println!(
-                            "Result of interpreter ({:?}) and JIT ({:?}) diverged",
+                            "[{mode_name}] Result of interpreter ({:?}) and JIT ({:?}) diverged",
                             result_interpreter, result_jit,
                         );
                         diverged = true;
                     }
                     if instruction_count_interpreter != instruction_count_jit {
                         println!(
-                            "Instruction meter of interpreter ({:?}) and JIT ({:?}) diverged",
+                            "[{mode_name}] Instruction meter of interpreter ({:?}) and JIT ({:?}) diverged",
                             instruction_count_interpreter, instruction_count_jit,
                         );
                         diverged = true;
@@ -458,7 +463,7 @@ macro_rules! test_interpreter_and_jit {
                     }
                     if interpreter_final_pc != jit.final_pc {
                         println!(
-                            "Final PC of interpreter ({:?}) and JIT ({:?}) result diverged",
+                            "[{mode_name}] Final PC of interpreter ({:?}) and JIT ({:?}) result diverged",
                             interpreter_final_pc, jit.final_pc,
                         );
                         diverged = true;
@@ -467,13 +472,14 @@ macro_rules! test_interpreter_and_jit {
                         let input_after_interp = host_buffer.ptr().as_ref().unwrap();
                         if input_after_interp != jit_input_mem {
                             println!(
-                                "input memory buffer is different: interp({:x?}), jit({:x?})",
+                                "[{mode_name}] input memory buffer is different: interp({:x?}), jit({:x?})",
                                 input_after_interp, jit_input_mem,
                             );
                             diverged = true;
                         }
                     }
                     if !compare_register_trace(&_trace_interpreter, trace_jit) {
+                        println!("[{mode_name}] register trace diverged");
                         let analysis = Analysis::from_executable(&$executable).unwrap();
                         let stdout = std::io::stdout();
                         analysis
@@ -487,9 +493,70 @@ macro_rules! test_interpreter_and_jit {
                             .unwrap();
                         diverged = true;
                     }
-                    assert!(!diverged);
+                    assert!(!diverged, "[{}] diverged from the interpreter", mode_name);
                 }
             }
+        }
+        {
+            use $crate::memory_region::HostBuffer;
+            let mode_name = "parrot interpreted";
+            context_object.remaining = original_budget;
+            let mut parrot_input_mem = original_input_mem.clone();
+            let mem = match host_buffer {
+                HostBuffer::Immutable(_) => HostBuffer::Immutable(&raw const parrot_input_mem[..]),
+                HostBuffer::Mutable(_) => HostBuffer::Mutable(&raw mut parrot_input_mem[..]),
+            };
+            let parrot: $crate::test_utils::ExecutionOutcome = {
+                let $exe = &$executable;
+                let $ctx = &mut context_object;
+                let $input = MemoryRegion::new(mem, ebpf::MM_INPUT_START);
+                let $mode = &mut $crate::vm::ExecutionMode::ParrotInterpreted;
+                $run
+            };
+            let (instruction_count_parrot, result_parrot) = (parrot.instruction_count, parrot.result);
+            let mut diverged = false;
+            if format!("{:?}", result_interpreter) != format!("{:?}", result_parrot) {
+                println!(
+                    "[{mode_name}] Result of interpreter ({:?}) and parrot ({:?}) diverged",
+                    result_interpreter, result_parrot,
+                );
+                diverged = true;
+            }
+            if instruction_count_interpreter != instruction_count_parrot {
+                println!(
+                    "[{mode_name}] Instruction meter of interpreter ({:?}) and parrot ({:?}) diverged",
+                    instruction_count_interpreter, instruction_count_parrot,
+                );
+                diverged = true;
+            }
+            if interpreter_final_pc != parrot.final_pc {
+                println!(
+                    "[{mode_name}] Final PC of interpreter ({:?}) and parrot ({:?}) diverged",
+                    interpreter_final_pc, parrot.final_pc,
+                );
+                diverged = true;
+            }
+            let input_after_interp = unsafe { host_buffer.ptr().as_ref().unwrap() };
+            if input_after_interp != parrot_input_mem {
+                println!(
+                    "[{mode_name}] input memory buffer is different: interp({:x?}), parrot({:x?})",
+                    input_after_interp, parrot_input_mem,
+                );
+                diverged = true;
+            }
+            if !compare_register_trace(&_trace_interpreter, &parrot.register_trace) {
+                println!("[{mode_name}] register trace diverged");
+                let analysis = Analysis::from_executable(&$executable).unwrap();
+                let stdout = std::io::stdout();
+                analysis
+                    .disassemble_register_trace(&mut stdout.lock(), &_trace_interpreter)
+                    .unwrap();
+                analysis
+                    .disassemble_register_trace(&mut stdout.lock(), &parrot.register_trace)
+                    .unwrap();
+                diverged = true;
+            }
+            assert!(!diverged, "[{}] diverged from the interpreter", mode_name);
         }
         assert_eq!(
             instruction_count_interpreter, expected_instruction_count,
