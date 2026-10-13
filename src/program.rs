@@ -32,6 +32,15 @@ pub enum SBPFVersion {
 }
 
 impl SBPFVersion {
+    /// Every defined version in ascending order, excluding `Reserved`.
+    pub const ALL: &'static [SBPFVersion] = &[
+        SBPFVersion::V0,
+        SBPFVersion::V1,
+        SBPFVersion::V2,
+        SBPFVersion::V3,
+        SBPFVersion::V4,
+    ];
+
     /// Enable SIMD-0166: SBPF dynamic stack frames
     ///
     /// Allows usage of `add64 r10, imm`.
