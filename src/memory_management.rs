@@ -4,34 +4,82 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-#![cfg_attr(target_os = "windows", allow(dead_code))]
+#[cfg(feature = "shuttle-test")]
+use shuttle::rand;
 
+use crate::error::EbpfError;
+use rand::{thread_rng, Rng};
+use std::ffi::c_void;
+use std::fs::File;
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::error::EbpfError;
-
-#[cfg(not(target_os = "windows"))]
-extern crate libc;
-#[cfg(not(target_os = "windows"))]
-use libc::c_void;
-
 #[cfg(target_os = "windows")]
-use {
-    core::ffi::c_void,
-    windows_sys::Win32::{
-        Foundation::GetLastError,
-        System::{
-            Memory::{
-                VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
-                MEM_RESET, PAGE_EXECUTE_READ, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
-            },
-            SystemInformation::{GetSystemInfo, SYSTEM_INFO},
+use windows_sys::Win32::{
+    Foundation::{CloseHandle, GetLastError, ERROR_NOT_ENOUGH_MEMORY},
+    System::{
+        Memory::{
+            CreateFileMappingW, MapViewOfFileEx, UnmapViewOfFile, VirtualAlloc, VirtualFree,
+            VirtualProtect, FILE_MAP_COPY, FILE_MAP_EXECUTE, MEMORY_MAPPED_VIEW_ADDRESS,
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, MEM_RESET, PAGE_EXECUTE_READ,
+            PAGE_EXECUTE_WRITECOPY, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
         },
+        SystemInformation::{GetSystemInfo, SYSTEM_INFO},
     },
 };
+
+#[cfg(not(target_os = "windows"))]
+macro_rules! libc_error_guard {
+    (succeeded?, mmap, $addr:expr, $($arg:expr),*) => {{
+        *$addr = libc::mmap(*$addr, $($arg),*);
+        *$addr != libc::MAP_FAILED
+    }};
+    (succeeded?, $function:ident, $($arg:expr),*) => {
+        libc::$function($($arg),*) == 0
+    };
+    ($function:ident, $($arg:expr),* $(,)?) => {{
+        const RETRY_COUNT: usize = 3;
+        'result: {
+            for i in 0..RETRY_COUNT {
+                if libc_error_guard!(succeeded?, $function, $($arg),*) {
+                    break;
+                } else if i.saturating_add(1) == RETRY_COUNT {
+                    let args = vec![$(format!("{:?}", $arg)),*];
+                    #[cfg(any(target_os = "freebsd", target_os = "ios", target_os = "macos"))]
+                    let errno = *libc::__error();
+                    #[cfg(any(target_os = "android", target_os = "netbsd", target_os = "openbsd"))]
+                    let errno = *libc::__errno();
+                    #[cfg(target_os = "linux")]
+                    let errno = *libc::__errno_location();
+                    break 'result Err(EbpfError::LibcInvocationFailed(stringify!($function), args, errno));
+                }
+            }
+            Ok(())
+        }
+    }};
+}
+
+#[cfg(target_os = "windows")]
+macro_rules! winapi_error_guard {
+    (succeeded?, VirtualAlloc, $addr:expr, $($arg:expr),*) => {{
+        *$addr = VirtualAlloc(*$addr, $($arg),*);
+        !(*$addr).is_null()
+    }};
+    (succeeded?, $function:ident, $($arg:expr),*) => {
+        $function($($arg),*) != 0
+    };
+    ($function:ident, $($arg:expr),* $(,)?) => {{
+        if !winapi_error_guard!(succeeded?, $function, $($arg),*) {
+            let args = vec![$(format!("{:?}", $arg)),*];
+            let errno = GetLastError();
+            Err(EbpfError::LibcInvocationFailed(stringify!($function), args, errno as i32))
+        } else {
+            Ok(())
+        }
+    }};
+}
 
 /// A free list for managing memory allocations of a fixed size.
 struct FreeList {
@@ -62,8 +110,12 @@ impl FreeList {
     /// any particular contents.
     fn alloc(&self) -> Pages {
         let pages = { self.mem.lock().unwrap_or_else(|e| e.into_inner()).pop() };
-        let mut pages = pages.unwrap_or_else(|| Pages::new(self.size).expect("allocation failed"));
-        pages.pooled = true;
+        let mut pages = pages.unwrap_or_else(|| {
+            Mapping::builder(self.size)
+                .map_pages()
+                .expect("allocation failed")
+        });
+        pages.origin = Origin::Pooled;
         pages
     }
 
@@ -82,8 +134,21 @@ impl FreeList {
         }
 
         if self.size >= MADV_DONTNEED_THRESHOLD {
-            // SAFETY: `madvise` has no soundness invariants with the arguments used here.
-            if let Err(e) = unsafe { madvise(pages.raw.as_ptr(), pages.len, Advice::DontNeed) } {
+            let raw = pages.raw.as_ptr().cast::<c_void>();
+            // SAFETY: discarding the contents of the pages has no soundness invariants: they are
+            // read-write, and nothing refers to them while they are in the pool.
+            let result = unsafe {
+                cfg_select! {
+                    windows => {
+                        let mut raw = raw;
+                        winapi_error_guard!(VirtualAlloc, &mut raw, pages.len, MEM_RESET, PAGE_READWRITE)
+                    }
+                    _ => {
+                        libc_error_guard!(madvise, raw, pages.len, libc::MADV_DONTNEED)
+                    }
+                }
+            };
+            if let Err(e) = result {
                 log::error!("FreeList: unable to advise returned allocation: {e}");
             }
         }
@@ -161,12 +226,22 @@ static ALLOCATOR: LazyLock<BucketedFreeList> = LazyLock::new(BucketedFreeList::n
 
 // FIXME: evaluate (re-)using a `Box<[u8]>` with a custom allocator (soon to be stabilized in
 // 1.100.)
-/// Pages of memory, which are unmapped (or returned to the `FreeList`) when dropped.
+/// Mapped pages of memory.
 struct Pages {
     raw: NonNull<u8>,
     len: usize,
-    /// Does this allocation return to [`ALLOCATOR`] when dropped?
-    pooled: bool,
+    origin: Origin,
+}
+
+/// How [`Pages`] were materialized.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Anonymous memory.
+    Anonymous,
+    /// Memory from the pool [`ALLOCATOR`].
+    Pooled,
+    /// A view of a file.
+    File,
 }
 
 // SAFETY: Proof by authority: `Pages` is roughly equivalent to a `Box<[u8]>`, which is `Send +
@@ -174,22 +249,10 @@ struct Pages {
 unsafe impl Send for Pages {}
 unsafe impl Sync for Pages {}
 
-impl Pages {
-    /// Map `len` bytes of zeroed, read-write pages.
-    fn new(len: usize) -> Result<Self, EbpfError> {
-        let raw = allocate_pages(len)?;
-        Ok(Self {
-            raw: NonNull::new(raw).expect("mapped pages at a null address"),
-            len,
-            pooled: false,
-        })
-    }
-}
-
 impl Drop for Pages {
     fn drop(&mut self) {
         let raw = self.raw.as_ptr();
-        if self.pooled {
+        if self.origin == Origin::Pooled {
             // SAFETY:
             //
             // Contract from `protect_pages`: These pages must an allocation that the caller owns.
@@ -202,7 +265,7 @@ impl Drop for Pages {
                     return ALLOCATOR.free(Pages {
                         raw: self.raw,
                         len: self.len,
-                        pooled: false,
+                        origin: Origin::Anonymous,
                     })
                 }
                 Err(error) => {
@@ -210,15 +273,34 @@ impl Drop for Pages {
                 }
             }
         }
-        // SAFETY:
-        //
-        // Contract from `free_pages`: `raw` and `size_in_bytes` must be a mapping that
-        // [`allocate_pages`] created, which is not freed already.
-        // Contract from `free_pages`: Nothing may access the allocation afterwards.
-        //
-        // Evidence: `Pages` encapsulates the mapping. Being inside `Drop` means the last use of
-        // this type is over.
-        if let Err(error) = unsafe { free_pages(raw, self.len) } {
+        let unmap_result = unsafe {
+            // SAFETY:
+            //
+            // Contract: `munmap` should only free pages that we hold ownership over.
+            //
+            // Evidence: `Pages` encapsulates the mapping. Being inside `Drop` means the last use of
+            // this type is over.
+            cfg_select! {
+                windows => {
+                    if self.origin == Origin::File {
+                        let view = MEMORY_MAPPED_VIEW_ADDRESS { Value: raw.cast::<c_void>() };
+                        if UnmapViewOfFile(view) == 0 {
+                            let errno = GetLastError() as i32;
+                            let args = vec![format!("{raw:?}")];
+                            Err(EbpfError::LibcInvocationFailed("UnmapViewOfFile", args, errno))
+                        } else {
+                            Ok(())
+                        }
+                    } else {
+                        winapi_error_guard!(VirtualFree, raw.cast::<c_void>(), 0, MEM_RELEASE)
+                    }
+                }
+                _ => {
+                    libc_error_guard!(munmap, raw.cast::<c_void>(), self.len)
+                }
+            }
+        };
+        if let Err(error) = unmap_result {
             log::error!("unable to free pages: {error}");
         }
     }
@@ -277,6 +359,15 @@ impl Mapping {
         Self::whole(ALLOCATOR.alloc(len))
     }
 
+    /// A builder of a mapping of `len` bytes of new, read-write pages.
+    pub(crate) fn builder(len: usize) -> MappingBuilder<'static> {
+        MappingBuilder {
+            len,
+            low: false,
+            file: None,
+        }
+    }
+
     /// All of the read-write `pages`.
     fn whole(pages: Pages) -> Self {
         Self {
@@ -319,6 +410,194 @@ impl Mapping {
             len: ranges[i].len(),
             access: PhantomData,
         }))
+    }
+}
+
+/// How to map new pages, see [`Mapping::builder`]. They hold zeroes, unless they are of a file.
+pub(crate) struct MappingBuilder<'a> {
+    len: usize,
+    /// Within the first 2 GiB of the address space.
+    low: bool,
+    /// The file, and the offset in it, to map the pages of.
+    file: Option<(&'a File, u64)>,
+}
+
+impl<'a> MappingBuilder<'a> {
+    /// Place the pages within the first 2 GiB of the address space, at a random address, so that
+    /// code in them can be addressed with sign-extended 32-bit absolute addresses.
+    ///
+    /// The pages are mapped in a retry loop, so this is not for performance-sensitive code.
+    #[cfg_attr(not(all(test, target_arch = "x86_64")), expect(dead_code))]
+    pub(crate) fn low(self) -> Self {
+        Self { low: true, ..self }
+    }
+
+    /// Map the pages of `file` from `offset` on. The offset must be a multiple of the page size,
+    /// and on Windows of the allocation granularity, which is 64 KiB. The file must be open for
+    /// reading, and on Windows for execution too.
+    ///
+    /// The mapping is private: the pages are copied when they are first written to, so what is
+    /// written through the mapping does not reach the file. Debuggers can insert breakpoints into
+    /// private mappings that are executable, but not into shared ones.
+    ///
+    /// # Safety
+    ///
+    /// Until the mapping is dropped, the file must not be shortened below `offset` plus the length
+    /// of the mapping, and the bytes there may only be overwritten with those that the mapping has
+    /// at the same position, as pages that were not written to yet show what the file holds.
+    #[cfg_attr(not(all(test, not(target_os = "windows"))), expect(dead_code))]
+    pub(crate) unsafe fn file<'b>(self, file: &'b File, offset: u64) -> MappingBuilder<'b> {
+        MappingBuilder {
+            len: self.len,
+            low: self.low,
+            file: Some((file, offset)),
+        }
+    }
+
+    /// The length of the mapping.
+    #[cfg_attr(not(all(test, not(target_os = "windows"))), expect(dead_code))]
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Map the pages.
+    #[cfg_attr(not(test), expect(dead_code))]
+    pub(crate) fn build(self) -> Result<Mapping, EbpfError> {
+        Ok(Mapping::whole(self.map_pages()?))
+    }
+
+    fn map_pages(self) -> Result<Pages, EbpfError> {
+        if !self.low {
+            return self.map_at(std::ptr::null_mut());
+        }
+        /// Same as the allocation granularity of Windows.
+        const ALIGNMENT: usize = 64 * 1024;
+        const LOWEST: usize = 256 * 1024 * 1024;
+        const HIGHEST: usize = 2 * 1024 * 1024 * 1024;
+        const ATTEMPTS: usize = 64;
+
+        let slots = HIGHEST
+            .saturating_sub(LOWEST)
+            .checked_sub(self.len)
+            .map(|spare| spare.saturating_div(ALIGNMENT).saturating_add(1));
+        let mut error = None;
+        for _ in 0..slots.map_or(0, |_| ATTEMPTS) {
+            let slot = thread_rng().gen_range(0..slots.unwrap_or(1));
+            let hint = LOWEST.saturating_add(slot.saturating_mul(ALIGNMENT)) as *mut c_void;
+            match self.map_at(hint) {
+                Ok(pages) if pages.raw.as_ptr() == hint.cast() => return Ok(pages),
+                // Without `MAP_FIXED` the address hint is only honored if the range is free and the
+                // allocated pages might be elsewhere.
+                Ok(_) => continue,
+                // `VirtualAlloc` and `MapViewOfFileEx` fail if the range is occupied.
+                Err(e) => error = Some(e),
+            }
+        }
+        Err(error.unwrap_or_else(|| {
+            let (function, errno) = cfg_select! {
+                windows => ("VirtualAlloc", ERROR_NOT_ENOUGH_MEMORY as i32),
+                _ => ("mmap", libc::ENOMEM)
+            };
+            EbpfError::LibcInvocationFailed(function, vec![format!("{:?}", self.len)], errno)
+        }))
+    }
+
+    /// Map the pages, at `hint` if it is not null and the system places them there.
+    fn map_at(&self, hint: *mut c_void) -> Result<Pages, EbpfError> {
+        let len = self.len;
+        // SAFETY: mapping new pages has no soundness invariants for the flags used here, as
+        // nothing refers to them yet. For the pages of a file, see `file`.
+        let raw = unsafe {
+            cfg_select! {
+                windows => match self.file {
+                    None => {
+                        let mut raw = hint;
+                        winapi_error_guard!(
+                            VirtualAlloc,
+                            &mut raw,
+                            len,
+                            MEM_RESERVE | MEM_COMMIT,
+                            PAGE_READWRITE,
+                        )?;
+                        raw
+                    }
+                    // Copy-on-write views start out read-write, and can be made read-only or
+                    // executable.
+                    Some((file, offset)) => {
+                        let failed = |function, errno: u32| {
+                            let args = vec![format!("{len:?}"), format!("{offset:?}")];
+                            EbpfError::LibcInvocationFailed(function, args, errno as i32)
+                        };
+                        let handle = std::os::windows::io::AsRawHandle::as_raw_handle(file);
+                        let section = CreateFileMappingW(
+                            handle,
+                            std::ptr::null(),
+                            PAGE_EXECUTE_WRITECOPY,
+                            0,
+                            0,
+                            std::ptr::null(),
+                        );
+                        if section.is_null() {
+                            return Err(failed("CreateFileMappingW", GetLastError()));
+                        }
+                        let view = MapViewOfFileEx(
+                            section,
+                            FILE_MAP_COPY | FILE_MAP_EXECUTE,
+                            (offset >> 32) as u32,
+                            offset as u32,
+                            len,
+                            hint,
+                        );
+                        let errno = GetLastError();
+                        // The view keeps the section alive.
+                        CloseHandle(section);
+                        if view.Value.is_null() {
+                            return Err(failed("MapViewOfFileEx", errno));
+                        }
+                        view.Value
+                    }
+                },
+                _ => {
+                    let (flags, fd, offset) = match self.file {
+                        None => {
+                            cfg_select! {
+                                target_os = "linux" => (libc::MAP_ANONYMOUS | libc::MAP_SHARED, -1, 0),
+                                _ => (libc::MAP_ANONYMOUS | libc::MAP_PRIVATE, -1, 0),
+                            }
+                        }
+                        Some((file, offset)) => (
+                            libc::MAP_PRIVATE,
+                            std::os::fd::AsRawFd::as_raw_fd(file),
+                            <libc::off_t as std::convert::TryFrom<u64>>::try_from(offset)
+                                .expect("file offset out of range"),
+                        ),
+                    };
+                    let mut raw = hint;
+                    libc_error_guard!(
+                        mmap,
+                        &mut raw,
+                        len,
+                        libc::PROT_READ | libc::PROT_WRITE,
+                        flags,
+                        fd,
+                        offset,
+                    )?;
+                    #[cfg(target_os = "linux")]
+                    if self.file.is_none() {
+                        libc_error_guard!(madvise, raw, len, libc::MADV_DONTFORK)?;
+                    }
+                    raw
+                }
+            }
+        };
+        Ok(Pages {
+            raw: NonNull::new(raw.cast::<u8>()).expect("mapped pages at a null address"),
+            len,
+            origin: match self.file {
+                None => Origin::Anonymous,
+                Some(_) => Origin::File,
+            },
+        })
     }
 }
 
@@ -412,52 +691,6 @@ impl std::ops::DerefMut for Mapping<ReadWrite> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
-macro_rules! libc_error_guard {
-    (succeeded?, mmap, $addr:expr, $($arg:expr),*) => {{
-        *$addr = libc::mmap(*$addr, $($arg),*);
-        *$addr != libc::MAP_FAILED
-    }};
-    (succeeded?, $function:ident, $($arg:expr),*) => {
-        libc::$function($($arg),*) == 0
-    };
-    ($function:ident, $($arg:expr),* $(,)?) => {{
-        const RETRY_COUNT: usize = 3;
-        for i in 0..RETRY_COUNT {
-            if libc_error_guard!(succeeded?, $function, $($arg),*) {
-                break;
-            } else if i.saturating_add(1) == RETRY_COUNT {
-                let args = vec![$(format!("{:?}", $arg)),*];
-                #[cfg(any(target_os = "freebsd", target_os = "ios", target_os = "macos"))]
-                let errno = *libc::__error();
-                #[cfg(any(target_os = "android", target_os = "netbsd", target_os = "openbsd"))]
-                let errno = *libc::__errno();
-                #[cfg(target_os = "linux")]
-                let errno = *libc::__errno_location();
-                return Err(EbpfError::LibcInvocationFailed(stringify!($function), args, errno));
-            }
-        }
-    }};
-}
-
-#[cfg(target_os = "windows")]
-macro_rules! winapi_error_guard {
-    (succeeded?, VirtualAlloc, $addr:expr, $($arg:expr),*) => {{
-        *$addr = VirtualAlloc(*$addr, $($arg),*);
-        !(*$addr).is_null()
-    }};
-    (succeeded?, $function:ident, $($arg:expr),*) => {
-        $function($($arg),*) != 0
-    };
-    ($function:ident, $($arg:expr),* $(,)?) => {{
-        if !winapi_error_guard!(succeeded?, $function, $($arg),*) {
-            let args = vec![$(format!("{:?}", $arg)),*];
-            let errno = GetLastError();
-            return Err(EbpfError::LibcInvocationFailed(stringify!($function), args, errno as i32));
-        }
-    }};
-}
-
 pub(crate) fn get_system_page_size() -> usize {
     #[cfg(not(target_os = "windows"))]
     unsafe {
@@ -480,69 +713,6 @@ pub(crate) fn round_to_page_size(value: usize, page_size: usize) -> usize {
         .saturating_mul(page_size)
 }
 
-fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
-    unsafe {
-        let mut raw: *mut c_void = std::ptr::null_mut();
-        cfg_select! {
-            windows => {
-                winapi_error_guard!(
-                    VirtualAlloc,
-                    &mut raw,
-                    size_in_bytes,
-                    MEM_RESERVE | MEM_COMMIT,
-                    PAGE_READWRITE,
-                );
-            }
-            target_os = "linux" => {
-                // SAFETY: mmap has no soundness invariants for the flags used here.
-                libc_error_guard!(
-                    mmap,
-                    &mut raw,
-                    size_in_bytes,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_ANONYMOUS | libc::MAP_SHARED,
-                    -1,
-                    0,
-                );
-                libc_error_guard!(madvise, raw, size_in_bytes, libc::MADV_DONTFORK);
-            }
-            _ => {
-                // SAFETY: VirtualAlloc has no soundness invariants for the flags used here.
-                libc_error_guard!(
-                    mmap,
-                    &mut raw,
-                    size_in_bytes,
-                    libc::PROT_READ | libc::PROT_WRITE,
-                    libc::MAP_ANONYMOUS | libc::MAP_PRIVATE,
-                    -1,
-                    0,
-                );
-            }
-        }
-        Ok(raw.cast())
-    }
-}
-
-/// Unmap the pages of an allocation.
-///
-/// # Safety
-///
-/// - `raw` and `size_in_bytes` must be a mapping that [`allocate_pages`] created, which is not
-///   freed already.
-/// - Nothing may access the allocation afterwards.
-unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) -> Result<(), EbpfError> {
-    #[cfg(not(target_os = "windows"))]
-    libc_error_guard!(munmap, raw.cast::<c_void>(), size_in_bytes);
-    #[cfg(target_os = "windows")]
-    winapi_error_guard!(
-        VirtualFree,
-        raw.cast::<c_void>(),
-        size_in_bytes,
-        MEM_RELEASE,
-    );
-    Ok(())
-}
-
 #[derive(Copy, Clone)]
 pub(crate) enum PagePermissions {
     Read,
@@ -563,65 +733,26 @@ unsafe fn protect_pages(
     size_in_bytes: usize,
     permissions: PagePermissions,
 ) -> Result<(), EbpfError> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let prot = match permissions {
-            PagePermissions::Read => libc::PROT_READ,
-            PagePermissions::ReadWrite => libc::PROT_READ | libc::PROT_WRITE,
-            PagePermissions::ReadExecute => libc::PROT_READ | libc::PROT_EXEC,
-        };
-        libc_error_guard!(mprotect, raw.cast::<c_void>(), size_in_bytes, prot);
+    cfg_select! {
+        windows => {
+            let mut old: PAGE_PROTECTION_FLAGS = 0;
+            let ptr_old: *mut PAGE_PROTECTION_FLAGS = &mut old;
+            let prot = match permissions {
+                PagePermissions::Read => PAGE_READONLY,
+                PagePermissions::ReadWrite => PAGE_READWRITE,
+                PagePermissions::ReadExecute => PAGE_EXECUTE_READ,
+            };
+            winapi_error_guard!(VirtualProtect, raw.cast::<c_void>(), size_in_bytes, prot, ptr_old)
+        }
+        _ => {
+            let prot = match permissions {
+                PagePermissions::Read => libc::PROT_READ,
+                PagePermissions::ReadWrite => libc::PROT_READ | libc::PROT_WRITE,
+                PagePermissions::ReadExecute => libc::PROT_READ | libc::PROT_EXEC,
+            };
+            libc_error_guard!(mprotect, raw.cast::<c_void>(), size_in_bytes, prot)
+        }
     }
-    #[cfg(target_os = "windows")]
-    {
-        let mut old: PAGE_PROTECTION_FLAGS = 0;
-        let ptr_old: *mut PAGE_PROTECTION_FLAGS = &mut old;
-        let prot = match permissions {
-            PagePermissions::Read => PAGE_READONLY,
-            PagePermissions::ReadWrite => PAGE_READWRITE,
-            PagePermissions::ReadExecute => PAGE_EXECUTE_READ,
-        };
-        winapi_error_guard!(
-            VirtualProtect,
-            raw.cast::<c_void>(),
-            size_in_bytes,
-            prot,
-            ptr_old,
-        );
-    }
-    Ok(())
-}
-
-#[derive(Clone, Copy)]
-enum Advice {
-    DontNeed,
-}
-
-unsafe fn madvise(raw: *mut u8, size_in_bytes: usize, advice: Advice) -> Result<(), EbpfError> {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let advice = match advice {
-            Advice::DontNeed => libc::MADV_DONTNEED,
-        };
-        libc_error_guard!(madvise, raw.cast::<c_void>(), size_in_bytes, advice);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let mut ptr = raw.cast::<c_void>();
-        let advice = match advice {
-            Advice::DontNeed => MEM_RESET,
-        };
-        winapi_error_guard!(
-            VirtualAlloc,
-            &mut ptr,
-            size_in_bytes,
-            advice,
-            PAGE_READWRITE,
-        );
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -631,7 +762,7 @@ mod tests {
 
     /// `len` bytes of zeroed pages, which are not pooled.
     fn new(len: usize) -> Mapping {
-        Mapping::whole(Pages::new(len).unwrap())
+        Mapping::builder(len).build().unwrap()
     }
 
     #[test]
@@ -698,6 +829,52 @@ mod tests {
     fn split_reversed() {
         let page_size = get_system_page_size();
         assert!(new(2 * page_size).split([page_size..1]).is_err());
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn low_mapping() {
+        let len = 2 * get_system_page_size();
+        let mut mapping = Mapping::builder(len).low().build().unwrap();
+        let end = mapping.as_ptr_range().end as usize;
+        assert!(end <= 1 << 31, "{:#x}", end);
+        assert!(mapping.iter().all(|&byte| byte == 0));
+        mapping.fill(0xcc);
+        let mapping = mapping.protect::<ReadExecute>().unwrap();
+        assert!(mapping.iter().all(|&byte| byte == 0xcc));
+    }
+
+    /// A file mapping shows the contents of the file, and writes to it do not reach the file.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn file_mapping() {
+        use std::io::{Read as _, Seek as _, Write as _};
+        let page_size = get_system_page_size();
+        let path = std::env::temp_dir().join(format!("sbpf-file-mapping-{}", std::process::id()));
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let contents: Vec<u8> = (0..3 * page_size)
+            .map(|i| (i / page_size) as u8 + 1)
+            .collect();
+        file.write_all(&contents).unwrap();
+        // SAFETY: the file is not changed while it is mapped.
+        let builder = unsafe { Mapping::builder(2 * page_size).file(&file, page_size as u64) };
+        assert_eq!(builder.len(), 2 * page_size);
+        let mut mapping = builder.build().unwrap();
+        assert_eq!(&mapping[..], &contents[page_size..]);
+        mapping.fill(0xcc);
+        let mapping = mapping.protect::<ReadExecute>().unwrap();
+        assert!(mapping.iter().all(|&byte| byte == 0xcc));
+        drop(mapping);
+        let mut read = Vec::new();
+        file.rewind().unwrap();
+        file.read_to_end(&mut read).unwrap();
+        assert_eq!(read, contents);
     }
 
     /// Pooled pages come back read-write from the pool, whatever they were made before.

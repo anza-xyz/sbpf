@@ -28,20 +28,20 @@ combine = "3.8.1"
 gdbstub = { version = "0.6.2", optional = true }
 hash32 = "0.3.1"
 log = "0.4.2"
-rand = { version = "0.8.5", features = ["small_rng"], optional = true }
+rand = { version = "0.8.5", features = ["small_rng"] }
 rustc-demangle = "0.1"
 shuttle = { version = "0.9.3", optional = true }
 thiserror = "2.0.9"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Memory", "Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Memory", "Win32_System_SystemInformation"] }
 
 [target.'cfg(not(windows))'.dependencies]
 libc = { version = "0.2" }
 
 [features]
 default = ["jit"]
-jit = ["dep:rand"]
+jit = []
 jit-enable-host-stack-frames = ["jit"]
 fuzzer-not-safe-for-production = ["arbitrary"]
 tracer = []
