@@ -1,4 +1,8 @@
 //! Common interface for built-in and user supplied programs
+
+#[cfg(feature = "shuttle-test")]
+use shuttle::rand;
+
 use {
     crate::{
         ebpf,
@@ -10,7 +14,9 @@ use {
         },
         vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
     },
-    std::collections::{btree_map::Entry, BTreeMap},
+    rand::{thread_rng, Rng},
+    std::collections::{hash_map::Entry, HashMap},
+    std::hash::{BuildHasher, Hasher},
     std::ptr::NonNull,
 };
 
@@ -109,17 +115,67 @@ impl SBPFVersion {
     }
 }
 
-/// Holds the function symbols of an Executable
+/// Map suitable to hold user-generated sets of function symbols in an [`Executable`].
+///
+/// [`Executable`]: crate::elf::Executable
 #[derive(Debug, PartialEq, Eq)]
 pub struct FunctionRegistry<T> {
-    pub(crate) map: BTreeMap<u32, (Vec<u8>, T)>,
+    /// This map does not further hash the keys (which already are hashes), and instead randomizes
+    /// them somewhat to avoid malicious exploitation of big-O factors in hashmaps.
+    map: HashMap<u32, (Vec<u8>, T), KeyHasherRandomState>,
 }
 
 impl<T> Default for FunctionRegistry<T> {
     fn default() -> Self {
         Self {
-            map: BTreeMap::new(),
+            map: HashMap::default(),
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct KeyHasherRandomState {
+    multiplier: u64,
+}
+
+impl Default for KeyHasherRandomState {
+    fn default() -> Self {
+        Self {
+            multiplier: thread_rng().gen::<u64>() | 1,
+        }
+    }
+}
+
+impl BuildHasher for KeyHasherRandomState {
+    type Hasher = KeyHasher;
+    fn build_hasher(&self) -> KeyHasher {
+        KeyHasher {
+            multiplier: self.multiplier,
+            hash: 0,
+        }
+    }
+}
+
+struct KeyHasher {
+    multiplier: u64,
+    hash: u64,
+}
+
+impl Hasher for KeyHasher {
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Only `write_u32` is used for the keys.
+        for &byte in bytes {
+            self.write_u32(self.hash as u32 ^ u32::from(byte));
+        }
+    }
+
+    fn write_u32(&mut self, key: u32) {
+        let product = u64::from(key).wrapping_mul(self.multiplier);
+        self.hash = product ^ product >> 32;
     }
 }
 
@@ -200,8 +256,8 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
     }
 
     /// Get a function by its key
+    #[inline]
     pub fn lookup_by_key(&self, key: u32) -> Option<(&[u8], T)> {
-        // String::from_utf8_lossy(function_name).as_str()
         self.map
             .get(&key)
             .map(|(function_name, value)| (function_name.as_slice(), *value))
@@ -217,9 +273,9 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
 
     /// Calculate memory size
     pub fn mem_size(&self) -> usize {
-        std::mem::size_of::<Self>().saturating_add(self.map.iter().fold(
+        std::mem::size_of::<Self>().saturating_add(self.map.values().fold(
             0,
-            |state: usize, (_, (name, value))| {
+            |state: usize, (name, value)| {
                 state.saturating_add(
                     std::mem::size_of_val(value).saturating_add(
                         std::mem::size_of_val(name).saturating_add(name.capacity()),
@@ -588,4 +644,70 @@ macro_rules! declare_builtin_function {
             })?
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    macro_rules! check_lookups {
+        ($registry:ident, $lens:expr) => {
+            let key = |i: u32| ebpf::hash_symbol_name(&i.to_le_bytes());
+            for len in $lens {
+                let mut registry = $registry::default();
+                for i in 0..len {
+                    registry
+                        .register_function(key(i), format!("f{i}"), i)
+                        .unwrap();
+                }
+                let found = |registry: &$registry<u32>, i: u32| {
+                    registry
+                        .lookup_by_key(key(i))
+                        .map(|(name, value)| (String::from_utf8(name.to_vec()).unwrap(), value))
+                };
+                for i in 0..len {
+                    assert_eq!(found(&registry, i), Some((format!("f{i}"), i)));
+                }
+                for i in len..len.saturating_add(1000) {
+                    assert_eq!(found(&registry, i), None);
+                }
+                let mut keys: Vec<_> = (0..len).map(key).collect();
+                keys.sort();
+                let mut registered: Vec<_> = registry.keys().collect();
+                registered.sort();
+                assert_eq!(registered, keys);
+                let mut iterated: Vec<_> = registry.iter().map(|(key, _)| key).collect();
+                iterated.sort();
+                assert_eq!(iterated, keys);
+                if len > 0 {
+                    assert!(registry.register_function(key(0), "f0", 0).is_ok());
+                    assert!(matches!(
+                        registry.register_function(key(0), "f0", 1),
+                        Err(ElfError::SymbolHashCollision(_))
+                    ));
+                    assert!(registry.unregister_function(key(0)));
+                    assert!(!registry.unregister_function(key(0)));
+                    assert_eq!(found(&registry, 0), None);
+                    for i in 1..len {
+                        assert_eq!(found(&registry, i), Some((format!("f{i}"), i)));
+                    }
+                    assert_eq!(registry.keys().count(), (len as usize).saturating_sub(1));
+                    registry.register_function(key(0), "f0", 0).unwrap();
+                    assert_eq!(found(&registry, 0), Some(("f0".to_string(), 0)));
+                    for i in 0..len {
+                        assert!(registry.unregister_function(key(i)));
+                    }
+                    assert_eq!(registry.keys().count(), 0);
+                    for i in 0..len.saturating_add(1000) {
+                        assert_eq!(found(&registry, i), None);
+                    }
+                }
+            }
+        };
+    }
+
+    #[test]
+    fn function_registry_lookups() {
+        check_lookups!(FunctionRegistry, [0u32, 1, 3, 64, 1000]);
+    }
 }
