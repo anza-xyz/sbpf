@@ -10,6 +10,7 @@ use shuttle::rand;
 use crate::error::EbpfError;
 use rand::{thread_rng, Rng};
 use std::ffi::c_void;
+use std::fs::File;
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::ptr::NonNull;
@@ -17,11 +18,13 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
-    Foundation::{GetLastError, ERROR_NOT_ENOUGH_MEMORY},
+    Foundation::{CloseHandle, GetLastError, ERROR_NOT_ENOUGH_MEMORY},
     System::{
         Memory::{
-            VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
-            MEM_RESET, PAGE_EXECUTE_READ, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
+            CreateFileMappingW, MapViewOfFileEx, UnmapViewOfFile, VirtualAlloc, VirtualFree,
+            VirtualProtect, FILE_MAP_COPY, FILE_MAP_EXECUTE, MEMORY_MAPPED_VIEW_ADDRESS,
+            MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, MEM_RESET, PAGE_EXECUTE_READ,
+            PAGE_EXECUTE_WRITECOPY, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
         },
         SystemInformation::{GetSystemInfo, SYSTEM_INFO},
     },
@@ -236,6 +239,16 @@ impl Pages {
 
     /// Allocate a new page so that all addresses within the mapping fit within `i32::MAX`.
     fn new_sub2g(len: usize) -> Result<Pages, EbpfError> {
+        Self::map_sub2g_with(len, |at| Self::map_at(len, at))
+    }
+
+    /// Map `len` bytes with `map` at an address within the first 2 GiB, by trying it with hints.
+    ///
+    /// `map` is given the address hint, and returns the pages that it mapped.
+    fn map_sub2g_with(
+        len: usize,
+        map: impl Fn(*mut c_void) -> Result<Pages, EbpfError>,
+    ) -> Result<Pages, EbpfError> {
         const ALIGNMENT: usize = 64 * 1024;
         const LOWEST: usize = 256 * 1024 * 1024;
         const HIGHEST: usize = 2 * 1024 * 1024 * 1024;
@@ -249,7 +262,7 @@ impl Pages {
         for _ in 0..slots.map_or(0, |_| ATTEMPTS) {
             let slot = thread_rng().gen_range(0..slots.unwrap_or(1));
             let hint = LOWEST.saturating_add(slot.saturating_mul(ALIGNMENT)) as *mut c_void;
-            match Self::map_at(len, hint) {
+            match map(hint) {
                 Ok(pages) if pages.raw.as_ptr() == hint.cast() => return Ok(pages),
                 // Without `MAP_FIXED` the address hint is only honored if the range is free. The
                 // allocated pages might be elsewhere.
@@ -310,6 +323,79 @@ impl Pages {
     }
 }
 
+impl Pages {
+    /// Map `len` bytes of `file` from `offset` on as a private, copy-on-write view, requesting
+    /// system to start the mapping at `at` as [`Pages::map_at`] does.
+    ///
+    /// # Safety
+    ///
+    /// See [`Mapping::file`].
+    unsafe fn from_file(
+        file: &File,
+        offset: u64,
+        len: usize,
+        mut at: *mut c_void,
+    ) -> Result<Pages, EbpfError> {
+        // SAFETY: the pages are new, nothing refers to them yet. The soundness requirements that
+        // concern the contents of `file` are on the caller.
+        cfg_select! {
+            windows => unsafe {
+                let failed = |function, errno: u32| {
+                    let args = vec![format!("{len:?}"), format!("{offset:?}")];
+                    EbpfError::LibcInvocationFailed(function, args, errno as i32)
+                };
+                let handle = std::os::windows::io::AsRawHandle::as_raw_handle(file);
+                let section = CreateFileMappingW(
+                    handle,
+                    std::ptr::null(),
+                    PAGE_EXECUTE_WRITECOPY,
+                    0,
+                    0,
+                    std::ptr::null(),
+                );
+                if section.is_null() {
+                    return Err(failed("CreateFileMappingW", GetLastError()));
+                }
+                // Copy-on-write views start out read-write, and can be made read-only or
+                // executable.
+                let view = MapViewOfFileEx(
+                    section,
+                    FILE_MAP_COPY | FILE_MAP_EXECUTE,
+                    (offset >> 32) as u32,
+                    offset as u32,
+                    len,
+                    at,
+                );
+                let errno = GetLastError();
+                // The view keeps the section alive.
+                CloseHandle(section);
+                if view.Value.is_null() {
+                    return Err(failed("MapViewOfFileEx", errno));
+                }
+                at = view.Value;
+            }
+            _ => unsafe {
+                let offset = <libc::off_t as std::convert::TryFrom<u64>>::try_from(offset)
+                    .expect("file offset out of range");
+                libc_error_guard!(
+                    mmap,
+                    &mut at,
+                    len,
+                    libc::PROT_READ | libc::PROT_WRITE,
+                    libc::MAP_PRIVATE,
+                    std::os::fd::AsRawFd::as_raw_fd(file),
+                    offset,
+                )?;
+            }
+        }
+        Ok(Pages {
+            raw: NonNull::new(at.cast::<u8>()).expect("mapped pages at a null address"),
+            len,
+            origin: Origin::File,
+        })
+    }
+}
+
 impl Drop for Pages {
     fn drop(&mut self) {
         let Self { raw, len, origin } = *self;
@@ -336,7 +422,18 @@ impl Drop for Pages {
         // this type is over.
         let unmap_result = cfg_select! {
             windows => unsafe {
-                winapi_error_guard!(VirtualFree, raw.as_ptr().cast::<c_void>(), 0, MEM_RELEASE)
+                if origin == Origin::File {
+                    let view = MEMORY_MAPPED_VIEW_ADDRESS { Value: raw.as_ptr().cast::<c_void>() };
+                    if UnmapViewOfFile(view) == 0 {
+                        let errno = GetLastError() as i32;
+                        let args = vec![format!("{raw:?}")];
+                        Err(EbpfError::LibcInvocationFailed("UnmapViewOfFile", args, errno))
+                    } else {
+                        Ok(())
+                    }
+                } else {
+                    winapi_error_guard!(VirtualFree, raw.as_ptr().cast::<c_void>(), 0, MEM_RELEASE)
+                }
             }
             _ => unsafe {
                 libc_error_guard!(munmap, raw.as_ptr().cast::<c_void>(), self.len)
@@ -355,6 +452,8 @@ enum Origin {
     Anonymous,
     /// Memory from the pool [`ALLOCATOR`].
     Pooled,
+    /// A view of a file.
+    File,
 }
 
 /// Access permissions of [`Mapping`].
@@ -419,6 +518,52 @@ impl Mapping {
     )]
     pub(crate) fn sub2g(len: usize) -> Result<Self, EbpfError> {
         Ok(Self::whole(Pages::new_sub2g(len)?))
+    }
+
+    /// Map `len` bytes of `file`, from `offset` on, into read-write pages.
+    ///
+    /// The offset must be a multiple of the page size, and on Windows of the allocation
+    /// granularity, which is 64 KiB. The file must be open for reading, and on Windows for
+    /// execution too.
+    ///
+    /// The mapping is private: the pages are copied when they are first written to, so what is
+    /// written through the mapping does not reach the file. Debuggers can insert breakpoints into
+    /// private mappings that are executable, but not into shared ones. These pages do not
+    /// participate in the pool, as reusing them would overwrite the contents of the file.
+    ///
+    /// # Safety
+    ///
+    /// Until the mapping is dropped, the file must not be shortened below `offset` plus `len`,
+    /// and the bytes there may only be overwritten with those that the mapping has at the same
+    /// position, as pages that were not written to yet show what the file holds.
+    #[cfg_attr(not(all(test, not(target_os = "windows"))), expect(dead_code))]
+    pub(crate) unsafe fn file(file: &File, offset: u64, len: usize) -> Result<Self, EbpfError> {
+        // SAFETY: forwarded to the caller.
+        Ok(Self::whole(unsafe {
+            Pages::from_file(file, offset, len, std::ptr::null_mut())?
+        }))
+    }
+
+    /// Same as [`Mapping::file`], within the first 2 GiB of the address space, as [`sub2g`] is.
+    ///
+    /// # Safety
+    ///
+    /// See [`Mapping::file`].
+    ///
+    /// [`sub2g`]: Mapping::sub2g
+    #[cfg_attr(
+        not(all(test, not(any(windows, target_os = "macos")))),
+        expect(dead_code)
+    )]
+    pub(crate) unsafe fn sub2g_file(
+        file: &File,
+        offset: u64,
+        len: usize,
+    ) -> Result<Self, EbpfError> {
+        // SAFETY: forwarded to the caller.
+        let pages =
+            Pages::map_sub2g_with(len, |at| unsafe { Pages::from_file(file, offset, len, at) });
+        Ok(Self::whole(pages?))
     }
 
     /// All of the read-write `pages`.
@@ -709,6 +854,71 @@ mod tests {
         mapping.fill(0xcc);
         let mapping = mapping.protect::<ReadExecute>().unwrap();
         assert!(mapping.iter().all(|&byte| byte == 0xcc));
+    }
+
+    /// A file of three pages, each filled with its number starting from 1.
+    #[cfg(not(target_os = "windows"))]
+    fn three_page_file() -> (std::fs::File, Vec<u8>) {
+        use std::io::Write as _;
+        let page_size = get_system_page_size();
+        let path = std::env::temp_dir().join(format!(
+            "sbpf-file-mapping-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .unwrap();
+        std::fs::remove_file(&path).unwrap();
+        let contents: Vec<u8> = (0..3 * page_size)
+            .map(|i| (i / page_size) as u8 + 1)
+            .collect();
+        file.write_all(&contents).unwrap();
+        (file, contents)
+    }
+
+    /// Writes to the mapping of the file are visible through it, but do not reach the file.
+    #[cfg(not(target_os = "windows"))]
+    fn check_file_mapping(mut file: std::fs::File, contents: Vec<u8>, mut mapping: Mapping) {
+        use std::io::{Read as _, Seek as _};
+        let page_size = get_system_page_size();
+        assert_eq!(&mapping[..], &contents[page_size..]);
+        mapping.fill(0xcc);
+        let mapping = mapping.protect::<ReadExecute>().unwrap();
+        assert!(mapping.iter().all(|&byte| byte == 0xcc));
+        drop(mapping);
+        let mut read = Vec::new();
+        file.rewind().unwrap();
+        file.read_to_end(&mut read).unwrap();
+        assert_eq!(read, contents);
+    }
+
+    /// A file mapping shows the contents of the file, and writes to it do not reach the file.
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn file_mapping() {
+        let page_size = get_system_page_size();
+        let (file, contents) = three_page_file();
+        // SAFETY: the file is not changed while it is mapped.
+        let mapping = unsafe { Mapping::file(&file, page_size as u64, 2 * page_size) }.unwrap();
+        check_file_mapping(file, contents, mapping);
+    }
+
+    /// Same as `file_mapping`, within the first 2 GiB.
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[test]
+    fn sub2g_file_mapping() {
+        let page_size = get_system_page_size();
+        let (file, contents) = three_page_file();
+        // SAFETY: the file is not changed while it is mapped.
+        let mapping =
+            unsafe { Mapping::sub2g_file(&file, page_size as u64, 2 * page_size) }.unwrap();
+        let end = mapping.as_ptr_range().end as usize;
+        assert!(end <= 1 << 31, "{:#x}", end);
+        check_file_mapping(file, contents, mapping);
     }
 
     /// Pooled pages come back read-write from the pool, whatever they were made before.
