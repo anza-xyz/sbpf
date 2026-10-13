@@ -301,3 +301,173 @@ fn v2_store_definition_reaches_memory_load() {
                 && edge.kind == DfgEdgeKind::Filled));
     }
 }
+
+#[test]
+fn v2_memory_class_guarded_dfg() {
+    for (version, expected) in [
+        (SBPFVersion::V0, true),
+        (SBPFVersion::V1, true),
+        (SBPFVersion::V2, false),
+        (SBPFVersion::V3, true),
+        (SBPFVersion::V4, true),
+    ] {
+        for (store_imm, store_reg, load) in [
+            (ebpf::ST_B_IMM, ebpf::ST_B_REG, ebpf::LD_B_REG),
+            (ebpf::ST_H_IMM, ebpf::ST_H_REG, ebpf::LD_H_REG),
+            (ebpf::ST_W_IMM, ebpf::ST_W_REG, ebpf::LD_W_REG),
+            (ebpf::ST_DW_IMM, ebpf::ST_DW_REG, ebpf::LD_DW_REG),
+        ] {
+            let code = &[
+                insn(store_imm, 1, 0, 2, 42),
+                insn(store_reg, 1, 2, 3, 43),
+                insn(load, 1, 2, 3, 0),
+            ];
+            let exe = executable(code, version);
+            let analysis = Analysis::from_executable(&exe).unwrap();
+
+            for (pc, insn) in code.iter().enumerate() {
+                assert!(
+                    analysis
+                        .dfg_reverse_edges
+                        .contains_key(&DfgNode::InstructionNode(pc))
+                        == expected,
+                    "SBPF: {:?}, pc: {}, opc: {:#x}",
+                    version,
+                    pc,
+                    insn[0]
+                )
+            }
+        }
+    }
+}
+
+#[test]
+fn v2_moved_alu_opcodes_dfg() {
+    for (version, expected_alu) in [
+        (SBPFVersion::V0, true),
+        (SBPFVersion::V1, true),
+        (SBPFVersion::V2, false),
+        (SBPFVersion::V3, true),
+        (SBPFVersion::V4, true),
+    ] {
+        for (mul, div, mod_) in [
+            (ebpf::MUL32_IMM, ebpf::DIV32_IMM, ebpf::MOD32_IMM),
+            (ebpf::MUL64_IMM, ebpf::DIV64_IMM, ebpf::MOD64_IMM),
+            (ebpf::MUL32_REG, ebpf::DIV32_REG, ebpf::MOD32_REG),
+            (ebpf::MUL64_REG, ebpf::DIV64_REG, ebpf::MOD64_REG),
+        ] {
+            let code = &[
+                insn(mul, 0, 1, 0, 42),
+                insn(div, 2, 3, 0, 43),
+                insn(mod_, 4, 5, 0, 44),
+            ];
+            let exe = executable(code, version);
+            let analysis = Analysis::from_executable(&exe).unwrap();
+
+            for (pc, insn) in code.iter().enumerate() {
+                assert_eq!(
+                    analysis
+                        .dfg_reverse_edges
+                        .get(&DfgNode::InstructionNode(pc))
+                        .is_some_and(|edges| edges
+                            .iter()
+                            // SIMD-0173 and SIMD-0174: non-V2 MUL, DIV and MOD opcodes are conflicting with
+                            // ST, STX and LDX classes, so we check that these are not parsed as memory operations
+                            .all(|edge| edge.resource != DataResource::Memory)),
+                    expected_alu,
+                    "SBPF: {version:?}, pc:{pc}, opc: {:#x}",
+                    insn[0]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn v2_lddw_replaced_with_hor() {
+    for (version, lddw_expected) in [
+        (SBPFVersion::V0, true),
+        (SBPFVersion::V1, true),
+        (SBPFVersion::V2, false),
+        (SBPFVersion::V3, true),
+        (SBPFVersion::V4, true),
+    ] {
+        let exe = executable(
+            &[
+                insn(ebpf::LD_DW_IMM, 1, 0, 0, 0x5566_7788),
+                insn(0x00, 0, 0, 0, 0x1122_3344),
+                insn(ebpf::HOR64_IMM, 1, 0, 0, 0x1122_3344),
+            ],
+            version,
+        );
+        let analysis = Analysis::from_executable(&exe).unwrap();
+
+        let lddw_parsed = analysis
+            .dfg_reverse_edges
+            .contains_key(&DfgNode::InstructionNode(0));
+
+        let hor_parsed = analysis
+            .dfg_reverse_edges
+            .contains_key(&DfgNode::InstructionNode(2));
+
+        assert!(
+            lddw_parsed == lddw_expected && hor_parsed != lddw_expected,
+            "SBPF: {:?}",
+            version
+        );
+    }
+}
+
+#[test]
+fn v2_le_disabled() {
+    for (version, expected) in [
+        (SBPFVersion::V0, true),
+        (SBPFVersion::V1, true),
+        (SBPFVersion::V2, false),
+        (SBPFVersion::V3, true),
+        (SBPFVersion::V4, true),
+    ] {
+        let exe = executable(&[insn(ebpf::LE, 1, 0, 0, 16)], version);
+        let analysis = Analysis::from_executable(&exe).unwrap();
+
+        assert_eq!(
+            analysis
+                .dfg_reverse_edges
+                .contains_key(&DfgNode::InstructionNode(0)),
+            expected,
+            "SBPF: {version:?}",
+        );
+    }
+}
+
+#[test]
+fn v2_neg_disabled() {
+    for (version, expected) in [
+        (SBPFVersion::V0, true),
+        (SBPFVersion::V1, true),
+        (SBPFVersion::V2, false),
+        (SBPFVersion::V3, true),
+        (SBPFVersion::V4, true),
+    ] {
+        let exe = executable(
+            &[insn(ebpf::NEG32, 1, 0, 0, 0), insn(ebpf::NEG64, 2, 0, 0, 0)],
+            version,
+        );
+        let analysis = Analysis::from_executable(&exe).unwrap();
+
+        for pc in [0, 1] {
+            assert_eq!(
+                analysis
+                    .dfg_reverse_edges
+                    .get(&DfgNode::InstructionNode(pc))
+                    .is_some_and(|edges| edges
+                        .iter()
+                        // SIMD-0173 and SIMD-0174: NEG64 conflicts with ST_4B_IMM
+                        // so we check for an edge with a memory resource
+                        .all(|edge| edge.resource != DataResource::Memory)),
+                expected,
+                "SBPF: {version:?}, pc: {pc}"
+            );
+        }
+    }
+}
