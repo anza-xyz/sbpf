@@ -30,7 +30,7 @@ use crate::{
     elf::Executable,
     error::{EbpfError, ProgramResult},
     memory_region::MemoryMapping,
-    program::{BuiltinFunction, JitProgram, UnsealedJitProgram},
+    program::{BuiltinFunction, UnsealedJitProgram},
     vm::{get_runtime_environment_key, Config, ContextObject, EbpfVm, RuntimeEnvironmentSlot},
     x86::{
         FenceType, X86IndirectAccess, X86Instruction,
@@ -38,6 +38,8 @@ use crate::{
         ARGUMENT_REGISTERS, CALLEE_SAVED_REGISTERS, CALLER_SAVED_REGISTERS,
     },
 };
+
+pub use crate::program::JitProgram;
 
 /// The maximum machine code length in bytes of a program with no guest instructions
 pub const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
