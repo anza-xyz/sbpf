@@ -9,6 +9,11 @@ on:
   pull_request:
     branches:
       - main
+  merge_group:
+    branches:
+      - main
+    types:
+      - checks_requested
 
 jobs:
   fmt:
@@ -121,13 +126,13 @@ jobs:
         fail_ci_if_error: true
 
   pr-status:
-    name: PR CI Status
+    name: CI Status
     needs:
       - fmt
       - clippy
       - test
       - coverage
-    if: ${{ always() && github.event_name == 'pull_request' }}
+    if: ${{ always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
     steps:
       - name: Check required jobs
