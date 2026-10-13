@@ -5,7 +5,7 @@ use libfuzzer_sys::fuzz_target;
 use semantic_aware::*;
 use solana_sbpf::{
     insn_builder::IntoBytes,
-    program::FunctionRegistry,
+    program::SyscallRegistry,
     verifier::{RequisiteVerifier, Verifier},
 };
 
@@ -23,7 +23,7 @@ struct FuzzData {
 fuzz_target!(|data: FuzzData| {
     let sbpf_version = data.template.sbpf_version;
     let prog = make_program(&data.prog, sbpf_version);
-    let function_registry = FunctionRegistry::<usize>::default();
+    let function_registry = SyscallRegistry::<usize>::default();
 
     #[allow(unused)]
     let res = RequisiteVerifier::verify(prog.into_bytes(), sbpf_version, &function_registry);

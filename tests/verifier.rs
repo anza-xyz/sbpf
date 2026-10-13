@@ -28,7 +28,9 @@ use solana_sbpf::{
     assembler::assemble,
     ebpf,
     elf::Executable,
-    program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{
+        BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion, SyscallRegistry,
+    },
     verifier::{LocalVerifier, RequisiteVerifier, Verifier, VerifierError},
     vm::Config,
 };
@@ -49,7 +51,7 @@ impl Verifier for TautologyVerifier {
     fn verify<T>(
         _prog: &[u8],
         _sbpf_version: SBPFVersion,
-        _syscall_registry: &FunctionRegistry<T>,
+        _syscall_registry: &SyscallRegistry<T>,
     ) -> std::result::Result<(), VerifierError> {
         Ok(())
     }
@@ -60,7 +62,7 @@ impl Verifier for ContradictionVerifier {
     fn verify<T>(
         _prog: &[u8],
         _sbpf_version: SBPFVersion,
-        _syscall_registry: &FunctionRegistry<T>,
+        _syscall_registry: &SyscallRegistry<T>,
     ) -> std::result::Result<(), VerifierError> {
         Err(VerifierError::NoProgram)
     }

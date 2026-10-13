@@ -8,7 +8,7 @@ use solana_sbpf::{
     elf::Executable,
     insn_builder::{Instruction, IntoBytes},
     memory_region::MemoryRegion,
-    program::{BuiltinProgram, FunctionRegistry},
+    program::{BuiltinProgram, FunctionRegistry, SyscallRegistry},
     verifier::{RequisiteVerifier, Verifier},
     vm::{CallFrame, ExecutionMode},
 };
@@ -40,9 +40,9 @@ fuzz_target!(|data: FuzzData| {
         .set_imm(data.exit_imm)
         .push();
     let config = data.template.into();
-    let function_registry = FunctionRegistry::default();
+    let syscall_registry = SyscallRegistry::<usize>::default();
 
-    if RequisiteVerifier::verify(prog.into_bytes(), sbpf_version, &function_registry).is_err() {
+    if RequisiteVerifier::verify(prog.into_bytes(), sbpf_version, &syscall_registry).is_err() {
         // verify please
         return;
     }
@@ -52,7 +52,7 @@ fuzz_target!(|data: FuzzData| {
         prog.into_bytes(),
         std::sync::Arc::new(BuiltinProgram::new_loader(config)),
         sbpf_version,
-        function_registry,
+        FunctionRegistry::default(),
     )
     .unwrap();
     let mut interp_mem = data.mem.clone();

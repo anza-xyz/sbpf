@@ -624,6 +624,10 @@ fn bench_syscalls(c: &mut Criterion) {
                 syscalls::SyscallGatherBytes::register(loader, "bpf_gather_bytes").unwrap();
                 syscalls::SyscallMemFrob::register(loader, "bpf_mem_frob").unwrap();
                 syscalls::SyscallStrCmp::register(loader, "bpf_str_cmp").unwrap();
+                // There will be at least this many registered syscalls in real cases.
+                for i in 0..32 {
+                    syscalls::SyscallStrCmp::register(loader, &format!("dummy{i}")).unwrap();
+                }
             },
             &mut mem,
         );

@@ -411,7 +411,7 @@ impl<C: ContextObject> Executable<C> {
         <V as Verifier>::verify(
             self.get_text_bytes().1,
             self.get_sbpf_version(),
-            self.get_loader().get_function_registry(),
+            self.get_loader().syscall_registry(),
         )?;
         Ok(())
     }
@@ -1243,7 +1243,7 @@ impl<C: ContextObject> Executable<C> {
                             .entry(symbol.st_name)
                             .or_insert_with(|| ebpf::hash_symbol_name(name));
                         if config.reject_broken_elfs
-                            && loader.get_function_registry().lookup_by_key(hash).is_none()
+                            && loader.syscall_registry().lookup_by_key(hash).is_none()
                         {
                             return Err(ElfError::UnresolvedSymbol(
                                 String::from_utf8_lossy(name).to_string(),
