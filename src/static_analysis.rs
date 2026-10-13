@@ -254,9 +254,16 @@ impl<'a> Analysis<'a> {
             match insn.opc {
                 ebpf::CALL_IMM => {
                     let key = sbpf_version.calculate_call_imm_target_pc(insn.ptr, insn.imm);
-                    if let Some((_function_name, target_pc)) =
-                        self.executable.get_function_registry().lookup_by_key(key)
-                    {
+                    // With static syscalls the target is relative and needs no label
+                    let target_pc = if sbpf_version.static_syscalls() {
+                        (insn.src == 1).then_some(key as usize)
+                    } else {
+                        self.executable
+                            .get_function_registry()
+                            .lookup_by_key(key)
+                            .map(|(_function_name, target_pc)| target_pc)
+                    };
+                    if let Some(target_pc) = target_pc {
                         self.cfg_nodes.entry(insn.ptr + 1).or_default();
                         self.cfg_nodes.entry(target_pc).or_default();
                         let destinations = if flatten_call_graph {

@@ -515,3 +515,33 @@ fn call_target_is_resolved_from_the_instruction_pointer() {
         );
     }
 }
+
+#[test]
+fn internal_calls_are_resolved_without_labels() {
+    for version in [SBPFVersion::V3, SBPFVersion::V4] {
+        let exe = executable(
+            &[
+                // entrypoint:
+                insn(ebpf::CALL_IMM, 0, 1, 0, 1),
+                insn(ebpf::EXIT, 0, 0, 0, 0),
+                // function_2:
+                insn(ebpf::MOV64_IMM, 1, 0, 0, 42),
+                insn(ebpf::EXIT, 0, 0, 0, 0),
+            ],
+            version,
+        );
+        let analysis = Analysis::from_executable(&exe).unwrap();
+
+        // The call ends the basic block
+        assert_eq!(
+            analysis.cfg_nodes[&0].destinations,
+            vec![1],
+            "SBPF: {version:?}"
+        );
+
+        let mut asm = Vec::new();
+        analysis.disassemble(&mut asm).unwrap();
+        let asm = String::from_utf8(asm).unwrap();
+        assert!(asm.contains("call function_2"), "SBPF: {:?}", version);
+    }
+}
