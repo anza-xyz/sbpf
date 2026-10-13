@@ -65,6 +65,10 @@ name = "jit_compile"
 harness = false
 
 [[bench]]
+name = "function_registry"
+harness = false
+
+[[bench]]
 name = "memory_mapping"
 harness = false
 
