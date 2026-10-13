@@ -6,6 +6,8 @@ use crate::memory_management::{Mapping, ReadExecute};
 use crate::program::SBPFVersion;
 use dynasmrt::relocations::{Relocation, RelocationKind};
 use dynasmrt::DynamicLabel;
+#[cfg(feature = "codegen-debug")]
+use std::convert::TryInto;
 use std::sync::LazyLock;
 
 /// The interpreter step for the instructions with `opcode`, of the interpreter for the SBPF
@@ -19,6 +21,9 @@ pub(in crate::codegen) fn interpreter_step(
 
 pub(in crate::codegen) struct Interpreter {
     pub(in crate::codegen) steps: Mapping<ReadExecute>,
+    /// The length of the code of each step, which is followed by padding to the size of the step.
+    #[cfg(feature = "codegen-debug")]
+    pub(in crate::codegen) step_lens: Box<[u8]>,
 }
 
 /// Generates the interpreter.
@@ -161,10 +166,18 @@ pub(in crate::codegen) fn interpreter(version: SBPFVersion) -> &'static Interpre
 }
 
 fn generate_interpreter(version: SBPFVersion) -> Interpreter {
-    let buffer = Mapping::sub2g(InterpreterGenerator::STEP_TABLE_SIZE);
+    #[cfg(feature = "codegen-debug")]
+    let mut debug_image =
+        super::super::debug::DebugImage::new(&format!("interpreter-{version:?}").to_lowercase());
+    let buffer = cfg_select! {
+        feature = "codegen-debug" => debug_image.map_sub2g(InterpreterGenerator::STEP_TABLE_SIZE),
+        _ => Mapping::sub2g(InterpreterGenerator::STEP_TABLE_SIZE),
+    };
     let mut generator = InterpreterGenerator::new(version, buffer);
     // The space after the code of a step traps if it is ever executed.
     generator.buffer.fill(arch::TRAP_FILL);
+    #[cfg(feature = "codegen-debug")]
+    let mut step_lens = vec![0; TemplateOpcode::COUNT];
     for opcode in TemplateOpcode::all() {
         let step_start = InterpreterGenerator::step_offset(opcode);
         generator.opcode = opcode;
@@ -180,9 +193,18 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
         );
         let step = &mut generator.buffer[step_start..generator.offset];
         generator.relocs.resolve(step, step_start);
+        #[cfg(feature = "codegen-debug")]
+        {
+            step_lens[opcode.index()] = step_len.try_into().unwrap();
+        }
     }
 
-    Interpreter {
+    let interpreter = Interpreter {
         steps: generator.buffer.protect(),
-    }
+        #[cfg(feature = "codegen-debug")]
+        step_lens: step_lens.into_boxed_slice(),
+    };
+    #[cfg(feature = "codegen-debug")]
+    super::super::debug::finish_interpreter(debug_image, version, &interpreter);
+    interpreter
 }

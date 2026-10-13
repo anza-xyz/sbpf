@@ -5,6 +5,7 @@ use super::generate::TemplateOpcode;
 use crate::ebpf;
 use crate::elf::Executable;
 use crate::error::EbpfError;
+#[cfg(not(feature = "codegen-debug"))]
 use crate::memory_management::Mapping;
 use crate::program::{JitProgram, UnsealedJitProgram};
 use crate::vm::ContextObject;
@@ -80,7 +81,7 @@ impl AuxTemplate {
         Self::MeterCheckpoint,
     ];
     /// Emitted at the start of the output, in this order.
-    const SHARED: [Self; 3] = [
+    pub(super) const SHARED: [Self; 3] = [
         Self::InvalidCallTarget,
         Self::SigInvalidInsn,
         Self::SigMeterExceeded,
@@ -146,7 +147,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
     }
 
     /// The offsets of the [`AuxTemplate::SHARED`] templates.
-    fn shared_offsets(&self) -> [usize; AuxTemplate::SHARED.len()] {
+    pub(super) fn shared_offsets(&self) -> [usize; AuxTemplate::SHARED.len()] {
         let mut end = 0usize;
         AuxTemplate::SHARED.map(|template| {
             let start = end;
@@ -258,7 +259,12 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         // This necessitates some additional padding so we don't stomp other allocations.
         let code_capacity = output_len.wrapping_add(SIZE);
         let len = UnsealedJitProgram::mapping_len(pc_sec.len(), code_capacity);
-        let mapping = Mapping::pooled(len);
+        #[cfg(feature = "codegen-debug")]
+        let mut debug_image = super::debug::DebugImage::new_jit();
+        let mapping = cfg_select! {
+            feature = "codegen-debug" => debug_image.map(len),
+            _ => Mapping::pooled(len),
+        };
         // The pc section is written in whole below, so the recycled memory need not be zeroed.
         let mut program = UnsealedJitProgram::in_mapping(mapping, pc_sec.len(), code_capacity);
 
@@ -311,6 +317,8 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         let mut program = program.seal(output_len)?;
         program.parrot = true;
         program.random_key = random_key;
+        #[cfg(feature = "codegen-debug")]
+        super::debug::finish_jit(debug_image, self, executable, &mut program);
         Ok(program)
     }
 
@@ -318,7 +326,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         self.layouts[opcode.index()]
     }
 
-    fn aux_layout(&self, template: AuxTemplate) -> TemplateLayout {
+    pub(super) fn aux_layout(&self, template: AuxTemplate) -> TemplateLayout {
         self.layouts[template.index()]
     }
 

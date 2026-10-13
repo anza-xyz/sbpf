@@ -138,6 +138,26 @@ pub(in crate::codegen) struct MemoryHelpers {
 }
 
 impl MemoryHelpers {
+    /// Add the name and address of each helper to `symbols`.
+    #[cfg(feature = "codegen-debug")]
+    pub(super) fn debug_symbols(&self, symbols: &mut Vec<(String, usize)>) {
+        for (size_log2, bits) in [8, 16, 32, 64].iter().copied().enumerate() {
+            for dst in 0..Reg::COUNT {
+                let store_imm = self.store_imm[size_log2][dst];
+                symbols.push((format!("store_imm_u{bits}_r{dst}"), store_imm as usize));
+                for src in 0..Reg::COUNT {
+                    let load = self.load[size_log2][dst][src];
+                    symbols.push((format!("load_u{bits}_r{dst}_r{src}"), load as usize));
+                    let store_reg = self.store_reg[size_log2][dst][src];
+                    symbols.push((
+                        format!("store_reg_u{bits}_r{dst}_r{src}"),
+                        store_reg as usize,
+                    ));
+                }
+            }
+        }
+    }
+
     pub(in crate::codegen) fn load(&self, size: AccessSize, dst: Reg, src: Reg) -> u32 {
         self.load[size as usize][usize::from(dst.0)][usize::from(src.0)]
     }

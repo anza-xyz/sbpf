@@ -133,7 +133,10 @@ pub(super) use relocation::{
     TemplateRelocation, TemplateRelocationKind, MAX_JIT_TEMPLATE_SIZE, MAX_RELOCATIONS,
 };
 pub(super) use supporting_code::interpreter_global;
-use supporting_code::SupportingCode;
+cfg_select! {
+    feature = "codegen-debug" => { pub(super) use supporting_code::SupportingCode; }
+    _ => { use supporting_code::SupportingCode; }
+}
 
 /// The interpreter steps are 128 bytes.
 pub(super) const INTERPRETER_STEP_SIZE_LOG2: u8 = 7;

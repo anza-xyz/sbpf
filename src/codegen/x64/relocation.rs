@@ -37,8 +37,8 @@ pub(in crate::codegen) enum TemplateRelocationKind {
 #[derive(Clone, Copy, Debug)]
 pub(in crate::codegen) struct TemplateRelocation {
     /// Offset of the field within the template.
-    field: u8,
-    kind: TemplateRelocationKind,
+    pub(in crate::codegen) field: u8,
+    pub(in crate::codegen) kind: TemplateRelocationKind,
 }
 
 impl TemplateRelocationKind {

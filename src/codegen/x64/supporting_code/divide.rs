@@ -27,6 +27,36 @@ pub(in crate::codegen) struct DivideHelpers {
 }
 
 impl DivideHelpers {
+    /// Add the name and address of each helper to `symbols`.
+    #[cfg(feature = "codegen-debug")]
+    pub(super) fn debug_symbols(&self, symbols: &mut Vec<(String, usize)>) {
+        // Indexed like `DivOp` and `Width`.
+        let (ops, widths) = (["div", "mod"], ["32", "64"]);
+        for (op, name) in ops.iter().enumerate() {
+            for (width, bits) in widths.iter().enumerate() {
+                for dst in 0..Reg::COUNT {
+                    let imm = self.signed_imm[op][width][dst];
+                    symbols.push((
+                        format!("divide_signed_imm_{name}{bits}_r{dst}"),
+                        imm as usize,
+                    ));
+                    for src in 0..Reg::COUNT {
+                        let unsigned = self.unsigned[op][width][dst][src];
+                        symbols.push((
+                            format!("divide_{name}{bits}_r{dst}_r{src}"),
+                            unsigned as usize,
+                        ));
+                        let signed = self.signed[op][width][dst][src];
+                        symbols.push((
+                            format!("divide_signed_{name}{bits}_r{dst}_r{src}"),
+                            signed as usize,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
     pub(in crate::codegen) fn get(&self, op: DivOp, width: Width, dst: Reg, src: Reg) -> u32 {
         self.unsigned[op as usize][width as usize][usize::from(dst.0)][usize::from(src.0)]
     }

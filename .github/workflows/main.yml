@@ -73,7 +73,7 @@ jobs:
           tool: nextest,grcov,cargo-hack
 
       - run: cargo nextest run --no-fail-fast
-      - run: cargo nextest run --features="tracer,debugger" --no-fail-fast
+      - run: cargo nextest run --features="tracer,debugger,codegen-debug" --no-fail-fast
       - run: cargo bench -- --quick --noplot --discard-baseline --nocapture
       - run: |
           grcov $(find . -name "sbpf-*.profraw" -print) \

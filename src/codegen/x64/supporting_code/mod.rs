@@ -42,8 +42,14 @@ pub(in crate::codegen) struct SupportingCode {
     pub(super) invalid_insn: u32,
     pub(super) divide: DivideHelpers,
     pub(super) memory: MemoryHelpers,
-    /// Keeps the code mapped.
-    _code: Mapping<ReadExecute>,
+    /// The addresses of all the generated code.
+    #[cfg(feature = "codegen-debug")]
+    code_range: std::ops::Range<u32>,
+    /// The memory the code is in, which is never freed, as the supporting code is in a static.
+    ///
+    /// Otherwise only keeps the code mapped.
+    #[cfg_attr(not(feature = "codegen-debug"), expect(dead_code))]
+    pub(in crate::codegen) code: Mapping<ReadExecute>,
 }
 
 mod divide;
@@ -64,8 +70,43 @@ impl SupportingCode {
         &SUPPORTING_CODE
     }
 
+    /// The generated code, and the address of each of its routines.
+    #[cfg(feature = "codegen-debug")]
+    pub(in crate::codegen) fn debug_symbols(&self) -> (std::ops::Range<u32>, Vec<(String, usize)>) {
+        let mut symbols = vec![
+            ("call_imm".to_string(), self.call_imm as usize),
+            ("v0v1v2_call_imm".to_string(), self.v0v1v2_call_imm as usize),
+            ("v0v1_callx".to_string(), self.v0v1_callx as usize),
+            ("syscall".to_string(), self.syscall as usize),
+            ("entry_point".to_string(), self.entry_point as usize),
+            ("meter_exceeded".to_string(), self.meter_exceeded as usize),
+            ("invalid_insn".to_string(), self.invalid_insn as usize),
+        ];
+        for (reg, callx) in self.callx.iter().enumerate() {
+            symbols.push((format!("callx_r{reg}"), *callx as usize));
+        }
+        #[cfg(feature = "tracer")]
+        symbols.push(("trace".to_string(), self.trace as usize));
+        self.memory.debug_symbols(&mut symbols);
+        self.divide.debug_symbols(&mut symbols);
+        (self.code_range.clone(), symbols)
+    }
+
     fn generate() -> SupportingCode {
-        let mut mapping = Mapping::sub2g(Self::LEN);
+        #[cfg(feature = "codegen-debug")]
+        let mut debug_image = super::super::debug::DebugImage::new("supports");
+        let mapping = cfg_select! {
+            feature = "codegen-debug" => debug_image.map_sub2g(Self::LEN),
+            _ => Mapping::sub2g(Self::LEN),
+        };
+        let supports = Self::assemble(mapping);
+        #[cfg(feature = "codegen-debug")]
+        super::super::debug::finish_supporting_code(debug_image, &supports);
+        supports
+    }
+
+    /// Assemble the supporting code into `mapping`, which it then runs from.
+    fn assemble(mut mapping: Mapping) -> SupportingCode {
         let base = u32::try_from(mapping.as_ptr() as usize).unwrap();
         let mut out = Asm::new(usize::try_from(base).unwrap());
         let (meter_exceeded, invalid_insn) = Self::signals(&mut out, base);
@@ -78,6 +119,8 @@ impl SupportingCode {
         let trace = Self::trace(&mut out, base);
         let entry_point = entry::entry_point(&mut out, base);
         let divide = DivideHelpers::generate(&mut out, base);
+        #[cfg(feature = "codegen-debug")]
+        let code_range = base..base.wrapping_add(u32::try_from(out.offset().0).unwrap());
         let code = out
             .finalize()
             .expect("failed to resolve the supporting code");
@@ -98,7 +141,9 @@ impl SupportingCode {
             meter_exceeded,
             invalid_insn,
             divide,
-            _code: mapping.protect(),
+            #[cfg(feature = "codegen-debug")]
+            code_range,
+            code: mapping.protect(),
         }
     }
 }
@@ -612,11 +657,36 @@ pub(super) fn load_bpf_register(out: &mut Asm, reg: Reg) {
 
 /// Trap if the stack is not aligned for a host function call.
 fn debug_assert_sysv64_call_stack_alignment(out: &mut Asm) {
+    #[cfg(feature = "codegen-debug")]
+    if crate::codegen::debug::options().stack_checks {
+        let aligned = out.new_dynamic_label();
+        x64asm!(out
+            ; test esp, 15
+            ; jz =>aligned
+            ; int3
+            ; =>aligned
+        );
+    }
+    #[cfg(not(feature = "codegen-debug"))]
     let _ = out;
 }
 
 /// Trap if the stack is not aligned for an internal call of BPF code.
 fn debug_assert_bpf_call_stack_alignment(out: &mut Asm) {
+    #[cfg(feature = "codegen-debug")]
+    if crate::codegen::debug::options().stack_checks {
+        let (aligned, misaligned) = (out.new_dynamic_label(), out.new_dynamic_label());
+        x64asm!(out
+            ; test esp, 7
+            ; jnz =>misaligned
+            ; bt esp, 3
+            ; jc =>aligned
+            ; =>misaligned
+            ; int3
+            ; =>aligned
+        );
+    }
+    #[cfg(not(feature = "codegen-debug"))]
     let _ = out;
 }
 

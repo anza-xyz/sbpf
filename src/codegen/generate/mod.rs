@@ -3,6 +3,8 @@
 mod interpreter;
 mod jit;
 
+#[cfg(feature = "codegen-debug")]
+pub(super) use interpreter::Interpreter;
 pub(super) use interpreter::{interpreter, interpreter_step, InterpreterGenerator};
 pub use jit::jit_templates;
 

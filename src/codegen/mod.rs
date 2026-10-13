@@ -11,6 +11,8 @@
 //!
 //! TODO: write full README.md for this.
 
+#[cfg(feature = "codegen-debug")]
+pub mod debug;
 mod generate;
 mod templates;
 mod x64;
