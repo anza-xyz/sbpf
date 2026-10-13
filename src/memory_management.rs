@@ -536,7 +536,13 @@ impl Mapping {
     /// Until the mapping is dropped, the file must not be shortened below `offset` plus `len`,
     /// and the bytes there may only be overwritten with those that the mapping has at the same
     /// position, as pages that were not written to yet show what the file holds.
-    #[cfg_attr(not(all(test, not(target_os = "windows"))), expect(dead_code))]
+    #[cfg_attr(
+        not(any(
+            all(test, not(target_os = "windows")),
+            all(feature = "codegen-debug", target_arch = "x86_64")
+        )),
+        expect(dead_code)
+    )]
     pub(crate) unsafe fn file(file: &File, offset: u64, len: usize) -> Result<Self, EbpfError> {
         // SAFETY: forwarded to the caller.
         Ok(Self::whole(unsafe {
@@ -552,7 +558,10 @@ impl Mapping {
     ///
     /// [`sub2g`]: Mapping::sub2g
     #[cfg_attr(
-        not(all(test, not(any(windows, target_os = "macos")))),
+        not(any(
+            all(test, not(any(windows, target_os = "macos"))),
+            all(feature = "codegen-debug", target_arch = "x86_64")
+        )),
         expect(dead_code)
     )]
     pub(crate) unsafe fn sub2g_file(
