@@ -289,7 +289,7 @@ pub struct Executable<C: ContextObject> {
     /// Loaded and executable elf
     elf_bytes: AlignedMemory<{ HOST_ALIGN }>,
     /// Required SBPF capabilities
-    sbpf_version: SBPFVersion,
+    pub(crate) sbpf_version: SBPFVersion,
     /// Read-only section
     ro_section: Section,
     /// Text section virtual address

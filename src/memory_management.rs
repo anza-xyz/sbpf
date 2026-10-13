@@ -427,7 +427,7 @@ impl<'a> MappingBuilder<'a> {
     /// code in them can be addressed with sign-extended 32-bit absolute addresses.
     ///
     /// The pages are mapped in a retry loop, so this is not for performance-sensitive code.
-    #[cfg_attr(not(all(test, target_arch = "x86_64")), expect(dead_code))]
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
     pub(crate) fn low(self) -> Self {
         Self { low: true, ..self }
     }
@@ -461,7 +461,7 @@ impl<'a> MappingBuilder<'a> {
     }
 
     /// Map the pages.
-    #[cfg_attr(not(test), expect(dead_code))]
+    #[cfg_attr(not(any(test, target_arch = "x86_64")), expect(dead_code))]
     pub(crate) fn build(self) -> Result<Mapping, EbpfError> {
         Ok(Mapping::whole(self.map_pages()?))
     }
