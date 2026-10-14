@@ -43,7 +43,7 @@ jobs:
       - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad
         with:
           tool: cargo-hack
-      - run: find . -name Cargo.toml | xargs -I'Cargo.toml' cargo hack --partition ${{ matrix.partition }}/3 --each-feature clippy --manifest-path Cargo.toml --tests
+      - run: find . -name Cargo.toml | xargs -I'Cargo.toml' cargo hack --partition ${{ matrix.partition }}/3 --each-feature clippy --locked --manifest-path Cargo.toml --tests
         # NOTE: command below modifies `Cargo.toml` files, so run last.
       - run: find . -name Cargo.toml | xargs -I'Cargo.toml' cargo hack --remove-dev-deps --partition ${{ matrix.partition }}/3 --feature-powerset clippy --manifest-path Cargo.toml --all
 
