@@ -23,7 +23,9 @@ use crate::{
 };
 // Re-export defaults for direct access without the module path.
 pub use defaults::get_stack_frame_size;
-use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of, ptr};
+use std::{
+    collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of, num::NonZeroU64, ptr,
+};
 
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;
@@ -196,6 +198,10 @@ pub trait ContextObject {
     fn get_remaining(&self) -> u64;
     /// Return a mutable pointer to the active MemoryMapping
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping>;
+    /// Get the execution deadline in [crate::clock] ticks, if any.
+    fn get_deadline(&self) -> Option<NonZeroU64> {
+        None
+    }
 }
 
 /// Statistic of taken branches (from a recorded trace)
@@ -260,6 +266,8 @@ pub enum RuntimeEnvironmentSlot {
     StopwatchNumerator = offset_of!(EbpfVm<DummyContextObject>, stopwatch_numerator) as isize,
     /// [EbpfVm::stopwatch_denominator]
     StopwatchDenominator = offset_of!(EbpfVm<DummyContextObject>, stopwatch_denominator) as isize,
+    /// [EbpfVm::deadline]
+    Deadline = offset_of!(EbpfVm<DummyContextObject>, deadline) as isize,
     /// [EbpfVm::registers]
     Registers = offset_of!(EbpfVm<DummyContextObject>, registers) as isize,
     /// [EbpfVm::program_result]
@@ -346,6 +354,8 @@ pub struct EbpfVm<'a, C: ContextObject> {
     pub stopwatch_numerator: u64,
     /// Number of times the stop watch was used
     pub stopwatch_denominator: u64,
+    /// Execution deadline in [crate::clock] ticks, if any.
+    pub deadline: Option<NonZeroU64>,
     /// Registers inlined
     pub registers: [u64; 12],
     /// ProgramResult inlined
@@ -382,6 +392,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             } as u64);
 
         let memory_mapping = context_object.active_mapping_ptr();
+        let deadline = context_object.get_deadline();
         EbpfVm {
             host_stack_pointer: std::ptr::null_mut(),
             call_depth: 0,
@@ -391,6 +402,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             due_insn_count: 0,
             stopwatch_numerator: 0,
             stopwatch_denominator: 0,
+            deadline,
             registers,
             program_result: ProgramResult::Ok(0),
             memory_mapping,
@@ -530,6 +542,12 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         // through the EbpfVm lifetime.
         unsafe { self.memory_mapping.as_mut() }
     }
+
+    /// Returns `true` if the execution deadline, if any, has passed.
+    pub(crate) fn is_past_deadline(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| crate::clock::deadline_passed(deadline.get()))
+    }
 }
 
 /// Encrypted address to the [`EbpfVm`] object.
@@ -630,6 +648,7 @@ mod tests {
         check_slot!(env, due_insn_count, DueInsnCount);
         check_slot!(env, stopwatch_numerator, StopwatchNumerator);
         check_slot!(env, stopwatch_denominator, StopwatchDenominator);
+        check_slot!(env, deadline, Deadline);
         check_slot!(env, registers, Registers);
         check_slot!(env, program_result, ProgramResult);
         check_slot!(env, memory_mapping, MemoryMapping);

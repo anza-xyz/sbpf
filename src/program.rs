@@ -508,6 +508,13 @@ where
                 if enable_insn_meter {
                     vm.previous_instruction_meter = vm.context().get_remaining();
                 }
+                if vm.is_past_deadline() && vm.program_result.is_ok() {
+                    // After each syscall, check the clock to see if the
+                    // execution deadline has passed. If it has, throw.
+                    vm.program_result = crate::error::ProgramResult::Err(
+                        crate::error::EbpfError::ExceededTimeLimit,
+                    );
+                }
             })
         }
     }

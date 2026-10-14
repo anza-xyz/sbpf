@@ -19,7 +19,7 @@ use solana_sbpf::{
     static_analysis::RegisterTraceEntry,
     vm::{Config, ContextObject},
 };
-use std::ptr;
+use std::{num::NonZeroU64, ptr};
 
 pub mod syscalls;
 
@@ -29,6 +29,7 @@ pub struct TestContextObject {
     /// Maximal amount of instructions which still can be executed
     pub remaining: u64,
     pub memory_mapping: MemoryMapping,
+    pub deadline: Option<NonZeroU64>,
 }
 
 impl Default for TestContextObject {
@@ -39,6 +40,7 @@ impl Default for TestContextObject {
                 MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved)
             }
             .unwrap(),
+            deadline: None,
         }
     }
 }
@@ -55,6 +57,10 @@ impl ContextObject for TestContextObject {
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping> {
         ptr::NonNull::from_ref(&self.memory_mapping)
     }
+
+    fn get_deadline(&self) -> Option<NonZeroU64> {
+        self.deadline
+    }
 }
 
 impl TestContextObject {
@@ -64,6 +70,11 @@ impl TestContextObject {
             remaining,
             ..Default::default()
         }
+    }
+
+    pub fn with_deadline(mut self, deadline: NonZeroU64) -> Self {
+        self.deadline = Some(deadline);
+        self
     }
 }
 

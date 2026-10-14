@@ -28,7 +28,7 @@ use solana_sbpf::{
     verifier::RequisiteVerifier,
     vm::{Config, ContextObject},
 };
-use std::{fs::File, io::Read, sync::Arc};
+use std::{fs::File, io::Read, num::NonZeroU64, sync::Arc};
 use test_utils::{
     assert_error, compare_register_trace, create_vm, syscalls, test_interpreter_and_jit,
     test_interpreter_and_jit_asm, test_interpreter_and_jit_elf, test_syscall_asm,
@@ -4842,4 +4842,84 @@ fn test_max_call_depth_zero() {
         assert_eq!(format!("{result:?}"), format!("{expected:?}"));
         assert_eq!(vm.registers[11], 0);
     }
+}
+
+// Execution Deadline
+
+#[test]
+fn test_err_exceeded_time_limit_after_syscall() {
+    let input = [72, 101, 108, 108, 111];
+    test_syscall_asm!(
+        "
+        add64 r10, 0
+        mov64 r2, 0x5
+        syscall bpf_syscall_string
+        mov64 r0, 0x0
+        exit",
+        &raw const input,
+        (
+            "bpf_syscall_string" => syscalls::SyscallString,
+        ),
+        TestContextObject::new(3).with_deadline(NonZeroU64::MIN),
+        ProgramResult::Err(EbpfError::ExceededTimeLimit),
+    );
+}
+
+#[test]
+fn test_deadline_not_passed_after_syscall() {
+    let input = [72, 101, 108, 108, 111];
+    test_syscall_asm!(
+        "
+        add64 r10, 0
+        mov64 r2, 0x5
+        syscall bpf_syscall_string
+        mov64 r0, 0x0
+        exit",
+        &raw const input,
+        (
+            "bpf_syscall_string" => syscalls::SyscallString,
+        ),
+        TestContextObject::new(5).with_deadline(NonZeroU64::MAX),
+        ProgramResult::Ok(0),
+    );
+}
+
+#[test]
+fn test_err_syscall_error_takes_precedence_over_time_limit() {
+    test_syscall_asm!(
+        "
+        mov64 r0, 0x7
+        syscall bpf_syscall_err
+        mov64 r0, 0x0
+        exit",
+        NO_INPUT,
+        (
+            "bpf_syscall_err" => SyscallErr,
+        ),
+        TestContextObject::new(2).with_deadline(NonZeroU64::MIN),
+        ProgramResult::Err(EbpfError::SyscallError(Box::new(EbpfError::DivideByZero))),
+    );
+}
+
+#[test]
+fn test_exceeded_time_limit_only_at_syscalls() {
+    // The deadline is only checked at syscalls, so a passed deadline does not interrupt
+    // execution which makes none.
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        mov r0, 0x7
+        add r1, 0xa
+        lsh r1, 0x20
+        rsh r1, 0x20
+        jeq r1, 0x0, +4
+        mov r0, 0x7
+        mul r0, 0x7
+        add r1, -1
+        jne r1, 0x0, -3
+        exit",
+        NO_INPUT,
+        TestContextObject::new(38).with_deadline(NonZeroU64::MIN),
+        ProgramResult::Ok(0x75db9c97),
+    );
 }
