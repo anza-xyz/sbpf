@@ -1,0 +1,74 @@
+Parrot is the new execution backend for sBPF.
+
+This work started with the realization that BPF instruction structure is amenable to interpreters
+that have much less overhead than the current state-of-art in the ecosystem.  Until Parrot the
+fastest interpreters would maintain a table of handler functions to which the execution would
+tail-call (jump) as it processes each new instruction. In pseudo-code:
+
+```rust
+fn dispatch() {
+    let next_handler = table[opcode];
+    become next_handler();
+}
+```
+
+The first observation we had that this involves two dependent memory operations before the code for
+the next instruction can start executing: first the load of the `next_handler` address, and then
+load of the machine code inside `next_handler` itself. I figured that maybe we could "inline" the
+machine code into this table and jump to the right location right away, without the level of
+indirection. This way determining the next part of the machine code to execute would be easily
+pipelineable, predictable and only involve cheap arithmetic operations:
+
+```rust
+fn dispatch() {
+    const TABLE_BASE: *const u8; // base address at which handlers for instructions begin
+    const STEP: usize = 128; // each table element has capacity for 128 bytes of machine code
+    let next_handler_addr = TABLE_BASE + opcode * STEP;
+    become next_handler_addr();
+}
+```
+
+The only downside to this new approach is that each step occupies full 128 bytes of memory (in this
+example), even though the machine code for most instructions can be much more compact. Still, with
+only 256 opcodes (the opcode field in eBPF isntruction is a u8), that's just 32kiB of memory!
+
+This observation directly led us to a solution for another problem we were having with traditional
+interpreters: handling of the register fields. Parsing the 4-bit register fields at each step can
+become quite expensive; not to mention that runtime handling of register indices forces register
+data to be stored in memory and a bounds check on every access to that memory, because there are
+only 11 registers, but the 4-bit field can contain 16 distinct values. We figured that we can
+roll-up all of these concerns into the same instruction dispatch logic: dispatch on the first 16
+bits of the instruction to a containing handlers for every possible 65536 bit combination in those
+bits[^1]. With this in place a handler for `mov r14, r0` can directly generate an "invalid
+instruction" exception without any additional checks (for we know that r14 is not a valid
+instruction when we build the table.) On the other hand code to process `mov r0, r0` can statically
+omit the actual move because and most importantly the interpreter now gains the super-power of
+being able to map the registers in BPF code to native machine registers!
+
+[^1]: making the table grow to still very reasonable 8MiB (for 128 byte steps).
+
+And suddenly the code executed by the interpreter is not *that* different from what we'd generate
+with a JIT compiler for the same eBPF code. The main difference is really just the presence of the
+dispatch epilogue after each step's implementation to jump to the next instruction to process.
+
+We ended up arriving at an implementation strategy for JIT called [copy-and-patch] by almost a
+natural coincidence. We wanted to reuse the same sort of dispatch logic as we had devised for the
+interpreter to determine the machine code to produce into the JIT. Instruction registers are
+already part of the dispatch, so it seemed natural to pre-generate a table templates that we'd
+later just copy over into the output buffer. This memcpy JIT seemed to work great until we had to
+implement instructions that inspect the offset (branches) and immediate parts of the instruction.
+We had to figure out how to vary – patch – each template of machine instructions we've been copying
+over just enough for it to be able to read the offset and immediate parts of the original BPF
+instruction. The result is a JIT compiler that is as fast at compiling BPF programs as the
+interpreter at interpreting them. The ceiling for generated machine code quality is perhaps not as
+high as for some other JIT code generation approaches, but in direct comparison with the previous
+implementation of JIT, the new implementation is still producing similarly good machine code while
+being 2-5 times faster to compile the same program.
+
+A nice benefit of sharing the underlying logic between JIT and interpreter is that the execution
+state between the two is exactly the same. This makes it relatively easier to have confidence that
+the two different modes of execution will produce exactly the same outcome. In fact, the
+implementation of the two modes in Parrot is so similar that with very small changes it would be
+possible to switch execution between the modes on the fly with very little additional effort.
+
+[copy-and-patch]: https://en.wikipedia.org/wiki/Copy-and-patch
