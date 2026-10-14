@@ -2,14 +2,17 @@
 
 use std::net::{TcpListener, TcpStream};
 
-use gdbstub::common::Signal;
+use gdbstub::common::{Signal, Tid};
 use gdbstub::conn::ConnectionExt;
 use gdbstub::stub::{state_machine, GdbStub, SingleThreadStopReason};
 
 use gdbstub::arch::lldb::{Encoding, Format, Generic, Register};
 use gdbstub::arch::RegId;
 
-use gdbstub::target::{ext::monitor_cmd::MonitorCmd, Target, TargetError, TargetResult};
+use gdbstub::target::{
+    ext::{monitor_cmd::MonitorCmd, sbpf::Sbpf},
+    Target, TargetError, TargetResult,
+};
 use gdbstub::{outputln, target};
 
 use core::convert::{TryFrom, TryInto};
@@ -166,6 +169,11 @@ impl<'a, 'b, 'c, C: ContextObject> Target for Interpreter<'a, 'b, 'c, C> {
     fn support_monitor_cmd(&mut self) -> Option<target::ext::monitor_cmd::MonitorCmdOps<'_, Self>> {
         Some(self)
     }
+
+    #[inline(always)]
+    fn support_sbpf(&mut self) -> Option<target::ext::sbpf::SbpfOps<'_, Self>> {
+        Some(self)
+    }
 }
 
 fn get_host_ptr<C: ContextObject>(
@@ -232,16 +240,19 @@ impl<'a, 'b, 'c, C: ContextObject> SingleThreadBase for Interpreter<'a, 'b, 'c, 
         Some(self)
     }
 
-    fn read_addrs(&mut self, start_addr: u64, data: &mut [u8]) -> TargetResult<(), Self> {
+    fn read_addrs(&mut self, start_addr: u64, data: &mut [u8]) -> TargetResult<usize, Self> {
+        let mut read: usize = 0;
         for (vm_addr, val) in (start_addr..).zip(data.iter_mut()) {
             let host_ptr = match get_host_ptr(self, vm_addr) {
                 Ok(host_ptr) => host_ptr,
-                // The debugger is sometimes requesting more data than we have access to, just skip these
-                _ => continue,
+                // Report a partial read when the request crosses the end of a
+                // mapped guest-memory region.
+                _ => break,
             };
             *val = unsafe { *host_ptr };
+            read = read.saturating_add(1);
         }
-        Ok(())
+        Ok(read)
     }
 
     fn write_addrs(&mut self, start_addr: u64, data: &[u8]) -> TargetResult<(), Self> {
@@ -444,7 +455,7 @@ impl<'a, 'b, 'c, C: ContextObject>
 }
 
 mod bpf_arch {
-    use gdbstub::arch::{Arch, SingleStepGdbBehavior};
+    use gdbstub::arch::Arch;
 
     /// BPF-specific breakpoint kinds.
     ///
@@ -468,17 +479,11 @@ mod bpf_arch {
     /// Implements `Arch` for BPF.
     pub enum Bpf {}
 
-    #[allow(deprecated)]
     impl Arch for Bpf {
         type Usize = u64;
         type Registers = reg::BpfRegs;
         type RegId = reg::id::BpfRegId;
         type BreakpointKind = BpfBreakpointKind;
-
-        #[inline(always)]
-        fn single_step_gdb_behavior() -> SingleStepGdbBehavior {
-            SingleStepGdbBehavior::Required
-        }
     }
 
     pub mod reg {
@@ -702,6 +707,38 @@ impl<'a, 'b, 'c, C: ContextObject> MonitorCmd for Interpreter<'a, 'b, 'c, C> {
             _ => {
                 outputln!(out, "unknown monitor command");
             }
+        }
+        Ok(())
+    }
+}
+
+impl<'a, 'b, 'c, C: ContextObject> Sbpf for Interpreter<'a, 'b, 'c, C> {
+    fn sbpf_call_stack(
+        &self,
+        _tid: Tid,
+        next_frame: &mut dyn FnMut(u64, u64),
+    ) -> Result<(), Self::Error> {
+        // Return addresses live in interpreter-owned host memory and cannot be
+        // recovered through ordinary guest-memory reads.
+        next_frame(self.get_dbg_pc(), self.reg[ebpf::FRAME_PTR_REG]);
+
+        let call_depth: usize = self
+            .vm
+            .call_depth
+            .try_into()
+            .map_err(|_| "invalid SBPF call depth")?;
+        let call_frames = self
+            .call_frames
+            .get(..call_depth)
+            .ok_or("invalid SBPF call depth")?;
+        let pc_base = self.get_dbg_pc_base();
+        for frame in call_frames.iter().rev() {
+            let return_pc = frame
+                .target_pc
+                .checked_mul(ebpf::INSN_SIZE as u64)
+                .and_then(|pc| pc.checked_add(pc_base))
+                .ok_or("invalid SBPF return PC")?;
+            next_frame(return_pc, frame.frame_pointer);
         }
         Ok(())
     }
