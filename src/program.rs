@@ -41,72 +41,72 @@ impl SBPFVersion {
     /// Enable SIMD-0166: SBPF dynamic stack frames
     ///
     /// Allows usage of `add64 r10, imm`.
-    pub fn manual_stack_frame_bump(self) -> bool {
-        self == SBPFVersion::V1 || self == SBPFVersion::V2
+    pub const fn manual_stack_frame_bump(self) -> bool {
+        matches!(self, SBPFVersion::V1 | SBPFVersion::V2)
     }
     /// ... SIMD-0166
-    pub fn stack_frame_gaps(self) -> bool {
-        self == SBPFVersion::V0
+    pub const fn stack_frame_gaps(self) -> bool {
+        matches!(self, SBPFVersion::V0)
     }
 
     /// Enable SIMD-0174: SBPF arithmetics improvements
-    pub fn enable_pqr(self) -> bool {
-        self == SBPFVersion::V2
+    pub const fn enable_pqr(self) -> bool {
+        matches!(self, SBPFVersion::V2)
     }
     /// ... SIMD-0174
-    pub fn explicit_sign_extension_of_results(self) -> bool {
-        self == SBPFVersion::V2
+    pub const fn explicit_sign_extension_of_results(self) -> bool {
+        matches!(self, SBPFVersion::V2)
     }
     /// ... SIMD-0174
-    pub fn swap_sub_reg_imm_operands(self) -> bool {
-        self == SBPFVersion::V2
+    pub const fn swap_sub_reg_imm_operands(self) -> bool {
+        matches!(self, SBPFVersion::V2)
     }
     /// ... SIMD-0174
-    pub fn disable_neg(self) -> bool {
-        self == SBPFVersion::V2
+    pub const fn disable_neg(self) -> bool {
+        matches!(self, SBPFVersion::V2)
     }
 
     /// Enable SIMD-0173: SBPF instruction encoding improvements
-    pub fn callx_uses_src_reg(self) -> bool {
-        self == SBPFVersion::V2
+    pub const fn callx_uses_src_reg(self) -> bool {
+        matches!(self, SBPFVersion::V2)
     }
     /// ... SIMD-0173
-    pub fn disable_lddw(self) -> bool {
-        self == SBPFVersion::V2
+    pub const fn disable_lddw(self) -> bool {
+        matches!(self, SBPFVersion::V2)
     }
     /// ... SIMD-0173
-    pub fn disable_le(self) -> bool {
-        self == SBPFVersion::V2
+    pub const fn disable_le(self) -> bool {
+        matches!(self, SBPFVersion::V2)
     }
     /// ... SIMD-0173
-    pub fn move_memory_instruction_classes(self) -> bool {
-        self == SBPFVersion::V2
+    pub const fn move_memory_instruction_classes(self) -> bool {
+        matches!(self, SBPFVersion::V2)
     }
 
     /// Enable SIMD-0178: SBPF Static Syscalls
-    pub fn static_syscalls(self) -> bool {
-        self >= SBPFVersion::V3
+    pub const fn static_syscalls(self) -> bool {
+        matches!(self, SBPFVersion::V3 | SBPFVersion::V4)
     }
     /// Enable SIMD-0189: SBPF stricter ELF headers
-    pub fn enable_stricter_elf_headers(self) -> bool {
-        self >= SBPFVersion::V3
+    pub const fn enable_stricter_elf_headers(self) -> bool {
+        matches!(self, SBPFVersion::V3 | SBPFVersion::V4)
     }
     /// ... SIMD-0189
-    pub fn enable_lower_rodata_vaddr(self) -> bool {
-        self >= SBPFVersion::V3
+    pub const fn enable_lower_rodata_vaddr(self) -> bool {
+        matches!(self, SBPFVersion::V3 | SBPFVersion::V4)
     }
     /// ... SIMD-0377
-    pub fn enable_jmp32(self) -> bool {
-        self >= SBPFVersion::V3
+    pub const fn enable_jmp32(self) -> bool {
+        matches!(self, SBPFVersion::V3 | SBPFVersion::V4)
     }
     /// ... SIMD-0377
-    pub fn callx_uses_dst_reg(self) -> bool {
-        self >= SBPFVersion::V3
+    pub const fn callx_uses_dst_reg(self) -> bool {
+        matches!(self, SBPFVersion::V3 | SBPFVersion::V4)
     }
 
     /// Calculate the target program counter for a CALL_IMM instruction depending on
     /// the SBPF version.
-    pub fn calculate_call_imm_target_pc(self, pc: usize, imm: i64) -> u32 {
+    pub const fn calculate_call_imm_target_pc(self, pc: usize, imm: i64) -> u32 {
         if self.static_syscalls() {
             (pc as i64).saturating_add(imm).saturating_add(1) as u32
         } else {
