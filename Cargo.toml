@@ -69,5 +69,9 @@ name = "memory_mapping"
 harness = false
 
 [[bench]]
+name = "syscall_registry"
+harness = false
+
+[[bench]]
 name = "vm_execution"
 harness = false

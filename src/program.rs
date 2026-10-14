@@ -11,6 +11,7 @@ use {
         vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
     },
     std::collections::{btree_map::Entry, BTreeMap},
+    std::fmt,
     std::ptr::NonNull,
 };
 
@@ -163,7 +164,7 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
             } else {
                 ebpf::hash_symbol_name(&usize::from(value).to_le_bytes())
             };
-            if loader.get_function_registry().lookup_by_key(hash).is_some() {
+            if loader.syscall_registry().lookup_by_key(hash).is_some() {
                 return Err(ElfError::SymbolHashCollision(hash));
             }
             hash
@@ -227,6 +228,253 @@ impl<T: Copy + PartialEq> FunctionRegistry<T> {
                 )
             },
         ))
+    }
+}
+
+/// A map of syscall functions.
+///
+/// This map uses a different implementation compared to [`FunctionRegistry`] – it implements fast
+/// lookups, but is poor at handling arbitrary insertions quickly. Making this type suitable for
+/// small sets of trusted keys only, such as syscalls.
+pub struct SyscallRegistry<T> {
+    /// The odd multiplier the keys are mixed with, see `index`.
+    seed: u32,
+    /// The slot of each syscall is the one that its key says, see `index`, which no other key is in.
+    /// The other slots are unpopulated, holding a key whose slot is another one, which thus never
+    /// matches a key that is looked up there.
+    slots: Box<[SyscallSlot<T>]>,
+    /// The names of the syscalls in `slots`, at the same indices.
+    names: Box<[Box<[u8]>]>,
+    /// The number of syscalls.
+    len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct SyscallSlot<T> {
+    key: u32,
+    value: T,
+}
+
+impl<T> Default for SyscallRegistry<T> {
+    fn default() -> Self {
+        Self {
+            seed: SyscallRegistry::<T>::SEED,
+            slots: Box::new([]),
+            names: Box::new([]),
+            len: 0,
+        }
+    }
+}
+
+impl<T: Copy + PartialEq> PartialEq for SyscallRegistry<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len == other.len
+            && self
+                .iter()
+                .all(|(key, syscall)| other.lookup_by_key(key) == Some(syscall))
+    }
+}
+
+impl<T: Copy + Eq> Eq for SyscallRegistry<T> {}
+
+impl<T: Copy + PartialEq + fmt::Debug> fmt::Debug for SyscallRegistry<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let map = fmt::from_fn(|f| f.debug_map().entries(self.iter()).finish());
+        f.debug_struct("SyscallRegistry")
+            .field("map", &map)
+            .finish()
+    }
+}
+
+impl<T> SyscallRegistry<T> {
+    /// 2^32 divided by the golden ratio, as in Fibonacci hashing. The seeds that are tried are its
+    /// odd multiples, which are spread evenly over the 32-bit numbers, starting with itself.
+    const SEED: u32 = 0x9e37_79b9;
+    /// How many seeds to try at each length.
+    const SEEDS: u32 = 32;
+    /// The fewest unpopulated slots of a new layout.
+    const MIN_UNPOPULATED: usize = 5;
+}
+
+impl<T: Copy + PartialEq> SyscallRegistry<T> {
+    /// Register a syscall with an explicit key
+    pub fn register_function(
+        &mut self,
+        key: u32,
+        name: impl Into<Vec<u8>>,
+        value: T,
+    ) -> Result<(), ElfError> {
+        if let Some((_, slot)) = self.slot(key) {
+            return if slot.value == value {
+                Ok(())
+            } else {
+                Err(ElfError::SymbolHashCollision(key))
+            };
+        }
+        let syscall = SyscallSlot { key, value };
+        let name = name.into().into_boxed_slice();
+        let (seed, len) = (self.seed, self.slots.len());
+        let index = Self::index(key, seed, len);
+        match self.slots.get(index) {
+            Some(slot) if Self::index(slot.key, seed, len) != index => {
+                self.slots[index] = syscall;
+                self.names[index] = name;
+                self.len = self.len.saturating_add(1);
+            }
+            _ => self.lay_out(syscall, name),
+        }
+        Ok(())
+    }
+
+    /// Unregister a syscall again
+    pub fn unregister_function(&mut self, key: u32) -> bool {
+        let Some((index, _)) = self.slot(key) else {
+            return false;
+        };
+        self.slots[index].key = Self::unpopulated_key(index, self.seed, self.slots.len());
+        self.names[index] = Box::default();
+        self.len = self.len.saturating_sub(1);
+        true
+    }
+
+    /// Iterate over all keys
+    pub fn keys(&self) -> impl Iterator<Item = u32> + '_ {
+        Self::populated(&self.slots, self.seed).map(|(_, slot)| slot.key)
+    }
+
+    /// Iterate over all entries
+    pub fn iter(&self) -> impl Iterator<Item = (u32, (&[u8], T))> + '_ {
+        Self::populated(&self.slots, self.seed)
+            .map(move |(index, slot)| (slot.key, (self.name(index), slot.value)))
+    }
+
+    /// Get a syscall by its key
+    #[inline]
+    pub fn lookup_by_key(&self, key: u32) -> Option<(&[u8], T)> {
+        self.slot(key)
+            .map(|(index, slot)| (self.name(index), slot.value))
+    }
+
+    /// Get a syscall by its name
+    pub fn lookup_by_name(&self, name: &[u8]) -> Option<(&[u8], T)> {
+        self.iter()
+            .map(|(_key, syscall)| syscall)
+            .find(|(syscall_name, _value)| *syscall_name == name)
+    }
+
+    /// Calculate memory size
+    pub fn mem_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+            .saturating_add(std::mem::size_of_val(&*self.slots))
+            .saturating_add(
+                self.names
+                    .iter()
+                    .fold(std::mem::size_of_val(&*self.names), |size, name| {
+                        size.saturating_add(name.len())
+                    }),
+            )
+    }
+
+    /// The slot of `key` with `seed` in a vector of `len` slots.
+    #[inline]
+    fn index(key: u32, seed: u32, len: usize) -> usize {
+        (u64::from(key.wrapping_mul(seed)).wrapping_mul(len as u64) >> 32) as usize
+    }
+
+    /// A key whose slot is not the one at `index`, which marks that as unpopulated: 0, whose slot is
+    /// the first one, or else the first key whose slot is not.
+    fn unpopulated_key(index: usize, seed: u32, len: usize) -> u32 {
+        if index != 0 {
+            return 0;
+        }
+        (1..=u32::MAX)
+            .find(|&key| Self::index(key, seed, len) != 0)
+            .expect("the keys map to every one of several slots")
+    }
+
+    /// The index and the slot of the syscall of `key`, if there is one.
+    #[inline]
+    fn slot(&self, key: u32) -> Option<(usize, &SyscallSlot<T>)> {
+        let index = Self::index(key, self.seed, self.slots.len());
+        let slot = self.slots.get(index)?;
+        (slot.key == key).then_some((index, slot))
+    }
+
+    /// The name of the syscall in the slot at `index`.
+    #[inline]
+    fn name(&self, index: usize) -> &[u8] {
+        self.names.get(index).map_or(&[], |name| name)
+    }
+
+    /// The indices of the populated ones of `slots` with `seed`, and their syscalls.
+    fn populated(
+        slots: &[SyscallSlot<T>],
+        seed: u32,
+    ) -> impl Iterator<Item = (usize, &SyscallSlot<T>)> + '_ {
+        slots
+            .iter()
+            .enumerate()
+            .filter(move |(index, slot)| Self::index(slot.key, seed, slots.len()) == *index)
+    }
+
+    /// Lay the syscalls out again with the new `syscall` and its `name`: at the first length and
+    /// seed tried at which no two keys share a slot, from the current length on, with at least
+    /// `MIN_UNPOPULATED` slots to spare, or a tenth of them. Such lengths are longer, the more
+    /// syscalls there are, so the length grows by an eighth after each that does not do.
+    fn lay_out(&mut self, syscall: SyscallSlot<T>, name: Box<[u8]>) {
+        let count = self.len.saturating_add(1);
+        let mut len = self
+            .slots
+            .len()
+            .max(count.saturating_add(Self::MIN_UNPOPULATED))
+            .max(count.saturating_add(count / 9));
+        loop {
+            for i in 0..Self::SEEDS {
+                let seed = Self::SEED.wrapping_mul(i.wrapping_mul(2) | 1);
+                let Some(slots) = self.lay_out_with(syscall, seed, len) else {
+                    continue;
+                };
+                let mut names: Box<[Box<[u8]>]> = (0..len).map(|_| Box::default()).collect();
+                for (index, slot) in Self::populated(&self.slots, self.seed) {
+                    names[Self::index(slot.key, seed, len)] =
+                        std::mem::take(&mut self.names[index]);
+                }
+                names[Self::index(syscall.key, seed, len)] = name;
+                *self = Self {
+                    seed,
+                    slots,
+                    names,
+                    len: count,
+                };
+                return;
+            }
+            len = len.saturating_add((len / 8).max(1));
+        }
+    }
+
+    /// The slots of the syscalls and the new `syscall` with `seed` and `len`, unless two share one.
+    fn lay_out_with(
+        &self,
+        syscall: SyscallSlot<T>,
+        seed: u32,
+        len: usize,
+    ) -> Option<Box<[SyscallSlot<T>]>> {
+        let mut slots: Box<[_]> = (0..len)
+            .map(|index| SyscallSlot {
+                key: Self::unpopulated_key(index, seed, len),
+                value: syscall.value,
+            })
+            .collect();
+        let syscalls = Self::populated(&self.slots, self.seed).map(|(_, slot)| *slot);
+        for syscall in syscalls.chain(std::iter::once(syscall)) {
+            let index = Self::index(syscall.key, seed, len);
+            // Collision: slot already occupied.
+            if Self::index(slots[index].key, seed, len) == index {
+                return None;
+            }
+            slots[index] = syscall;
+        }
+        Some(slots)
     }
 }
 
@@ -382,13 +630,13 @@ pub type BuiltinCodegen<C> = fn(&mut JitCompiler<C>);
 pub struct BuiltinProgram<C: ContextObject> {
     /// Holds the Config if this is a loader program
     config: Option<Box<Config>>,
-    /// Function pointers by symbol with sparse indexing
-    sparse_registry: FunctionRegistry<(BuiltinFunction<C>, BuiltinCodegen<C>)>,
+    /// The syscalls by the hashes of their names
+    syscall_registry: SyscallRegistry<(BuiltinFunction<C>, BuiltinCodegen<C>)>,
 }
 
 impl<C: ContextObject> PartialEq for BuiltinProgram<C> {
     fn eq(&self, other: &Self) -> bool {
-        self.config.eq(&other.config) && self.sparse_registry.eq(&other.sparse_registry)
+        self.config.eq(&other.config) && self.syscall_registry.eq(&other.syscall_registry)
     }
 }
 
@@ -397,7 +645,7 @@ impl<C: ContextObject> BuiltinProgram<C> {
     pub fn new_loader(config: Config) -> Self {
         Self {
             config: Some(Box::new(config)),
-            sparse_registry: FunctionRegistry::default(),
+            syscall_registry: SyscallRegistry::default(),
         }
     }
 
@@ -405,7 +653,7 @@ impl<C: ContextObject> BuiltinProgram<C> {
     pub fn new_builtin() -> Self {
         Self {
             config: None,
-            sparse_registry: FunctionRegistry::default(),
+            syscall_registry: SyscallRegistry::default(),
         }
     }
 
@@ -413,7 +661,7 @@ impl<C: ContextObject> BuiltinProgram<C> {
     pub fn new_mock() -> Self {
         Self {
             config: Some(Box::default()),
-            sparse_registry: FunctionRegistry::default(),
+            syscall_registry: SyscallRegistry::default(),
         }
     }
 
@@ -422,11 +670,9 @@ impl<C: ContextObject> BuiltinProgram<C> {
         self.config.as_ref().unwrap()
     }
 
-    /// Get the function registry depending on the SBPF version
-    pub fn get_function_registry(
-        &self,
-    ) -> &FunctionRegistry<(BuiltinFunction<C>, BuiltinCodegen<C>)> {
-        &self.sparse_registry
+    /// Get the registry of the syscalls
+    pub fn syscall_registry(&self) -> &SyscallRegistry<(BuiltinFunction<C>, BuiltinCodegen<C>)> {
+        &self.syscall_registry
     }
 
     /// Calculate memory size
@@ -437,10 +683,10 @@ impl<C: ContextObject> BuiltinProgram<C> {
             } else {
                 0
             })
-            .saturating_add(self.sparse_registry.mem_size())
+            .saturating_add(self.syscall_registry.mem_size())
     }
 
-    /// Register a function both in the sparse and dense registries
+    /// Register a syscall
     ///
     /// This is a low-level function. Prefer using [`Self::register_definition`].
     pub fn register_function(
@@ -449,12 +695,12 @@ impl<C: ContextObject> BuiltinProgram<C> {
         entry: (BuiltinFunction<C>, BuiltinCodegen<C>),
     ) -> Result<(), ElfError> {
         let key = ebpf::hash_symbol_name(name.as_bytes());
-        self.sparse_registry
+        self.syscall_registry
             .register_function(key, name, entry)
             .map(|_| ())
     }
 
-    /// Register a function both in the sparse and dense registries
+    /// Register a syscall
     pub fn register_definition<BFD: BuiltinFunctionDefinition<C>>(
         &mut self,
         name: &str,
@@ -465,7 +711,7 @@ impl<C: ContextObject> BuiltinProgram<C> {
     /// Remove a function by name (if it exists)
     pub fn unregister_function(&mut self, name: &str) -> bool {
         let key = ebpf::hash_symbol_name(name.as_bytes());
-        self.sparse_registry.unregister_function(key)
+        self.syscall_registry.unregister_function(key)
     }
 }
 
@@ -532,12 +778,7 @@ where
 impl<C: ContextObject> std::fmt::Debug for BuiltinProgram<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> Result<(), std::fmt::Error> {
         f.debug_struct("BuiltinProgram")
-            .field("registry", unsafe {
-                std::mem::transmute::<
-                    &FunctionRegistry<(BuiltinFunction<C>, BuiltinCodegen<C>)>,
-                    &FunctionRegistry<(usize, usize)>,
-                >(&self.sparse_registry)
-            })
+            .field("registry", &self.syscall_registry)
             .finish()
     }
 }
@@ -588,4 +829,75 @@ macro_rules! declare_builtin_function {
             })?
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    macro_rules! check_lookups {
+        ($registry:ident, $lens:expr) => {
+            let key = |i: u32| ebpf::hash_symbol_name(&i.to_le_bytes());
+            for len in $lens {
+                let mut registry = $registry::default();
+                for i in 0..len {
+                    registry
+                        .register_function(key(i), format!("f{i}"), i)
+                        .unwrap();
+                }
+                let found = |registry: &$registry<u32>, i: u32| {
+                    registry
+                        .lookup_by_key(key(i))
+                        .map(|(name, value)| (String::from_utf8(name.to_vec()).unwrap(), value))
+                };
+                for i in 0..len {
+                    assert_eq!(found(&registry, i), Some((format!("f{i}"), i)));
+                }
+                for i in len..len.saturating_add(1000) {
+                    assert_eq!(found(&registry, i), None);
+                }
+                let mut keys: Vec<_> = (0..len).map(key).collect();
+                keys.sort();
+                let mut registered: Vec<_> = registry.keys().collect();
+                registered.sort();
+                assert_eq!(registered, keys);
+                let mut iterated: Vec<_> = registry.iter().map(|(key, _)| key).collect();
+                iterated.sort();
+                assert_eq!(iterated, keys);
+                if len > 0 {
+                    assert!(registry.register_function(key(0), "f0", 0).is_ok());
+                    assert!(matches!(
+                        registry.register_function(key(0), "f0", 1),
+                        Err(ElfError::SymbolHashCollision(_))
+                    ));
+                    assert!(registry.unregister_function(key(0)));
+                    assert!(!registry.unregister_function(key(0)));
+                    assert_eq!(found(&registry, 0), None);
+                    for i in 1..len {
+                        assert_eq!(found(&registry, i), Some((format!("f{i}"), i)));
+                    }
+                    assert_eq!(registry.keys().count(), (len as usize).saturating_sub(1));
+                    registry.register_function(key(0), "f0", 0).unwrap();
+                    assert_eq!(found(&registry, 0), Some(("f0".to_string(), 0)));
+                    for i in 0..len {
+                        assert!(registry.unregister_function(key(i)));
+                    }
+                    assert_eq!(registry.keys().count(), 0);
+                    for i in 0..len.saturating_add(1000) {
+                        assert_eq!(found(&registry, i), None);
+                    }
+                }
+            }
+        };
+    }
+
+    #[test]
+    fn function_registry_lookups() {
+        check_lookups!(FunctionRegistry, [0u32, 1, 3, 64, 1000]);
+    }
+
+    #[test]
+    fn syscall_registry_lookups() {
+        check_lookups!(SyscallRegistry, [0u32, 1, 3, 64, 128]);
+    }
 }

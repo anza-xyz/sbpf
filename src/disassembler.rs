@@ -298,7 +298,7 @@ pub fn disassemble_instruction<C: ContextObject>(
             };
             if function_name.is_none() && (!sbpf_version.static_syscalls() || insn.src == 0) {
                 name = "syscall";
-                function_name = loader.get_function_registry().lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
+                function_name = loader.syscall_registry().lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
             }
             desc = format!("{} {}", name, function_name.unwrap_or_else(|| format!("{}", insn.imm)));
         },

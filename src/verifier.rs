@@ -14,7 +14,7 @@
 
 use crate::{
     ebpf,
-    program::{FunctionRegistry, SBPFVersion},
+    program::{SBPFVersion, SyscallRegistry},
 };
 use thiserror::Error;
 
@@ -93,7 +93,7 @@ pub trait Verifier {
     fn verify<T: Copy + PartialEq>(
         prog: &[u8],
         sbpf_version: SBPFVersion,
-        syscall_registry: &FunctionRegistry<T>,
+        syscall_registry: &SyscallRegistry<T>,
     ) -> Result<(), VerifierError>;
 }
 
@@ -225,7 +225,7 @@ pub struct RequisiteVerifier {}
 impl Verifier for RequisiteVerifier {
     /// Check the program against the verifier's rules
     #[rustfmt::skip]
-    fn verify<T>(prog: &[u8], sbpf_version: SBPFVersion, _syscall_registry: &FunctionRegistry<T>) -> Result<(), VerifierError> {
+    fn verify<T>(prog: &[u8], sbpf_version: SBPFVersion, _syscall_registry: &SyscallRegistry<T>) -> Result<(), VerifierError> {
         check_prog_len(prog)?;
 
         let program_range = 0..prog.len() / ebpf::INSN_SIZE;
@@ -436,7 +436,7 @@ impl Verifier for LocalVerifier {
     fn verify<T: Copy + PartialEq>(
         prog: &[u8],
         sbpf_version: SBPFVersion,
-        syscall_registry: &FunctionRegistry<T>,
+        syscall_registry: &SyscallRegistry<T>,
     ) -> Result<(), VerifierError> {
         if sbpf_version < SBPFVersion::V3 {
             // Nothing to check

@@ -565,7 +565,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
                 let mut resolved = false;
                 // External syscall
                 if !self.executable.get_sbpf_version().static_syscalls() || insn.src == 0 {
-                    if let Some((_, (callback, _))) = self.executable.get_loader().get_function_registry().lookup_by_key(insn.imm as u32) {
+                    if let Some((_, (callback, _))) = self.executable.get_loader().syscall_registry().lookup_by_key(insn.imm as u32) {
                         self.reg[0] = match self.dispatch_syscall(callback) {
                             ProgramResult::Ok(value) => *value,
                             ProgramResult::Err(_err) => return false,
