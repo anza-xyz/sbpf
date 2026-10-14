@@ -280,7 +280,8 @@ impl<'a, 'b, 'c, C: ContextObject>
                 let remaining = self
                     .vm
                     .previous_instruction_meter
-                    .saturating_sub(self.vm.due_insn_count);
+                    .saturating_sub(self.vm.due_insn_count)
+                    .saturating_add(self.vm.withheld_instruction_meter);
                 buf.copy_from_slice(&remaining.to_le_bytes())
             }
         }

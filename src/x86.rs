@@ -740,6 +740,18 @@ impl X86Instruction {
         }
     }
 
+    /// Jump to short relative destination on condition
+    pub const fn conditional_jump_short(opcode: u8, relative_destination: i8) -> Self {
+        Self {
+            size: OperandSize::S32,
+            opcode,
+            modrm: false,
+            immediate_size: OperandSize::S8,
+            immediate: relative_destination as i64,
+            ..Self::DEFAULT
+        }
+    }
+
     /// Jump to relative destination
     pub const fn jump_immediate(relative_destination: i32) -> Self {
         Self {

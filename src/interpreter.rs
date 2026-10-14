@@ -199,7 +199,13 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
         let config = &self.executable.get_config();
 
         if config.enable_instruction_meter && self.vm.due_insn_count >= self.vm.previous_instruction_meter {
-            throw_error!(self, EbpfError::ExceededMaxInstructions);
+            if self.vm.withheld_instruction_meter == 0 {
+                throw_error!(self, EbpfError::ExceededMaxInstructions);
+            }
+            if self.vm.is_past_deadline() {
+                throw_error!(self, EbpfError::ExceededTimeLimit);
+            }
+            self.vm.grant_next_time_slice();
         }
         self.vm.due_insn_count += 1;
         if self.reg[11] as usize * ebpf::INSN_SIZE >= self.program.len() {

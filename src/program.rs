@@ -506,7 +506,8 @@ where
                         .into();
                 vm.program_result = converted_result;
                 if enable_insn_meter {
-                    vm.previous_instruction_meter = vm.context().get_remaining();
+                    let remaining = vm.context().get_remaining();
+                    vm.grant_instruction_meter(remaining);
                 }
                 if vm.is_past_deadline() && vm.program_result.is_ok() {
                     // After each syscall, check the clock to see if the
