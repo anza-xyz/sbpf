@@ -471,3 +471,47 @@ fn v2_neg_disabled() {
         }
     }
 }
+
+#[test]
+fn call_target_is_resolved_from_the_instruction_pointer() {
+    for version in [SBPFVersion::V3, SBPFVersion::V4] {
+        let mut function_registry = FunctionRegistry::default();
+        function_registry
+            .register_function(0, b"entrypoint", 0)
+            .unwrap();
+        function_registry
+            .register_function(5, b"function_5", 5)
+            .unwrap();
+        // The call at pc 3 is at index 2 of `instructions` (the two lddw slots
+        // are one entry) and at index 0 of its basic block (it is a jump target)
+        let exe = Executable::<Context>::from_text_bytes(
+            &[
+                insn(ebpf::LD_DW_IMM, 1, 0, 0, 1),
+                insn(0, 0, 0, 0, 0),
+                insn(ebpf::JA, 0, 0, 0, 0),
+                insn(ebpf::CALL_IMM, 0, 1, 0, 1),
+                insn(ebpf::EXIT, 0, 0, 0, 0),
+                insn(ebpf::EXIT, 0, 0, 0, 0),
+            ]
+            .concat(),
+            Arc::new(BuiltinProgram::new_mock()),
+            version,
+            function_registry,
+        )
+        .unwrap();
+        let analysis = Analysis::from_executable(&exe).unwrap();
+
+        // The call ends its basic block
+        assert!(analysis.cfg_nodes.contains_key(&4), "SBPF: {:?}", version);
+
+        let mut dot = Vec::new();
+        analysis.visualize_graphically(&mut dot, None).unwrap();
+        assert!(
+            String::from_utf8(dot)
+                .unwrap()
+                .contains("<td align=\"left\">call</td><td align=\"left\">function_5</td>"),
+            "SBPF: {:?}",
+            version
+        );
+    }
+}

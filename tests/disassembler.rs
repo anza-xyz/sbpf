@@ -95,6 +95,37 @@ fn test_internal_call() {
     }
 }
 
+#[test]
+fn test_internal_call_after_lddw() {
+    // V2 has no lddw
+    for version in [
+        SBPFVersion::V0,
+        SBPFVersion::V1,
+        SBPFVersion::V3,
+        SBPFVersion::V4,
+    ] {
+        let config = Config {
+            enabled_sbpf_versions: version..=version,
+            enable_symbol_and_section_labels: true,
+            ..Config::default()
+        };
+        disasm!(
+            "entrypoint:
+    lddw r1, 0x1
+    call function_5
+    exit
+
+function_4:
+    exit
+
+function_5:
+    exit
+",
+            config
+        );
+    }
+}
+
 // Example for InstructionType::AluBinary.
 #[test]
 fn test_add64() {

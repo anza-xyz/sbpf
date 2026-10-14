@@ -249,11 +249,11 @@ impl<'a> Analysis<'a> {
             self.cfg_nodes.entry(*pc).or_default();
         }
         let mut cfg_edges = BTreeMap::new();
-        for (pc, insn) in self.instructions.iter().enumerate() {
+        for insn in self.instructions.iter() {
             let target_pc = (insn.ptr as isize + insn.off as isize + 1) as usize;
             match insn.opc {
                 ebpf::CALL_IMM => {
-                    let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
+                    let key = sbpf_version.calculate_call_imm_target_pc(insn.ptr, insn.imm);
                     if let Some((_function_name, target_pc)) =
                         self.executable.get_function_registry().lookup_by_key(key)
                     {
@@ -492,14 +492,18 @@ impl<'a> Analysis<'a> {
     /// Generates assembler code for the analyzed executable
     pub fn disassemble<W: std::io::Write>(&self, output: &mut W) -> std::io::Result<()> {
         let mut last_basic_block = usize::MAX;
-        for (pc, insn) in self.instructions.iter().enumerate() {
+        for insn in self.instructions.iter() {
             self.disassemble_label(
                 output,
                 Some(insn) == self.instructions.first(),
                 insn.ptr,
                 &mut last_basic_block,
             )?;
-            writeln!(output, "    {}", self.disassemble_instruction(insn, pc))?;
+            writeln!(
+                output,
+                "    {}",
+                self.disassemble_instruction(insn, insn.ptr)
+            )?;
         }
         Ok(())
     }
@@ -582,9 +586,9 @@ impl<'a> Analysis<'a> {
             writeln!(output, "    lbb_{} [label=<<table border=\"0\" cellborder=\"0\" cellpadding=\"3\">{}</table>>];",
                 cfg_node_start,
                 analysis.instructions[cfg_node.instructions.clone()].iter()
-                .enumerate().map(|(pc, insn)| {
+                .map(|insn| {
                     let desc = analysis.disassemble_instruction(
-                        insn, pc
+                        insn, insn.ptr
                     );
                     if let Some(split_index) = desc.find(' ') {
                         let mut rest = desc[split_index+1..].to_string();
