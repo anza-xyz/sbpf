@@ -12,6 +12,8 @@ use std::sync::LazyLock;
 /// `load_next_insn_addr` produces it).
 pub(in crate::codegen) struct SupportingCode {
     /// What the internal calls have in common, which is only jumped to.
+    #[cfg(feature = "codegen-debug")]
+    call_internal: u32,
     /// `CALL_IMM` SBPFv3 onwards.
     pub(super) call_imm: u32,
     /// `CALL_REG` SBPFv3 onwards, by the register with the target.
@@ -39,8 +41,11 @@ pub(in crate::codegen) struct SupportingCode {
     pub(super) store_imm: [[u32; Reg::COUNT]; 4],
     /// Stores of a register, by log2 of the access size, destination and source register.
     pub(super) store_reg: [[[u32; Reg::COUNT]; Reg::COUNT]; 4],
+    /// The addresses of all the generated code.
+    #[cfg(feature = "codegen-debug")]
+    code_range: std::ops::Range<u32>,
     /// The memory the code is in, which is never freed, as the supporting code is in a static.
-    #[expect(dead_code)]
+    #[cfg_attr(not(feature = "codegen-debug"), expect(dead_code))]
     pub(in crate::codegen) code: Mapping<ReadExecute>,
 }
 
@@ -58,6 +63,55 @@ impl SupportingCode {
         &SUPPORTING_CODE
     }
 
+    /// The generated code, and the address of each of its routines.
+    #[cfg(feature = "codegen-debug")]
+    pub(in crate::codegen) fn debug_symbols(&self) -> (std::ops::Range<u32>, Vec<(String, usize)>) {
+        let mut symbols = vec![
+            ("call_internal".to_string(), self.call_internal as usize),
+            ("call_imm".to_string(), self.call_imm as usize),
+            ("v0_call_imm".to_string(), self.v0_call_imm as usize),
+            ("v0_callx".to_string(), self.v0_callx as usize),
+            ("syscall".to_string(), self.syscall as usize),
+            ("entry_point".to_string(), self.entry_point as usize),
+            ("meter_exceeded".to_string(), self.meter_exceeded as usize),
+            ("invalid_insn".to_string(), self.invalid_insn as usize),
+        ];
+        for (reg, callx) in self.callx.iter().enumerate() {
+            symbols.push((format!("callx_r{reg}"), *callx as usize));
+        }
+        #[cfg(feature = "tracer")]
+        symbols.push(("trace".to_string(), self.trace as usize));
+        for size_log2 in 0..4 {
+            let bits = 8usize << size_log2;
+            for dst in 0..Reg::COUNT {
+                let store_imm = self.store_imm[size_log2][dst];
+                symbols.push((format!("store_imm_u{bits}_r{dst}"), store_imm as usize));
+                for src in 0..Reg::COUNT {
+                    let load = self.load[size_log2][dst][src];
+                    symbols.push((format!("load_u{bits}_r{dst}_r{src}"), load as usize));
+                    let store_reg = self.store_reg[size_log2][dst][src];
+                    symbols.push((
+                        format!("store_reg_u{bits}_r{dst}_r{src}"),
+                        store_reg as usize,
+                    ));
+                }
+            }
+        }
+        // Indexed like `SupportingCode::divide`.
+        let operations = ["mod32", "div32", "mod64", "div64"];
+        for (operation, helpers) in operations.iter().zip(&self.divide) {
+            for (dst, row) in helpers.iter().enumerate() {
+                for (src, helper) in row.iter().enumerate() {
+                    symbols.push((
+                        format!("divide_{operation}_r{dst}_r{src}"),
+                        *helper as usize,
+                    ));
+                }
+            }
+        }
+        (self.code_range.clone(), symbols)
+    }
+
     /// Helper performing the division in place on the registers `dst` and `src`. Expects the
     /// address of the instruction following the division in `temp`.
     pub(super) fn divide(&self, is_div: bool, is_64: bool, dst: Reg, src: Reg) -> u32 {
@@ -66,9 +120,17 @@ impl SupportingCode {
 
     fn generate() -> SupportingCode {
         // Addressed with absolute 32-bit addresses, so it has to be within the first 2 GiB.
-        let mapping =
-            Mapping::sub2g(Self::LEN).expect("failed to allocate memory for the supporting code");
-        Self::assemble(mapping)
+        #[cfg(feature = "codegen-debug")]
+        let mut debug_image = super::super::debug::DebugImage::new("supports");
+        let mapping = cfg_select! {
+            feature = "codegen-debug" => debug_image.map_sub2g(Self::LEN),
+            _ => Mapping::sub2g(Self::LEN),
+        }
+        .expect("failed to allocate memory for the supporting code");
+        let supports = Self::assemble(mapping);
+        #[cfg(feature = "codegen-debug")]
+        super::super::debug::finish_supporting_code(debug_image, &supports);
+        supports
     }
 
     /// Assemble the supporting code into `mapping`, which it then runs from.
@@ -78,7 +140,7 @@ impl SupportingCode {
         let (meter_exceeded, invalid_insn) = Self::signals(&mut out, base);
         let [call_internal_label, meter_checked, target_checked] =
             [(); 3].map(|()| out.new_dynamic_label());
-        #[expect(unused_variables)]
+        #[cfg_attr(not(feature = "codegen-debug"), expect(unused_variables))]
         let call_internal = Self::call_internal(
             &mut out,
             base,
@@ -95,6 +157,8 @@ impl SupportingCode {
         let trace = Self::trace(&mut out, base);
         let entry_point = Self::entry_point(&mut out, base);
         let divide = Self::divides(&mut out, base);
+        #[cfg(feature = "codegen-debug")]
+        let code_range = base..base.wrapping_add(u32::try_from(out.offset().0).unwrap());
         let code = out
             .finalize()
             .expect("failed to resolve the supporting code");
@@ -103,6 +167,8 @@ impl SupportingCode {
             .expect("supporting code is too long!")
             .copy_from_slice(&code);
         Self {
+            #[cfg(feature = "codegen-debug")]
+            call_internal,
             call_imm,
             callx,
             v0_call_imm,
@@ -117,6 +183,8 @@ impl SupportingCode {
             meter_exceeded,
             invalid_insn,
             divide,
+            #[cfg(feature = "codegen-debug")]
+            code_range,
             code: mapping
                 .protect()
                 .expect("failed to make the supporting code executable"),
@@ -738,12 +806,37 @@ fn load_bpf_register(out: &mut Asm, reg: Reg) {
 
 /// Trap if the stack is not aligned for a host function call.
 fn debug_assert_sysv64_call_stack_alignment(out: &mut Asm) {
+    #[cfg(feature = "codegen-debug")]
+    if super::super::debug::options().stack_checks {
+        let aligned = out.new_dynamic_label();
+        x64asm!(out
+            ; test esp, 15
+            ; jz =>aligned
+            ; int3
+            ; =>aligned
+        );
+    }
+    #[cfg(not(feature = "codegen-debug"))]
     let _ = out;
 }
 
 /// Trap if the stack is not aligned for a call of the BPF code, which is aligned past the return
 /// address, unlike host functions. Changes the flags.
 fn debug_assert_bpf_call_stack_alignment(out: &mut Asm) {
+    #[cfg(feature = "codegen-debug")]
+    if super::super::debug::options().stack_checks {
+        let (aligned, misaligned) = (out.new_dynamic_label(), out.new_dynamic_label());
+        x64asm!(out
+            ; test esp, 7
+            ; jnz =>misaligned
+            ; bt esp, 3
+            ; jc =>aligned
+            ; =>misaligned
+            ; int3
+            ; =>aligned
+        );
+    }
+    #[cfg(not(feature = "codegen-debug"))]
     let _ = out;
 }
 
