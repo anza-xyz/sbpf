@@ -43,8 +43,8 @@ fn test_code_length_estimate() {
         prog[pc * ebpf::INSN_SIZE] = ebpf::ADD64_IMM;
     }
 
-    let mut empty_program_machine_code_length_per_version = [0; 4];
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+    let mut empty_program_machine_code_length_per_version = [0; SBPFVersion::ALL.len()];
+    for &sbpf_version in SBPFVersion::ALL {
         let empty_program_machine_code_length = {
             let config = Config {
                 noop_instruction_rate: 0,
@@ -102,7 +102,7 @@ fn test_code_length_estimate() {
         },
     );
 
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+    for &sbpf_version in SBPFVersion::ALL {
         println!("opcode;machine_code_length_per_instruction;assembly");
         let empty_program_machine_code_length =
             empty_program_machine_code_length_per_version[sbpf_version as usize];
