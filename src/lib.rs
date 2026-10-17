@@ -26,6 +26,7 @@ extern crate thiserror;
 pub mod aligned_memory;
 mod asm_parser;
 pub mod assembler;
+pub mod clock;
 #[cfg(feature = "debugger")]
 pub mod debugger;
 pub mod disassembler;

@@ -17,9 +17,9 @@ use solana_sbpf::{
     memory_region::{AccessViolationHandler, MemoryMapping, MemoryRegion},
     program::SBPFVersion,
     static_analysis::RegisterTraceEntry,
-    vm::{Config, ContextObject},
+    vm::{Config, ContextObject, DEFAULT_DEADLINE_CHECK_INTERVAL},
 };
-use std::ptr;
+use std::{num::NonZeroU64, ptr};
 
 pub mod syscalls;
 
@@ -29,6 +29,8 @@ pub struct TestContextObject {
     /// Maximal amount of instructions which still can be executed
     pub remaining: u64,
     pub memory_mapping: MemoryMapping,
+    pub deadline: Option<NonZeroU64>,
+    pub deadline_check_interval: NonZeroU64,
 }
 
 impl Default for TestContextObject {
@@ -39,6 +41,8 @@ impl Default for TestContextObject {
                 MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved)
             }
             .unwrap(),
+            deadline: None,
+            deadline_check_interval: DEFAULT_DEADLINE_CHECK_INTERVAL,
         }
     }
 }
@@ -55,6 +59,14 @@ impl ContextObject for TestContextObject {
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping> {
         ptr::NonNull::from_ref(&self.memory_mapping)
     }
+
+    fn get_deadline(&self) -> Option<NonZeroU64> {
+        self.deadline
+    }
+
+    fn get_deadline_check_interval(&self) -> NonZeroU64 {
+        self.deadline_check_interval
+    }
 }
 
 impl TestContextObject {
@@ -64,6 +76,16 @@ impl TestContextObject {
             remaining,
             ..Default::default()
         }
+    }
+
+    pub fn with_deadline(mut self, deadline: NonZeroU64) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    pub fn with_deadline_check_interval(mut self, deadline_check_interval: NonZeroU64) -> Self {
+        self.deadline_check_interval = deadline_check_interval;
+        self
     }
 }
 
@@ -322,7 +344,7 @@ macro_rules! test_interpreter_and_jit {
             (ebpf::MM_INPUT_START, ebpf::MM_INPUT_START)
         };
 
-        let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter, due_insn_count_interpreter) = {
+        let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, interpreter_withheld_instruction_meter, _trace_interpreter, due_insn_count_interpreter) = {
             let mem_region = MemoryRegion::new(host_buffer, ebpf::MM_INPUT_START);
             let mut call_frames = vec![
                 solana_sbpf::vm::CallFrame::default();
@@ -347,6 +369,7 @@ macro_rules! test_interpreter_and_jit {
                 instruction_count_interpreter,
                 result_interpreter,
                 vm.registers[11],
+                vm.withheld_instruction_meter,
                 vm.register_trace.clone(),
                 vm.due_insn_count,
             )
@@ -401,6 +424,13 @@ macro_rules! test_interpreter_and_jit {
                         println!(
                             "due_insn_count of interpreter ({}) and JIT ({}) diverged",
                             due_insn_count_interpreter, vm.due_insn_count,
+                        );
+                        diverged = true;
+                    }
+                    if interpreter_withheld_instruction_meter != vm.withheld_instruction_meter {
+                        println!(
+                            "Withheld instruction meter of interpreter ({:?}) and JIT ({:?}) diverged",
+                            interpreter_withheld_instruction_meter, vm.withheld_instruction_meter,
                         );
                         diverged = true;
                     }
