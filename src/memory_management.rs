@@ -413,7 +413,10 @@ impl Mapping {
     /// Allocate at least `len` bytes of pages from the pool.
     ///
     /// The data in allocated pages is can be arbitrary.
-    #[cfg_attr(not(all(test, not(target_os = "macos"))), expect(dead_code))]
+    #[cfg_attr(
+        not(any(target_arch = "x86_64", all(test, not(target_os = "macos")))),
+        expect(dead_code)
+    )]
     pub(crate) fn sub2g(len: usize) -> Result<Self, EbpfError> {
         Ok(Self::whole(Pages::new_sub2g(len)?))
     }
