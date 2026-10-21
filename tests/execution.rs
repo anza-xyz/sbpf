@@ -1601,7 +1601,7 @@ fn test_stxb_chain() {
 
 #[test]
 fn test_exit_capped() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -1621,7 +1621,7 @@ fn test_exit_capped() {
 
 #[test]
 fn test_exit_without_value() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -1641,7 +1641,7 @@ fn test_exit_without_value() {
 
 #[test]
 fn test_exit() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -1662,7 +1662,7 @@ fn test_exit() {
 
 #[test]
 fn test_early_exit() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -2188,7 +2188,7 @@ fn test_entrypoint_exit() {
     // can't infer anything from the stack size so we track call depth
     // explicitly. Make sure exit still works with both fixed and dynamic
     // frames.
-    for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &highest_sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
             ..Config::default()
@@ -2217,7 +2217,7 @@ fn test_entrypoint_exit() {
 
 #[test]
 fn test_stack_call_depth_tracking() {
-    for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &highest_sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
             max_call_depth: 2,
