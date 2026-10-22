@@ -1608,6 +1608,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         ] {
             let target_offset = *anchor_base + len.trailing_zeros() as usize;
             self.set_anchor(ANCHOR_TRANSLATE_MEMORY_ADDRESS + target_offset);
+            if self.config.enable_instruction_meter {
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x3B, REGISTER_INSTRUCTION_METER, RSP, Some(X86IndirectAccess::OffsetIndexShift(-8, RSP, 0)))); // cmp REGISTER_INSTRUCTION_METER, pc (on rsp);
+                self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
+            }
             // skip over the pc slot pushed by the caller, we'll pop it before returning
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 8, None)); // RSP -= 8
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult

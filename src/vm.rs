@@ -154,7 +154,7 @@ impl Default for Config {
             stack_frame_size: defaults::get_stack_frame_size(),
             enable_address_translation: true,
             enable_stack_frame_gaps: true,
-            instruction_meter_checkpoint_distance: 10000,
+            instruction_meter_checkpoint_distance: 1000,
             enable_instruction_meter: true,
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
