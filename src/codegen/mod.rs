@@ -2,6 +2,8 @@
 //!
 //! TODO: write some design philosphies here.
 
+#[cfg(feature = "codegen-debug")]
+pub mod debug;
 mod x64;
 use x64 as arch;
 
@@ -13,6 +15,7 @@ use generate::{Reg, TemplateBuilder, TemplateOpcode};
 use crate::ebpf;
 use crate::elf::Executable;
 use crate::error::{EbpfError, ProgramResult};
+#[cfg(not(feature = "codegen-debug"))]
 use crate::memory_management::Mapping;
 pub use crate::program::JitProgram;
 use crate::program::{SBPFVersion, UnsealedJitProgram};
@@ -344,7 +347,12 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         // `output_len` is below `NOOP_DUE`, see `analyze`, and the sizes are far from `usize::MAX`.
         let code_capacity = output_len.wrapping_add(SIZE);
         let len = UnsealedJitProgram::mapping_len(pc_sec.len(), code_capacity);
-        let mapping = Mapping::pooled(len);
+        #[cfg(feature = "codegen-debug")]
+        let mut debug_image = debug::DebugImage::new_jit();
+        let mapping = cfg_select! {
+            feature = "codegen-debug" => debug_image.map(len)?,
+            _ => Mapping::pooled(len),
+        };
         // The pc section is written in whole below, so the recycled memory need not be zeroed.
         let mut program = UnsealedJitProgram::in_mapping(mapping, pc_sec.len(), code_capacity);
 
@@ -399,6 +407,8 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         let mut program = program.seal(output_len)?;
         program.dynasm = true;
         program.random_key = random_key;
+        #[cfg(feature = "codegen-debug")]
+        debug::finish_jit(debug_image, self, executable, &mut program);
         Ok(program)
     }
 

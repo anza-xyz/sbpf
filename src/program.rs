@@ -400,6 +400,8 @@ impl UnsealedJitProgram {
             text_section: text_section.protect()?,
             dynasm: false,
             random_key: 0,
+            #[cfg(all(feature = "codegen-debug", target_arch = "x86_64"))]
+            debug_registration: None,
         })
     }
 }
@@ -408,6 +410,14 @@ impl UnsealedJitProgram {
 ///
 /// See [`UnsealedJitProgram::seal`].
 pub struct JitProgram {
+    /// The registration of the code with debuggers.
+    ///
+    /// See `codegen::debug`.
+    ///
+    /// NOTE: Order of this field matters. It has to be dropped first, so
+    /// that the debugger is informed before code is unmapped.
+    #[cfg(all(feature = "codegen-debug", target_arch = "x86_64"))]
+    pub(crate) debug_registration: Option<crate::codegen::debug::Registration>,
     /// Offset to each BPF instruction's machine code within `text_section`.
     pc_section: Mapping<Read>,
     /// The executable machine code.

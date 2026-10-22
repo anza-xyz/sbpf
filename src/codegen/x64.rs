@@ -124,7 +124,10 @@ macro_rules! x64asm {
 }
 
 pub(super) mod supporting_code;
-use supporting_code::SupportingCode;
+cfg_select! {
+    feature = "codegen-debug" => { pub(super) use supporting_code::SupportingCode; }
+    _ => { use supporting_code::SupportingCode; }
+}
 
 /// Set the flags for the comparison of the 64 bit registers (or the immediate) of the conditional
 /// jump being generated.

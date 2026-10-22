@@ -10,6 +10,8 @@ use crate::program::SBPFVersion;
 use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
 use dynasmrt::relocations::{Relocation, RelocationKind};
 use dynasmrt::{AssemblyOffset, DynamicLabel};
+#[cfg(feature = "codegen-debug")]
+use std::convert::TryInto;
 use std::sync::LazyLock;
 
 /// A BPF register.
@@ -416,6 +418,9 @@ pub(super) fn interpreter_step(version: SBPFVersion, opcode: TemplateOpcode) -> 
 pub(super) struct Interpreter {
     /// The steps, which are never freed, as the interpreters are in a static.
     pub(super) steps: Mapping<ReadExecute>,
+    /// The length of the code of each step, which is followed by padding to the size of the step.
+    #[cfg(feature = "codegen-debug")]
+    pub(super) step_lens: Box<[u8]>,
 }
 
 /// Generates the interpreter.
@@ -561,11 +566,19 @@ pub(super) fn interpreter(version: SBPFVersion) -> &'static Interpreter {
 }
 
 fn generate_interpreter(version: SBPFVersion) -> Interpreter {
-    let buffer = Mapping::sub2g(InterpreterGenerator::STEP_TABLE_SIZE)
-        .expect("failed to allocate memory for the interpreter");
+    #[cfg(feature = "codegen-debug")]
+    let mut debug_image =
+        super::debug::DebugImage::new(&format!("interpreter-{version:?}").to_lowercase());
+    let buffer = cfg_select! {
+        feature = "codegen-debug" => debug_image.map_sub2g(InterpreterGenerator::STEP_TABLE_SIZE),
+        _ => Mapping::sub2g(InterpreterGenerator::STEP_TABLE_SIZE),
+    }
+    .expect("failed to allocate memory for the interpreter");
     let mut generator = InterpreterGenerator::new(version, buffer);
     // The space after the code of a step traps if it is ever executed.
     generator.buffer.fill(arch::TRAP_FILL);
+    #[cfg(feature = "codegen-debug")]
+    let mut step_lens = vec![0; TemplateOpcode::COUNT];
     for opcode in TemplateOpcode::all() {
         let step_start = InterpreterGenerator::step_offset(opcode);
         generator.opcode = opcode;
@@ -581,14 +594,23 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
         );
         let step = &mut generator.buffer[step_start..generator.offset];
         generator.relocs.resolve(step, step_start);
+        #[cfg(feature = "codegen-debug")]
+        {
+            step_lens[opcode.index()] = step_len.try_into().unwrap();
+        }
     }
 
-    Interpreter {
+    let interpreter = Interpreter {
         steps: generator
             .buffer
             .protect()
             .expect("failed to make the interpreter executable"),
-    }
+        #[cfg(feature = "codegen-debug")]
+        step_lens: step_lens.into_boxed_slice(),
+    };
+    #[cfg(feature = "codegen-debug")]
+    super::debug::finish_interpreter(debug_image, version, &interpreter);
+    interpreter
 }
 
 #[cfg(test)]
