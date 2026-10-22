@@ -66,8 +66,7 @@ macro_rules! bench_gapped_randomized_access_with_1024_entries {
                 frame_size,
             )];
             let memory_mapping =
-                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3, None) }
-                    .unwrap();
+                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
             let mut prng = new_prng!();
             c.bench_function(stringify!($name), |b| {
                 b.iter(|| {
@@ -107,8 +106,7 @@ macro_rules! bench_randomized_access_with_0001_entry {
                 ..Config::default()
             };
             let memory_mapping =
-                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3, None) }
-                    .unwrap();
+                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
             let mut prng = new_prng!();
             c.bench_function(stringify!($name), |b| {
                 b.iter(|| {
@@ -146,8 +144,7 @@ macro_rules! bench_randomized_access_with_n_entries {
                 ..Config::default()
             };
             let memory_mapping =
-                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3, None) }
-                    .unwrap();
+                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
             c.bench_function(stringify!($name), |b| {
                 b.iter(|| {
                     let _ = memory_mapping.map(
@@ -198,8 +195,7 @@ macro_rules! bench_randomized_mapping_with_n_entries {
                 generate_memory_regions($n, false, Some(&mut prng));
             let config = Config::default();
             let memory_mapping =
-                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3, None) }
-                    .unwrap();
+                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
             c.bench_function(stringify!($name), |b| {
                 b.iter(|| {
                     let _ = memory_mapping.map(AccessType::Load, 0x100000000, 1);
@@ -252,8 +248,7 @@ macro_rules! bench_mapping_with_n_entries {
                 ..Config::default()
             };
             let memory_mapping =
-                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3, None) }
-                    .unwrap();
+                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
             c.bench_function(stringify!($name), |b| {
                 b.iter(|| {
                     let _ = memory_mapping.map(AccessType::Load, 0x100000000, 1);
@@ -319,7 +314,6 @@ fn do_bench_mapping_operation(c: &mut Criterion, name: &str, op: MemoryOperation
             ],
             &config,
             SBPFVersion::V3,
-            None,
         )
     }
     .unwrap();

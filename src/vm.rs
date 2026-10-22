@@ -138,6 +138,8 @@ pub struct Config {
     pub aligned_memory_mapping: bool,
     /// Allowed [SBPFVersion]s
     pub enabled_sbpf_versions: std::ops::RangeInclusive<SBPFVersion>,
+    /// Size of a region when using AlignedMemoryMapping
+    pub aligned_region_size: usize,
 }
 
 impl Config {
@@ -165,6 +167,7 @@ impl Default for Config {
             optimize_rodata: true,
             aligned_memory_mapping: false,
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
+            aligned_region_size: ebpf::MM_REGION_SIZE as usize,
         }
     }
 }
@@ -311,7 +314,7 @@ pub enum RuntimeEnvironmentSlot {
 /// ];
 ///;
 /// context_object.memory_mapping = unsafe {
-///     MemoryMapping::new(regions, executable.get_config(), sbpf_version, None).unwrap()
+///     MemoryMapping::new(regions, executable.get_config(), sbpf_version).unwrap()
 /// };
 ///
 /// let mut vm = EbpfVm::new(loader, sbpf_version, &mut context_object, stack_len);
@@ -601,9 +604,8 @@ mod tests {
         }
         let version = SBPFVersion::V4;
         let config = Config::default();
-        let mut context_object = unsafe {
-            DummyContextObject(MemoryMapping::new(vec![], &config, version, None).unwrap())
-        };
+        let mut context_object =
+            unsafe { DummyContextObject(MemoryMapping::new(vec![], &config, version).unwrap()) };
         let env = super::EbpfVm::new(
             Arc::new(BuiltinProgram::new_mock()),
             version,

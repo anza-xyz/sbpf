@@ -36,7 +36,7 @@ impl Default for TestContextObject {
         Self {
             remaining: 0,
             memory_mapping: unsafe {
-                MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved, None)
+                MemoryMapping::new(vec![], &Config::default(), SBPFVersion::Reserved)
             }
             .unwrap(),
         }
@@ -260,10 +260,9 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
                 config,
                 sbpf_version,
                 access_violation_handler,
-                None,
             )?
         } else {
-            MemoryMapping::new(regions, config, sbpf_version, None)?
+            MemoryMapping::new(regions, config, sbpf_version)?
         }
     })
 }
