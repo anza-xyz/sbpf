@@ -1338,7 +1338,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::store_immediate(OperandSize::S64, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32), err_kind as i64)); // err.kind = err_kind;
     }
 
-    fn emit_result_is_err(&mut self) {
+    fn emit_check_result_is_ok(&mut self) {
         let ok = ProgramResult::Ok(0);
         let ok_discriminant = ok.discriminant();
         self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S64, REGISTER_PTR_TO_VM, ok_discriminant as i64, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult)))));
@@ -1479,7 +1479,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter += 1;
         }
         // Test if result indicates that an error occured
-        self.emit_result_is_err();
+        self.emit_check_result_is_ok();
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION_UNCHECKED, 6)));
         // Store Ok value in result register
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_MAP[0], X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
@@ -1611,7 +1611,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             }
 
             // Throw error if the result indicates one
-            self.emit_result_is_err();
+            self.emit_check_result_is_ok();
             self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH)); // REGISTER_SCRATCH = pc
             self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 6)));
 
