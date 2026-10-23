@@ -2340,6 +2340,37 @@ fn test_callx() {
     );
 }
 
+/// `callx` reads its target from the source register at V2, where every other
+/// version uses the immediate (before V2) or the destination register (V3 on,
+/// per SIMD-0377). Four places decide that independently — the assembler, the
+/// verifier, the interpreter and the JIT — and `test_callx_imm` covers the
+/// immediate form at V0 while the default version covers the destination form,
+/// leaving the source form unexercised.
+#[test]
+fn test_callx_src_reg() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V2..=SBPFVersion::V2,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        mov64 r0, 0x0
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x38
+        callx r8
+        exit
+        function_foo:
+        mov64 r0, 0x2A
+        exit",
+        config,
+        NO_INPUT,
+        TestContextObject::new(9),
+        ProgramResult::Ok(42),
+    );
+}
+
 #[test]
 fn test_callx_unaligned_target() {
     // The target is truncated to the instruction containing it.
