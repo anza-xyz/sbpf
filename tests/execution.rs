@@ -897,7 +897,7 @@ fn test_err_pqr_divide_overflow() {
 
 #[test]
 fn test_memory_instructions() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -1536,7 +1536,7 @@ fn test_stxb_chain() {
 
 #[test]
 fn test_exit_capped() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -1556,7 +1556,7 @@ fn test_exit_capped() {
 
 #[test]
 fn test_exit_without_value() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -1576,7 +1576,7 @@ fn test_exit_without_value() {
 
 #[test]
 fn test_exit() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -1597,7 +1597,7 @@ fn test_exit() {
 
 #[test]
 fn test_early_exit() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -2121,7 +2121,7 @@ fn test_entrypoint_exit() {
     // can't infer anything from the stack size so we track call depth
     // explicitly. Make sure exit still works with both fixed and dynamic
     // frames.
-    for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &highest_sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
             ..Config::default()
@@ -2150,7 +2150,7 @@ fn test_entrypoint_exit() {
 
 #[test]
 fn test_stack_call_depth_tracking() {
-    for highest_sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &highest_sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: SBPFVersion::V0..=highest_sbpf_version,
             max_call_depth: 2,
@@ -3214,13 +3214,13 @@ fn test_err_call_unresolved() {
 
 #[test]
 fn test_err_call_imm_outside_text() {
-    let loader = Arc::new(BuiltinProgram::new_loader(Config {
-        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V4,
-        // Not resolving the call takes precedence over the call depth.
-        max_call_depth: 1,
-        ..Config::default()
-    }));
-    for sbpf_version in [SBPFVersion::V3, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL.iter().filter(|v| v.static_syscalls()) {
+        let loader = Arc::new(BuiltinProgram::new_loader(Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            // Not resolving the call takes precedence over the call depth.
+            max_call_depth: 1,
+            ..Config::default()
+        }));
         for imm in [2i32, -3] {
             let mut prog = [
                 [0xb7, 0x00, 0, 0, 0, 0, 0, 0], // mov64 r0, 0
@@ -4658,7 +4658,7 @@ fn test_lddw_exceeding_budget() {
     // `lddw` counts as one instruction over two slots, which the meter must not count until the
     // instruction is within the budget: the pc of `ExceededMaxInstructions` is that of the first
     // instruction past it.
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+    for &sbpf_version in SBPFVersion::ALL.iter().filter(|v| !v.disable_lddw()) {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
