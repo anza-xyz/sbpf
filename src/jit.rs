@@ -1579,10 +1579,10 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
             if *anchor_base == 0 { // AccessType::Load
                 let load = match len {
-                    1 => MemoryMapping::load::<u8> as *const u8 as i64,
-                    2 => MemoryMapping::load::<u16> as *const u8 as i64,
-                    4 => MemoryMapping::load::<u32> as *const u8 as i64,
-                    8 => MemoryMapping::load::<u64> as *const u8 as i64,
+                    1 => MemoryMapping::load_first_attempt::<u8> as *const u8 as i64,
+                    2 => MemoryMapping::load_first_attempt::<u16> as *const u8 as i64,
+                    4 => MemoryMapping::load_first_attempt::<u32> as *const u8 as i64,
+                    8 => MemoryMapping::load_first_attempt::<u64> as *const u8 as i64,
                     _ => unreachable!()
                 };
                 self.emit_rust_call(Value::Constant64(load, false), &[
@@ -1591,16 +1591,31 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                     Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
                 ], None);
+                /*self.emit_result_is_err();
+                self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, 79)); // Forward jump to ANCHOR_MEMORY_ACCESS_SUCCESSFUL
+                let load = match len {
+                    1 => MemoryMapping::load_second_attempt::<u8> as *const u8 as i64,
+                    2 => MemoryMapping::load_second_attempt::<u16> as *const u8 as i64,
+                    4 => MemoryMapping::load_second_attempt::<u32> as *const u8 as i64,
+                    8 => MemoryMapping::load_second_attempt::<u64> as *const u8 as i64,
+                    _ => unreachable!()
+                };
+                self.emit_rust_call(Value::Constant64(load, false), &[
+                    Argument { index: 2, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
+                    Argument { index: 3, value: Value::Constant64(0, false) }, // self.pc is set later
+                    Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
+                    Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
+                ], None);*/
             } else { // AccessType::Store
                 if *anchor_base == 8 {
                     // Second half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
                     self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(-80, RSP, 0))));
                 }
                 let store = match len {
-                    1 => MemoryMapping::store::<u8> as *const u8 as i64,
-                    2 => MemoryMapping::store::<u16> as *const u8 as i64,
-                    4 => MemoryMapping::store::<u32> as *const u8 as i64,
-                    8 => MemoryMapping::store::<u64> as *const u8 as i64,
+                    1 => MemoryMapping::store_first_attempt::<u8> as *const u8 as i64,
+                    2 => MemoryMapping::store_first_attempt::<u16> as *const u8 as i64,
+                    4 => MemoryMapping::store_first_attempt::<u32> as *const u8 as i64,
+                    8 => MemoryMapping::store_first_attempt::<u64> as *const u8 as i64,
                     _ => unreachable!()
                 };
                 self.emit_rust_call(Value::Constant64(store, false), &[
@@ -1610,10 +1625,27 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                     Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
                 ], None);
+                /*self.emit_result_is_err();
+                self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, 85)); // Forward jump to ANCHOR_MEMORY_ACCESS_SUCCESSFUL
+                let store = match len {
+                    1 => MemoryMapping::store_second_attempt::<u8> as *const u8 as i64,
+                    2 => MemoryMapping::store_second_attempt::<u16> as *const u8 as i64,
+                    4 => MemoryMapping::store_second_attempt::<u32> as *const u8 as i64,
+                    8 => MemoryMapping::store_second_attempt::<u64> as *const u8 as i64,
+                    _ => unreachable!()
+                };
+                self.emit_rust_call(Value::Constant64(store, false), &[
+                    Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
+                    Argument { index: 2, value: Value::RegisterIndirect(RSP, -8, false) },
+                    Argument { index: 4, value: Value::Constant64(0, false) }, // self.pc is set later
+                    Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
+                    Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
+                ], None);*/
             }
 
             // Throw error if the result indicates one
             self.emit_result_is_err();
+            // self.set_anchor(ANCHOR_MEMORY_ACCESS_SUCCESSFUL);
             self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH)); // REGISTER_SCRATCH = pc
             self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 6)));
 
