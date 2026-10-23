@@ -22,26 +22,34 @@ use crate::{
 
 /// Virtual memory operation helper.
 macro_rules! translate_memory_access {
-    (_impl, $self:ident, $op:ident, $vm_addr:ident, $T:ty, $($rest:expr),*) => {
-        match $self.vm.memory().$op::<$T>(
+    (_impl, $self:ident, $first_op:ident, $second_op:ident, $vm_addr:ident, $T:ty, $($rest:expr),*) => {
+        match $self.vm.memory().$first_op::<$T>(
             $($rest,)*
             $vm_addr,
         ) {
             ProgramResult::Ok(v) => v,
-            ProgramResult::Err(err) => {
-                throw_error!($self, err);
+            ProgramResult::Err(_err) => {
+                match $self.vm.memory().$second_op::<$T>(
+                    $($rest,)*
+                    $vm_addr,
+                ) {
+                    ProgramResult::Ok(v) => v,
+                    ProgramResult::Err(err) => {
+                        throw_error!($self, err);
+                    },
+                }
             },
         }
     };
 
     // MemoryMapping::load()
     ($self:ident, load, $vm_addr:ident, $T:ty) => {
-        translate_memory_access!(_impl, $self, load, $vm_addr, $T,)
+        translate_memory_access!(_impl, $self, load_first_attempt, load_second_attempt, $vm_addr, $T,)
     };
 
     // MemoryMapping::store()
     ($self:ident, store, $value:expr, $vm_addr:ident, $T:ty) => {
-        translate_memory_access!(_impl, $self, store, $vm_addr, $T, ($value) as $T);
+        translate_memory_access!(_impl, $self, store_first_attempt, store_second_attempt, $vm_addr, $T, ($value) as $T);
     };
 }
 
