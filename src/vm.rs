@@ -136,6 +136,8 @@ pub struct Config {
     pub aligned_memory_mapping: bool,
     /// Allowed [SBPFVersion]s
     pub enabled_sbpf_versions: std::ops::RangeInclusive<SBPFVersion>,
+    /// Size of a region when using AlignedMemoryMapping
+    pub aligned_region_size: usize,
 }
 
 impl Config {
@@ -162,6 +164,7 @@ impl Default for Config {
             optimize_rodata: true,
             aligned_memory_mapping: false,
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
+            aligned_region_size: ebpf::MM_REGION_SIZE as usize,
         }
     }
 }
