@@ -28,7 +28,7 @@ use solana_sbpf::{
     verifier::RequisiteVerifier,
     vm::{Config, ContextObject},
 };
-use std::{fs::File, io::Read, sync::Arc};
+use std::{fs::File, io::Read, num::NonZeroU64, sync::Arc};
 use test_utils::{
     assert_error, compare_register_trace, create_vm, syscalls, test_interpreter_and_jit,
     test_interpreter_and_jit_asm, test_interpreter_and_jit_elf, test_syscall_asm,
@@ -4841,5 +4841,227 @@ fn test_max_call_depth_zero() {
         let expected = ProgramResult::Err(EbpfError::CallDepthExceeded);
         assert_eq!(format!("{result:?}"), format!("{expected:?}"));
         assert_eq!(vm.registers[11], 0);
+    }
+}
+
+// Execution Deadline
+
+#[test]
+fn test_err_exceeded_time_limit_after_syscall() {
+    let input = [72, 101, 108, 108, 111];
+    test_syscall_asm!(
+        "
+        add64 r10, 0
+        mov64 r2, 0x5
+        syscall bpf_syscall_string
+        mov64 r0, 0x0
+        exit",
+        &raw const input,
+        (
+            "bpf_syscall_string" => syscalls::SyscallString,
+        ),
+        TestContextObject::new(3).with_deadline(NonZeroU64::MIN),
+        ProgramResult::Err(EbpfError::ExceededTimeLimit),
+    );
+}
+
+#[test]
+fn test_deadline_not_passed_after_syscall() {
+    let input = [72, 101, 108, 108, 111];
+    test_syscall_asm!(
+        "
+        add64 r10, 0
+        mov64 r2, 0x5
+        syscall bpf_syscall_string
+        mov64 r0, 0x0
+        exit",
+        &raw const input,
+        (
+            "bpf_syscall_string" => syscalls::SyscallString,
+        ),
+        TestContextObject::new(5).with_deadline(NonZeroU64::MAX),
+        ProgramResult::Ok(0),
+    );
+}
+
+#[test]
+fn test_err_syscall_error_takes_precedence_over_time_limit() {
+    test_syscall_asm!(
+        "
+        mov64 r0, 0x7
+        syscall bpf_syscall_err
+        mov64 r0, 0x0
+        exit",
+        NO_INPUT,
+        (
+            "bpf_syscall_err" => SyscallErr,
+        ),
+        TestContextObject::new(2).with_deadline(NonZeroU64::MIN),
+        ProgramResult::Err(EbpfError::SyscallError(Box::new(EbpfError::DivideByZero))),
+    );
+}
+
+#[test]
+fn test_err_exceeded_time_limit_without_time_slices() {
+    // Without withheld instructions there are no time slices, so a passed
+    // deadline does not interrupt execution which makes no syscalls.
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        mov r0, 0x7
+        add r1, 0xa
+        lsh r1, 0x20
+        rsh r1, 0x20
+        jeq r1, 0x0, +4
+        mov r0, 0x7
+        mul r0, 0x7
+        add r1, -1
+        jne r1, 0x0, -3
+        exit",
+        NO_INPUT,
+        TestContextObject::new(38).with_deadline(NonZeroU64::MIN),
+        ProgramResult::Ok(0x75db9c97),
+    );
+}
+
+#[test]
+fn test_time_slices_preserve_metering() {
+    // A deadline which never passes splits execution into time slices, which
+    // must not change results or metering.
+    let programs = [
+        (
+            "
+            add64 r10, 0
+            mov r0, 0x7
+            add r1, 0xa
+            lsh r1, 0x20
+            rsh r1, 0x20
+            jeq r1, 0x0, +4
+            mov r0, 0x7
+            mul r0, 0x7
+            add r1, -1
+            jne r1, 0x0, -3
+            exit",
+            38,
+            ProgramResult::Ok(0x75db9c97),
+        ),
+        (
+            "
+            mov64 r6, 40
+            loop:
+            call function_foo
+            sub64 r6, 1
+            jne r6, 0, loop
+            mov64 r0, 7
+            exit
+            function_foo:
+            call function_bar
+            exit
+            function_bar:
+            exit",
+            243,
+            ProgramResult::Ok(7),
+        ),
+        (
+            "
+            add64 r10, 0
+            mov64 r6, 0x0
+            mov64 r1, 0x0
+            mov64 r2, 0x0
+            mov64 r3, 0x0
+            mov64 r4, 0x0
+            mov64 r5, r6
+            add64 r6, 0x1
+            ja -0x8
+            exit",
+            1001,
+            ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+        ),
+        (
+            "
+            add64 r10, 0
+            mov64 r1, 0x0
+            mov64 r2, 0x0
+            div64 r1, r2
+            mov64 r0, 0x0
+            exit",
+            3,
+            ProgramResult::Err(EbpfError::ExceededMaxInstructions),
+        ),
+    ];
+    for deadline_check_interval in [1, 2, 3, 7] {
+        let deadline_check_interval = NonZeroU64::new(deadline_check_interval).unwrap();
+        for (source, instruction_count, expected_result) in &programs {
+            test_interpreter_and_jit_asm!(
+                source,
+                NO_INPUT,
+                TestContextObject::new(*instruction_count)
+                    .with_deadline(NonZeroU64::MAX)
+                    .with_deadline_check_interval(deadline_check_interval),
+                expected_result,
+            );
+        }
+    }
+}
+
+#[test]
+fn test_err_exceeded_time_limit() {
+    let programs = [
+        // Infinite loop
+        "
+        add64 r10, 0
+        jsge r0, r0, -1
+        exit",
+        // Infinite recursion through the internal call prologue
+        "
+        entrypoint:
+        add64 r10, 0
+        call entrypoint
+        exit",
+        // Linear code, only validated at the exit
+        "
+        add64 r10, 0
+        mov64 r0, 0
+        mov64 r0, 1
+        mov64 r0, 2
+        mov64 r0, 3
+        mov64 r0, 4
+        mov64 r0, 5
+        mov64 r0, 6
+        mov64 r0, 7
+        exit",
+        // An exception after the time slice ran out
+        "
+        add64 r10, 0
+        mov64 r1, 0x0
+        mov64 r2, 0x0
+        mov64 r3, 0x0
+        mov64 r4, 0x0
+        div64 r1, r2
+        exit",
+    ];
+    for source in programs {
+        for deadline_check_interval in [1, 2, 3] {
+            let executable = assemble(
+                source,
+                Arc::new(BuiltinProgram::new_loader(Config::default())),
+            )
+            .unwrap();
+            // A passed deadline fails at the end of the first time slice, after
+            // charging exactly the slice. The budget is overridden so that
+            // instructions are withheld.
+            let result = test_interpreter_and_jit!(
+                override_budget => true,
+                executable,
+                NO_INPUT,
+                TestContextObject::new(deadline_check_interval)
+                    .with_deadline(NonZeroU64::MIN)
+                    .with_deadline_check_interval(NonZeroU64::new(deadline_check_interval).unwrap()),
+            );
+            assert_eq!(
+                format!("{result:?}"),
+                format!("{:?}", ProgramResult::Err(EbpfError::ExceededTimeLimit)),
+            );
+        }
     }
 }

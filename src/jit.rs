@@ -44,7 +44,7 @@ pub const MAX_EMPTY_PROGRAM_MACHINE_CODE_LENGTH: usize = 4096;
 /// The maximum machine code length in bytes of a single guest instruction
 pub const MAX_MACHINE_CODE_LENGTH_PER_INSTRUCTION: usize = 110;
 /// The maximum machine code length in bytes of an instruction meter checkpoint
-pub const MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT: usize = 24;
+pub const MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT: usize = 25;
 /// The maximum machine code length of the randomized padding
 pub const MAX_START_PADDING_LENGTH: usize = 256;
 
@@ -151,6 +151,8 @@ const ANCHOR_CALL_UNSUPPORTED_INSTRUCTION: usize = 11;
 const ANCHOR_EXTERNAL_FUNCTION_CALL: usize = 12;
 const ANCHOR_INTERNAL_FUNCTION_CALL_PROLOGUE: usize = 13;
 const ANCHOR_INTERNAL_FUNCTION_CALL_REG: usize = 14;
+const ANCHOR_THROW_EXCEEDED_TIME_LIMIT: usize = 15;
+const ANCHOR_TIME_SLICE_EXHAUSTED: usize = 16;
 const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 21;
 const ANCHOR_COUNT: usize = 34; // Update me when adding or removing anchors
 
@@ -941,9 +943,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.last_instruction_meter_validation_pc = pc;
             self.emit_sanitized_load_immediate(REGISTER_SCRATCH, pc as i64);
         }
-        // If instruction_meter >= pc, throw ExceededMaxInstructions
+        // If instruction_meter <= pc, the time slice is exhausted
         self.emit_ins(X86Instruction::cmp(OperandSize::S64, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None));
-        self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
+        // Jump skips exactly the call.
+        X86Instruction::conditional_jump_short(0x77, 5).emit(self);
+        self.emit_ins(X86Instruction::call_immediate(self.relative_to_anchor(ANCHOR_TIME_SLICE_EXHAUSTED, 5)));
     }
 
     /// Charges the instruction meter (without any check thereof)
@@ -1442,6 +1446,50 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.set_anchor(ANCHOR_THROW_EXCEPTION_UNCHECKED);
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::Registers) + 11 * std::mem::size_of::<u64>() as i32))); // registers[11] = pc;
         self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_EPILOGUE, 5)));
+
+        // Handler for EbpfError::ExceededTimeLimit
+        // Same meter handling as ExceededMaxInstructions, so that exactly the
+        // granted time slices are charged
+        self.set_anchor(ANCHOR_THROW_EXCEEDED_TIME_LIMIT);
+        self.emit_set_exception_kind(EbpfError::ExceededTimeLimit);
+        self.emit_ins(X86Instruction::mov(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_SCRATCH)); // REGISTER_SCRATCH = REGISTER_INSTRUCTION_METER;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER += 1;
+        self.emit_ins(X86Instruction::jump_immediate(self.relative_to_anchor(ANCHOR_THROW_EXCEPTION_UNCHECKED, 5)));
+
+        // Routine for an exhausted time slice, called by
+        // emit_validate_instruction_count()
+        // Inputs: Guest current pc in REGISTER_SCRATCH
+        // Grants time slices from the withheld instructions until the meter
+        // covers the pc, unless nothing is withheld (ExceededMaxInstructions)
+        // or the deadline has passed (ExceededTimeLimit).
+        self.set_anchor(ANCHOR_TIME_SLICE_EXHAUSTED);
+        // If *WithheldInstructionMeter == 0, throw ExceededMaxInstructions
+        self.emit_ins(X86Instruction::cmp_immediate(OperandSize::S64, REGISTER_PTR_TO_VM, 0, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::WithheldInstructionMeter)))));
+        self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
+        self.emit_ins(X86Instruction::push(RDX, None));
+        self.emit_ins(X86Instruction::push(RAX, None));
+        // If *Deadline <= clock::now(), throw ExceededTimeLimit. The epilogue
+        // restores the stack pointer.
+        self.emit_ins(X86Instruction::cycle_count()); // rdtsc
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xc1, 4, RDX, 32, None)); // RDX <<= 32;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x09, RDX, RAX, None)); // RAX |= RDX;
+        self.emit_ins(X86Instruction::cmp(OperandSize::S64, RAX, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::Deadline)))));
+        self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_TIME_LIMIT, 6)));
+        // RAX = min(*WithheldInstructionMeter, *DeadlineCheckInterval);
+        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, RAX, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::WithheldInstructionMeter))));
+        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, RDX, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DeadlineCheckInterval))));
+        self.emit_ins(X86Instruction::cmp(OperandSize::S64, RDX, RAX, None));
+        self.emit_ins(X86Instruction::cmov(OperandSize::S64, 0x47, RDX, RAX)); // if RAX > RDX { RAX = RDX; }
+        // Move RAX instructions from the withheld budget into the time slice
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, RAX, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::WithheldInstructionMeter))))); // *WithheldInstructionMeter -= RAX;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, RAX, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter))))); // *PreviousInstructionMeter += RAX;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, RAX, REGISTER_INSTRUCTION_METER, None)); // REGISTER_INSTRUCTION_METER += RAX;
+        self.emit_ins(X86Instruction::pop(RAX));
+        self.emit_ins(X86Instruction::pop(RDX));
+        // If instruction_meter <= pc, grant another time slice
+        self.emit_ins(X86Instruction::cmp(OperandSize::S64, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None));
+        self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_TIME_SLICE_EXHAUSTED, 6)));
+        self.emit_ins(X86Instruction::return_near());
 
         // Quit gracefully
         self.set_anchor(ANCHOR_EXIT);

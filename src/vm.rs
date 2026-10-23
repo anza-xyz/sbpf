@@ -23,12 +23,17 @@ use crate::{
 };
 // Re-export defaults for direct access without the module path.
 pub use defaults::get_stack_frame_size;
-use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of, ptr};
+use std::{
+    collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of, num::NonZeroU64, ptr,
+};
 
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;
 #[cfg(not(feature = "shuttle-test"))]
 use std::sync::Arc;
+
+/// Check the deadline every 100,000 instructions.
+pub const DEFAULT_DEADLINE_CHECK_INTERVAL: NonZeroU64 = NonZeroU64::new(100_000).unwrap();
 
 /// Returns (and if not done before generates) the encryption key for the VM pointer
 pub fn get_runtime_environment_key() -> i32 {
@@ -196,6 +201,15 @@ pub trait ContextObject {
     fn get_remaining(&self) -> u64;
     /// Return a mutable pointer to the active MemoryMapping
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping>;
+    /// Get the execution deadline in [crate::clock] ticks, if any.
+    fn get_deadline(&self) -> Option<NonZeroU64> {
+        None
+    }
+    /// Get the maximal number of instructions between two checks of the
+    /// execution deadline.
+    fn get_deadline_check_interval(&self) -> NonZeroU64 {
+        DEFAULT_DEADLINE_CHECK_INTERVAL
+    }
 }
 
 /// Statistic of taken branches (from a recorded trace)
@@ -254,12 +268,20 @@ pub enum RuntimeEnvironmentSlot {
     /// [EbpfVm::previous_instruction_meter]
     PreviousInstructionMeter =
         offset_of!(EbpfVm<DummyContextObject>, previous_instruction_meter) as isize,
+    /// [EbpfVm::withheld_instruction_meter]
+    WithheldInstructionMeter =
+        offset_of!(EbpfVm<DummyContextObject>, withheld_instruction_meter) as isize,
     /// [EbpfVm::due_insn_count]
     DueInsnCount = offset_of!(EbpfVm<DummyContextObject>, due_insn_count) as isize,
     /// [EbpfVm::stopwatch_numerator]
     StopwatchNumerator = offset_of!(EbpfVm<DummyContextObject>, stopwatch_numerator) as isize,
     /// [EbpfVm::stopwatch_denominator]
     StopwatchDenominator = offset_of!(EbpfVm<DummyContextObject>, stopwatch_denominator) as isize,
+    /// [EbpfVm::deadline]
+    Deadline = offset_of!(EbpfVm<DummyContextObject>, deadline) as isize,
+    /// [EbpfVm::deadline_check_interval](field@EbpfVm::deadline_check_interval)
+    DeadlineCheckInterval =
+        offset_of!(EbpfVm<DummyContextObject>, deadline_check_interval) as isize,
     /// [EbpfVm::registers]
     Registers = offset_of!(EbpfVm<DummyContextObject>, registers) as isize,
     /// [EbpfVm::program_result]
@@ -340,12 +362,18 @@ pub struct EbpfVm<'a, C: ContextObject> {
     context_object_lifetime: PhantomData<&'a mut C>,
     /// Last return value of instruction_meter.get_remaining()
     pub previous_instruction_meter: u64,
+    /// Remaining instructions not yet granted to the current time slice.
+    pub withheld_instruction_meter: u64,
     /// Outstanding value to instruction_meter.consume()
     pub due_insn_count: u64,
     /// CPU cycles accumulated by the stop watch
     pub stopwatch_numerator: u64,
     /// Number of times the stop watch was used
     pub stopwatch_denominator: u64,
+    /// Execution deadline in [crate::clock] ticks, if any.
+    pub deadline: Option<NonZeroU64>,
+    /// Maximal number of instructions between two checks of the deadline.
+    pub deadline_check_interval: NonZeroU64,
     /// Registers inlined
     pub registers: [u64; 12],
     /// ProgramResult inlined
@@ -382,15 +410,20 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             } as u64);
 
         let memory_mapping = context_object.active_mapping_ptr();
+        let deadline = context_object.get_deadline();
+        let deadline_check_interval = context_object.get_deadline_check_interval();
         EbpfVm {
             host_stack_pointer: std::ptr::null_mut(),
             call_depth: 0,
             context_object_pointer: ptr::NonNull::from_mut(context_object),
             context_object_lifetime: PhantomData,
             previous_instruction_meter: 0,
+            withheld_instruction_meter: 0,
             due_insn_count: 0,
             stopwatch_numerator: 0,
             stopwatch_denominator: 0,
+            deadline,
+            deadline_check_interval,
             registers,
             program_result: ProgramResult::Ok(0),
             memory_mapping,
@@ -425,7 +458,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let config = executable.get_config();
         let initial_insn_count = self.context().get_remaining();
-        self.previous_instruction_meter = initial_insn_count;
+        self.grant_instruction_meter(initial_insn_count);
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
 
@@ -530,6 +563,42 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         // through the EbpfVm lifetime.
         unsafe { self.memory_mapping.as_mut() }
     }
+
+    /// Returns `true` if the execution deadline, if any, has passed.
+    pub(crate) fn is_past_deadline(&self) -> bool {
+        self.deadline
+            .is_some_and(|deadline| crate::clock::deadline_passed(deadline.get()))
+    }
+
+    /// Maximal number of instructions between deadline checks.
+    fn deadline_check_interval(&self) -> u64 {
+        self.deadline_check_interval.get()
+    }
+
+    /// Grants the instruction meter `remaining` instructions.
+    ///
+    /// With a deadline, at most one time slice is granted and the rest is
+    /// withheld, so that the meter runs out every
+    /// [EbpfVm::deadline_check_interval()] instructions and the deadline gets
+    /// checked.
+    pub(crate) fn grant_instruction_meter(&mut self, remaining: u64) {
+        let grant = if self.deadline.is_some() {
+            remaining.min(self.deadline_check_interval())
+        } else {
+            remaining
+        };
+        self.previous_instruction_meter = grant;
+        self.withheld_instruction_meter = remaining.saturating_sub(grant);
+    }
+
+    /// Grants the next time slice from the withheld instructions.
+    pub(crate) fn grant_next_time_slice(&mut self) {
+        let grant = self
+            .withheld_instruction_meter
+            .min(self.deadline_check_interval());
+        self.withheld_instruction_meter = self.withheld_instruction_meter.saturating_sub(grant);
+        self.previous_instruction_meter = self.previous_instruction_meter.saturating_add(grant);
+    }
 }
 
 /// Encrypted address to the [`EbpfVm`] object.
@@ -627,9 +696,12 @@ mod tests {
         check_slot!(env, call_depth, CallDepth);
         check_slot!(env, context_object_pointer, ContextObjectPointer);
         check_slot!(env, previous_instruction_meter, PreviousInstructionMeter);
+        check_slot!(env, withheld_instruction_meter, WithheldInstructionMeter);
         check_slot!(env, due_insn_count, DueInsnCount);
         check_slot!(env, stopwatch_numerator, StopwatchNumerator);
         check_slot!(env, stopwatch_denominator, StopwatchDenominator);
+        check_slot!(env, deadline, Deadline);
+        check_slot!(env, deadline_check_interval, DeadlineCheckInterval);
         check_slot!(env, registers, Registers);
         check_slot!(env, program_result, ProgramResult);
         check_slot!(env, memory_mapping, MemoryMapping);

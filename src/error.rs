@@ -75,6 +75,9 @@ pub enum EbpfError {
     /// Syscall error
     #[error("Syscall error: {0}")]
     SyscallError(Box<dyn Error>),
+    /// Exceeded the execution deadline
+    #[error("exceeded execution time limit")]
+    ExceededTimeLimit,
 }
 
 impl EbpfError {
