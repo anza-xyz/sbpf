@@ -819,12 +819,15 @@ impl MemoryMapping {
         len: u64,
     ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
-        if let Some((_index, region)) = self.find_region(vm_addr) {
-            if region.host_buffer().is_mutable() || access_type != AccessType::Store {
+        match self.find_region(vm_addr) {
+            Some((_index, region))
+                if region.host_buffer().is_mutable() || access_type != AccessType::Store =>
+            {
                 if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
                     return StableResult::Ok(host_buffer);
                 }
             }
+            _ => (),
         }
         StableResult::Err(self.generate_access_violation(access_type, vm_addr, len))
     }
@@ -842,14 +845,14 @@ impl MemoryMapping {
     ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
         match self.find_region(vm_addr) {
-            Some((_index, region)) => {
-                if region.host_buffer().is_mutable() || access_type != AccessType::Store {
-                    if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                        return StableResult::Ok(host_buffer);
-                    }
+            Some((_index, region))
+                if region.host_buffer().is_mutable() || access_type != AccessType::Store =>
+            {
+                if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+                    return StableResult::Ok(host_buffer);
                 }
             }
-            None => (),
+            _ => (),
         }
         // The slow path is out of line, so that the code in there doesn't make the callers of the
         // fast path save and restore registers they otherwise do not need to. Note, that a single
