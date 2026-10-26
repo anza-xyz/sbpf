@@ -147,13 +147,7 @@ fn test_jeq() {
 /// placement could leave the others disagreeing without anything failing.
 #[test]
 fn test_call_reg_field_per_sbpf_version() {
-    for version in [
-        SBPFVersion::V0,
-        SBPFVersion::V1,
-        SBPFVersion::V2,
-        SBPFVersion::V3,
-        SBPFVersion::V4,
-    ] {
+    for &version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: version..=version,
             ..Config::default()
