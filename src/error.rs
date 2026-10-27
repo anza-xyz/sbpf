@@ -13,7 +13,10 @@ use {
 
 /// Error definitions
 #[derive(Debug, thiserror::Error)]
-#[repr(u64)] // discriminant size, used in emit_exception_kind in JIT
+// Note: `#[repr(u64)]` is used for `Self::discriminant` and
+// `emit_exception_kind` in JIT, but the actual memory layout of this enum's
+// variants is not depended on by the VM.
+#[repr(u64)]
 pub enum EbpfError {
     /// ELF error
     #[error("ELF error: {0}")]
@@ -49,7 +52,7 @@ pub enum EbpfError {
     #[error("Invalid memory region at index {0}")]
     InvalidMemoryRegion(usize),
     /// Access violation (general)
-    #[error("Access violation in {3} section at address {1:#x} of size {2:?}")]
+    #[error("Access violation {0} {2} bytes at address {1:#x} (in {3} region)")]
     AccessViolation(AccessType, u64, u64, &'static str),
     /// Access violation (stack specific)
     #[error("Access violation in stack frame {3} at address {1:#x} of size {2:?}")]
@@ -69,6 +72,15 @@ pub enum EbpfError {
     /// Syscall error
     #[error("Syscall error: {0}")]
     SyscallError(Box<dyn Error>),
+}
+
+impl EbpfError {
+    /// Returns the enum discriminant as a `u64`.
+    ///
+    /// This is sound only because of the `#[repr(u64)]` attribute on the enum.
+    pub const fn discriminant(&self) -> u64 {
+        unsafe { *std::ptr::addr_of!(*self).cast::<u64>() }
+    }
 }
 
 /// Same as `Result` but provides a stable memory layout
@@ -138,7 +150,7 @@ impl<T: std::fmt::Debug, E: std::fmt::Debug> StableResult<T, E> {
         ),
         allow(dead_code)
     )]
-    pub(crate) fn discriminant(&self) -> u64 {
+    pub(crate) const fn discriminant(&self) -> u64 {
         unsafe { *std::ptr::addr_of!(*self).cast::<u64>() }
     }
 }

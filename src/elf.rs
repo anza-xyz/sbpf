@@ -19,13 +19,11 @@ use crate::{
     },
     error::EbpfError,
     memory_region::MemoryRegion,
-    program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+    program::{BuiltinProgram, FunctionRegistry, JitProgram, SBPFVersion},
     verifier::Verifier,
     vm::{Config, ContextObject},
 };
 
-#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-use crate::jit::{JitCompiler, JitProgram};
 use byteorder::{ByteOrder, LittleEndian};
 use std::{
     collections::BTreeMap,
@@ -42,7 +40,10 @@ use std::sync::Arc;
 use shuttle::sync::Arc;
 
 /// Error definitions
+// Note: `#[repr(u64)]` is used for `Self::discriminant`, but the actual
+// memory layout of this enum's variants is not depended on by the VM.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[repr(u64)]
 pub enum ElfError {
     /// Failed to parse ELF file
     #[error("Failed to parse ELF file: {0}")]
@@ -113,6 +114,15 @@ pub enum ElfError {
     /// Invalid program header
     #[error("Invalid ELF program header")]
     InvalidProgramHeader,
+}
+
+impl ElfError {
+    /// Returns the enum discriminant as a `u64`.
+    ///
+    /// This is sound only because of the `#[repr(u64)]` attribute on the enum.
+    pub fn discriminant(&self) -> u64 {
+        unsafe { *std::ptr::addr_of!(*self).cast::<u64>() }
+    }
 }
 
 impl From<ElfParserError> for ElfError {
@@ -235,6 +245,44 @@ pub enum Section {
     Borrowed(usize, Range<usize>),
 }
 
+/// Builds an owned read-only section buffer from the supplied section data.
+///
+/// Section addresses are rebased relative to `lowest_addr`. Gaps and trailing
+/// bytes are zero-filled. Sections are applied in input order, so later
+/// sections overwrite earlier bytes when their ranges overlap.
+///
+/// All section ranges must fit within `buf_len`.
+fn build_owned_ro_section<'a>(
+    buf_len: usize,
+    lowest_addr: usize,
+    ro_slices: impl IntoIterator<Item = (usize, &'a [u8])>,
+) -> Vec<u8> {
+    // Avoid `vec![0; buf_len]` because it uses jemalloc `calloc`/zeroed allocation,
+    // which requires zeroed extents and can force fresh/purged pages.
+    //
+    // Use `Vec::with_capacity` and initialize the buffer incrementally,
+    // allowing jemalloc to reuse warm dirty extents.
+    let mut ro_section = Vec::<u8>::with_capacity(buf_len);
+
+    for (section_addr, section_data) in ro_slices {
+        let buf_offset_start = section_addr.saturating_sub(lowest_addr);
+        let buf_offset_end = buf_offset_start.saturating_add(section_data.len());
+        debug_assert!(buf_offset_end <= buf_len);
+
+        if ro_section.len() < buf_offset_start {
+            ro_section.resize(buf_offset_start, 0);
+        }
+
+        let overwrite_dst = &mut ro_section[buf_offset_start..];
+        let overwrite_bytes = section_data.len().min(overwrite_dst.len());
+        overwrite_dst[..overwrite_bytes].copy_from_slice(&section_data[..overwrite_bytes]);
+        ro_section.extend_from_slice(&section_data[overwrite_bytes..]);
+    }
+
+    ro_section.resize(buf_len, 0);
+    ro_section
+}
+
 /// Elf loader/relocator
 #[derive(Debug)]
 pub struct Executable<C: ContextObject> {
@@ -255,8 +303,7 @@ pub struct Executable<C: ContextObject> {
     /// Loader built-in program
     loader: Arc<BuiltinProgram<C>>,
     /// Compiled program and argument
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-    compiled_program: std::sync::Mutex<Option<Arc<JitProgram>>>,
+    pub(crate) compiled_program: std::sync::Mutex<Option<Arc<JitProgram>>>,
 }
 
 impl<C: PartialEq + ContextObject> PartialEq for Executable<C> {
@@ -270,23 +317,14 @@ impl<C: PartialEq + ContextObject> PartialEq for Executable<C> {
             && self.function_registry == other.function_registry
             && *self.loader == *other.loader
             && {
-                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-                {
-                    // In order to avoid a deadlock comparing self with self, we gotta make sure
-                    // that we clone at least one Arc out of the lock before comparing...
-                    let other = other.get_compiled_program();
-                    let this = self
-                        .compiled_program
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner());
-                    *this == other
-                }
-                #[cfg(not(all(
-                    feature = "jit",
-                    not(target_os = "windows"),
-                    target_arch = "x86_64"
-                )))]
-                true
+                // In order to avoid a deadlock comparing self with self, we gotta make sure
+                // that we clone at least one Arc out of the lock before comparing...
+                let other = other.get_compiled_program();
+                let this = self
+                    .compiled_program
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                *this == other
             }
     }
 }
@@ -345,6 +383,12 @@ impl<C: ContextObject> Executable<C> {
         self.text_section_range.start as u64
     }
 
+    /// Get the text section virtual address (matches what LLDB sees)
+    #[cfg(feature = "debugger")]
+    pub fn get_text_section_vaddr(&self) -> u64 {
+        self.text_section_vaddr
+    }
+
     /// Get the loader built-in program
     pub fn get_loader(&self) -> &Arc<BuiltinProgram<C>> {
         &self.loader
@@ -354,7 +398,6 @@ impl<C: ContextObject> Executable<C> {
     ///
     /// This function will not block the calling thread even if there is a concurrent ongoing call
     /// to [`Self::jit_compile`].
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
     pub fn get_compiled_program(&self) -> Option<Arc<JitProgram>> {
         let guard = self
             .compiled_program
@@ -367,32 +410,9 @@ impl<C: ContextObject> Executable<C> {
     pub fn verify<V: Verifier>(&self) -> Result<(), EbpfError> {
         <V as Verifier>::verify(
             self.get_text_bytes().1,
-            self.get_config(),
             self.get_sbpf_version(),
+            self.get_loader().get_function_registry(),
         )?;
-        Ok(())
-    }
-
-    /// JIT compile the executable
-    ///
-    /// This function does not ensure fully sequentially consistent execution ordering between calls
-    /// to it and related calls such as [`Self::get_compiled_program`] or
-    /// [`Self::take_compiled_program`].
-    ///
-    /// This means that there can be some non-trivial interactions in ordering between calls to this
-    /// function and a `get_compiled_program`: concurrent calls to `get_compiled_program` will
-    /// return the previous compiled program or `None` for the duration of the compilation process
-    /// and is only guaranteed to start returning the newly compiled `JitProgram` after this
-    /// function returns.
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-    pub fn jit_compile(&self) -> Result<(), crate::error::EbpfError> {
-        let jit = JitCompiler::<C>::new(self)?;
-        let compiled = Arc::new(jit.compile()?);
-        let mut guard = self
-            .compiled_program
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *guard = Some(compiled);
         Ok(())
     }
 
@@ -401,7 +421,6 @@ impl<C: ContextObject> Executable<C> {
     /// Note that the results can be unpredictable in presence of concurrent ongoing calls to
     /// [`Self::jit_compile`]: based on exact execution ordering this function may take out the
     /// previous program (or `None`) that shorly afterwards gets replaced by a compiled program.
-    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
     pub fn take_compiled_program(&self) -> Option<Arc<JitProgram>> {
         let mut guard = self
             .compiled_program
@@ -450,7 +469,6 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
     }
@@ -477,10 +495,7 @@ impl<C: ContextObject> Executable<C> {
         bytes: &[u8],
         loader: Arc<BuiltinProgram<C>>,
     ) -> Result<Self, ElfParserError> {
-        use crate::elf_parser::{
-            consts::{ELFMAG, EV_CURRENT, PF_R, PF_X, PT_LOAD, SHN_UNDEF, STT_FUNC},
-            types::Elf64Sym,
-        };
+        use crate::elf_parser::consts::{ELFMAG, EV_CURRENT, PF_R, PF_X, PT_LOAD};
 
         let aligned_memory = AlignedMemory::<{ HOST_ALIGN }>::from_slice(bytes);
         let elf_bytes = aligned_memory.as_slice();
@@ -583,73 +598,22 @@ impl<C: ContextObject> Executable<C> {
             .checked_div(ebpf::INSN_SIZE as u64)
             .unwrap_or_default() as usize;
 
-        let mut function_registry = FunctionRegistry::<usize>::default();
         let config = loader.get_config();
-        if config.enable_symbol_and_section_labels {
-            let (_section_header_table_range, section_header_table) =
-                Elf64::parse_section_header_table(
-                    elf_bytes,
-                    file_header_range.clone(),
-                    file_header,
-                    program_header_table_range.clone(),
-                )
-                .unwrap();
-            let section_names_section_header = (file_header.e_shstrndx != SHN_UNDEF)
-                .then(|| {
-                    section_header_table
-                        .get(file_header.e_shstrndx as usize)
-                        .ok_or(ElfParserError::OutOfBounds)
-                })
-                .transpose()?
-                .unwrap();
-            let mut symbol_names_section_header = None;
-            let mut symbol_table_section_header = None;
-            for section_header in section_header_table.iter() {
-                let section_name = Elf64::get_string_in_section(
-                    elf_bytes,
-                    section_names_section_header,
-                    section_header.sh_name,
-                    64,
-                )
-                .unwrap();
-                if section_name == b".strtab" {
-                    symbol_names_section_header = Some(section_header);
-                }
-                if section_name == b".symtab" {
-                    symbol_table_section_header = Some(section_header);
-                }
-            }
-            // A well-formed ELF usually has both as long as it's not stripped.
-            match (symbol_names_section_header, symbol_table_section_header) {
-                (Some(symbol_names_section_header), Some(symbol_table_section_header)) => {
-                    let symbol_table: &[Elf64Sym] =
-                        Elf64::slice_from_section_header(elf_bytes, symbol_table_section_header)
-                            .unwrap();
-                    for symbol in symbol_table {
-                        if symbol.st_info & STT_FUNC == 0 {
-                            continue;
-                        }
-                        let target_pc = symbol
-                            .st_value
-                            .saturating_sub(bytecode_header.p_vaddr)
-                            .checked_div(ebpf::INSN_SIZE as u64)
-                            .unwrap_or_default() as usize;
-                        let name = Elf64::get_string_in_section(
-                            elf_bytes,
-                            symbol_names_section_header,
-                            symbol.st_name as Elf64Word,
-                            u8::MAX as usize,
-                        )
-                        .unwrap();
-                        function_registry
-                            .register_function(target_pc as u32, name, target_pc)
-                            .unwrap();
-                    }
-                }
-                (None, None) => { /* missing both sections is okay */ }
-                _ => return Err(ElfParserError::InvalidSectionHeader),
-            }
-        }
+        // Labels are debug information, so anything that goes wrong while
+        // collecting them leaves the executable without labels instead of
+        // failing the load.
+        let function_registry = if config.enable_symbol_and_section_labels {
+            Self::parse_debug_labels(
+                elf_bytes,
+                file_header,
+                file_header_range,
+                program_header_table_range,
+                bytecode_header,
+            )
+            .unwrap_or_default()
+        } else {
+            FunctionRegistry::<usize>::default()
+        };
 
         Ok(Self {
             elf_bytes: aligned_memory,
@@ -660,9 +624,89 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
+    }
+
+    /// Collects the function labels of a strictly parsed ELF from its static
+    /// symbol table
+    ///
+    /// Callers treat a failure here as "this ELF carries no labels".
+    fn parse_debug_labels(
+        elf_bytes: &[u8],
+        file_header: &Elf64Ehdr,
+        file_header_range: std::ops::Range<usize>,
+        program_header_table_range: std::ops::Range<usize>,
+        bytecode_header: &Elf64Phdr,
+    ) -> Result<FunctionRegistry<usize>, ElfParserError> {
+        use crate::elf_parser::{
+            consts::{SHN_UNDEF, STT_FUNC},
+            types::Elf64Sym,
+            DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM, SECTION_NAME_LENGTH_MAXIMUM,
+        };
+
+        let mut function_registry = FunctionRegistry::<usize>::default();
+        let (_section_header_table_range, section_header_table) =
+            Elf64::parse_section_header_table(
+                elf_bytes,
+                file_header_range,
+                file_header,
+                program_header_table_range,
+            )?;
+        if file_header.e_shstrndx == SHN_UNDEF {
+            return Ok(function_registry);
+        }
+        let section_names_section_header = section_header_table
+            .get(file_header.e_shstrndx as usize)
+            .ok_or(ElfParserError::OutOfBounds)?;
+        let mut symbol_names_section_header = None;
+        let mut symbol_table_section_header = None;
+        for section_header in section_header_table.iter() {
+            let Ok(section_name) = Elf64::get_string_in_section(
+                elf_bytes,
+                section_names_section_header,
+                section_header.sh_name,
+                SECTION_NAME_LENGTH_MAXIMUM,
+            ) else {
+                continue;
+            };
+            if section_name == b".strtab" {
+                symbol_names_section_header = Some(section_header);
+            }
+            if section_name == b".symtab" {
+                symbol_table_section_header = Some(section_header);
+            }
+        }
+        // Stripping removes the symbol table, and can leave an empty string
+        // table behind, so anything but a complete pair means no labels.
+        let (Some(symbol_names_section_header), Some(symbol_table_section_header)) =
+            (symbol_names_section_header, symbol_table_section_header)
+        else {
+            return Ok(function_registry);
+        };
+        let symbol_table: &[Elf64Sym] =
+            Elf64::slice_from_section_header(elf_bytes, symbol_table_section_header)?;
+        for symbol in symbol_table {
+            if symbol.st_info & STT_FUNC == 0 {
+                continue;
+            }
+            let target_pc = symbol
+                .st_value
+                .saturating_sub(bytecode_header.p_vaddr)
+                .checked_div(ebpf::INSN_SIZE as u64)
+                .unwrap_or_default() as usize;
+            let Ok(name) = Elf64::get_string_in_section(
+                elf_bytes,
+                symbol_names_section_header,
+                symbol.st_name as Elf64Word,
+                DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM,
+            ) else {
+                // A name we cannot read only costs this one label.
+                continue;
+            };
+            let _ = function_registry.register_function(target_pc as u32, name, target_pc);
+        }
+        Ok(function_registry)
     }
 
     /// Loads an ELF with relocation
@@ -690,7 +734,7 @@ impl<C: ContextObject> Executable<C> {
         let text_section = get_section(&elf, b".text")?;
         let text_section_vaddr = text_section.sh_addr.saturating_add(ebpf::MM_REGION_SIZE);
         if (config.reject_broken_elfs && text_section.sh_addr != text_section.sh_offset)
-            || text_section_vaddr > ebpf::MM_STACK_START
+            || text_section_vaddr >= ebpf::MM_STACK_START
         {
             return Err(ElfError::ValueOutOfBounds);
         }
@@ -753,7 +797,6 @@ impl<C: ContextObject> Executable<C> {
             entry_pc,
             function_registry,
             loader,
-            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
             compiled_program: None.into(),
         })
     }
@@ -774,12 +817,9 @@ impl<C: ContextObject> Executable<C> {
             // bpf functions
             .saturating_add(self.function_registry.mem_size());
 
-        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-        {
-            // compiled programs
-            let prog = self.compiled_program.lock().unwrap_or_else(|e| e.into_inner());
-            total = total.saturating_add(prog.as_ref().map_or(0, |program| program.mem_size()));
-        }
+        // compiled programs
+        let prog = self.compiled_program.lock().unwrap_or_else(|e| e.into_inner());
+        total = total.saturating_add(prog.as_ref().map_or(0, |program| program.mem_size()));
 
         total
     }
@@ -910,7 +950,11 @@ impl<C: ContextObject> Executable<C> {
             highest_addr = highest_addr.max(section_addr.saturating_add(section_data.len()));
             ro_fill_length = ro_fill_length.saturating_add(section_data.len());
 
-            ro_slices.push((section_addr, section_data));
+            // Empty sections still shape the mappable bounds above, but they
+            // contain no data to copy.
+            if !section_data.is_empty() {
+                ro_slices.push((section_addr, section_data));
+            }
         }
 
         if config.reject_broken_elfs && lowest_addr.saturating_add(ro_fill_length) > highest_addr {
@@ -959,12 +1003,7 @@ impl<C: ContextObject> Executable<C> {
                 return Err(ElfError::ValueOutOfBounds);
             }
 
-            let mut ro_section = vec![0; buf_len];
-            for (section_addr, slice) in ro_slices.iter() {
-                let buf_offset_start = section_addr.saturating_sub(lowest_addr);
-                ro_section[buf_offset_start..buf_offset_start.saturating_add(slice.len())]
-                    .copy_from_slice(slice);
-            }
+            let ro_section = build_owned_ro_section(buf_len, lowest_addr, ro_slices);
 
             let addr_offset = if lowest_addr >= ebpf::MM_REGION_SIZE as usize {
                 lowest_addr
@@ -1236,9 +1275,11 @@ impl<C: ContextObject> Executable<C> {
                 let target_pc = (symbol.st_value.saturating_sub(text_section.sh_addr) as usize)
                     .checked_div(ebpf::INSN_SIZE)
                     .unwrap_or_default();
-                let name = elf
-                    .symbol_name(symbol.st_name as Elf64Word)
-                    .map_err(|_| ElfError::UnknownSymbol(symbol.st_name as usize))?;
+                let Ok(name) = elf.symbol_name(symbol.st_name as Elf64Word) else {
+                    // Labels are debug information: a name we cannot read only
+                    // costs this one label.
+                    continue;
+                };
                 function_registry.register_function_hashed_legacy(loader, true, name, target_pc)?;
             }
         }
@@ -1291,4 +1332,84 @@ pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
     // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
     // will be unmappable, see MemoryRegion::vm_to_host.
     MemoryRegion::new(&raw const *ro_data, offset as u64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_owned_ro_section;
+
+    struct TestCase {
+        name: &'static str,
+        buf_len: usize,
+        lowest_addr: usize,
+        ro_slices: &'static [(usize, &'static [u8])],
+        expected: &'static [u8],
+    }
+
+    #[test]
+    fn test_build_owned_ro_section() {
+        let test_cases = [
+            TestCase {
+                name: "empty",
+                buf_len: 4,
+                lowest_addr: 0,
+                ro_slices: &[],
+                expected: &[0; 4],
+            },
+            TestCase {
+                name: "ordered contiguous",
+                buf_len: 6,
+                lowest_addr: 100,
+                ro_slices: &[(100, &[1, 2]), (102, &[3, 4]), (104, &[5, 6])],
+                expected: &[1, 2, 3, 4, 5, 6],
+            },
+            TestCase {
+                name: "ordered with gaps",
+                buf_len: 10,
+                lowest_addr: 0,
+                ro_slices: &[(2, &[1, 2]), (6, &[3, 4])],
+                expected: &[0, 0, 1, 2, 0, 0, 3, 4, 0, 0],
+            },
+            TestCase {
+                name: "contained overlap",
+                buf_len: 6,
+                lowest_addr: 0,
+                ro_slices: &[(0, &[1, 2, 3, 4, 5]), (1, &[9, 8])],
+                expected: &[1, 9, 8, 4, 5, 0],
+            },
+            TestCase {
+                name: "extending overlap",
+                buf_len: 6,
+                lowest_addr: 0,
+                ro_slices: &[(0, &[1, 2, 3]), (2, &[9, 8, 7])],
+                expected: &[1, 2, 9, 8, 7, 0],
+            },
+            TestCase {
+                name: "reversed disjoint",
+                buf_len: 6,
+                lowest_addr: 0,
+                ro_slices: &[(4, &[5, 6]), (2, &[3, 4]), (0, &[1, 2])],
+                expected: &[1, 2, 3, 4, 5, 6],
+            },
+            TestCase {
+                name: "overlaps preserve input order",
+                buf_len: 6,
+                lowest_addr: 0,
+                ro_slices: &[(2, &[3, 3, 3, 3]), (0, &[1, 1, 1, 1]), (3, &[9, 9, 9])],
+                expected: &[1, 1, 1, 9, 9, 9],
+            },
+        ];
+
+        for TestCase {
+            name,
+            buf_len,
+            lowest_addr,
+            ro_slices,
+            expected,
+        } in test_cases
+        {
+            let actual = build_owned_ro_section(buf_len, lowest_addr, ro_slices.iter().copied());
+            assert_eq!(actual.as_slice(), expected, "{name}",);
+        }
+    }
 }

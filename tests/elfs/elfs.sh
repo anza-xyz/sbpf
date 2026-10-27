@@ -75,6 +75,15 @@ $LD_V3 -o reloc_64_relative_data.so reloc_64_relative_data.o
 $RC_V3 -o syscall_static.o syscall_static.rs
 $LD_V3 -o syscall_static.so syscall_static.o
 
+$RC_V0 -o long_symbol_name.o long_symbol_name.rs
+$LD_V0 -o long_symbol_name_sbpfv0.so long_symbol_name.o
+
+$RC_V3 -o long_symbol_name.o long_symbol_name.rs
+$LD_V3 -o long_symbol_name.so long_symbol_name.o
+
+$RC_V0 -o long_dynamic_symbol_name.o long_dynamic_symbol_name.rs
+$LD_V0 -o long_dynamic_symbol_name_sbpfv0.so long_dynamic_symbol_name.o
+
 # $RC_V1 -o callx_unaligned.o callx_unaligned.rs
 # $LD_V1 -o callx_unaligned.so callx_unaligned.o
 

@@ -249,14 +249,21 @@ impl<'a> Analysis<'a> {
             self.cfg_nodes.entry(*pc).or_default();
         }
         let mut cfg_edges = BTreeMap::new();
-        for (pc, insn) in self.instructions.iter().enumerate() {
+        for insn in self.instructions.iter() {
             let target_pc = (insn.ptr as isize + insn.off as isize + 1) as usize;
             match insn.opc {
                 ebpf::CALL_IMM => {
-                    let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
-                    if let Some((_function_name, target_pc)) =
-                        self.executable.get_function_registry().lookup_by_key(key)
-                    {
+                    let key = sbpf_version.calculate_call_imm_target_pc(insn.ptr, insn.imm);
+                    // With static syscalls the target is relative and needs no label
+                    let target_pc = if sbpf_version.static_syscalls() {
+                        (insn.src == 1).then_some(key as usize)
+                    } else {
+                        self.executable
+                            .get_function_registry()
+                            .lookup_by_key(key)
+                            .map(|(_function_name, target_pc)| target_pc)
+                    };
+                    if let Some(target_pc) = target_pc {
                         self.cfg_nodes.entry(insn.ptr + 1).or_default();
                         self.cfg_nodes.entry(target_pc).or_default();
                         let destinations = if flatten_call_graph {
@@ -492,14 +499,18 @@ impl<'a> Analysis<'a> {
     /// Generates assembler code for the analyzed executable
     pub fn disassemble<W: std::io::Write>(&self, output: &mut W) -> std::io::Result<()> {
         let mut last_basic_block = usize::MAX;
-        for (pc, insn) in self.instructions.iter().enumerate() {
+        for insn in self.instructions.iter() {
             self.disassemble_label(
                 output,
                 Some(insn) == self.instructions.first(),
                 insn.ptr,
                 &mut last_basic_block,
             )?;
-            writeln!(output, "    {}", self.disassemble_instruction(insn, pc))?;
+            writeln!(
+                output,
+                "    {}",
+                self.disassemble_instruction(insn, insn.ptr)
+            )?;
         }
         Ok(())
     }
@@ -582,9 +593,9 @@ impl<'a> Analysis<'a> {
             writeln!(output, "    lbb_{} [label=<<table border=\"0\" cellborder=\"0\" cellpadding=\"3\">{}</table>>];",
                 cfg_node_start,
                 analysis.instructions[cfg_node.instructions.clone()].iter()
-                .enumerate().map(|(pc, insn)| {
+                .map(|insn| {
                     let desc = analysis.disassemble_instruction(
-                        insn, pc
+                        insn, insn.ptr
                     );
                     if let Some(split_index) = desc.find(' ') {
                         let mut rest = desc[split_index+1..].to_string();
@@ -784,13 +795,8 @@ impl<'a> Analysis<'a> {
                 discovered += 1;
             }
             let cfg_node = self.cfg_nodes.get(&node.cfg_node).unwrap();
-            for j in edge_index..cfg_node.destinations.len() {
-                let w = self
-                    .cfg_nodes
-                    .get(&cfg_node.destinations[j])
-                    .unwrap()
-                    .topo_index
-                    .scc_id;
+            for (j, destination) in cfg_node.destinations.iter().enumerate().skip(edge_index) {
+                let w = self.cfg_nodes.get(destination).unwrap().topo_index.scc_id;
                 if nodes[w].discovery == usize::MAX {
                     recursion_stack.push((v, j + 1));
                     recursion_stack.push((w, 0));
@@ -991,6 +997,63 @@ impl<'a> Analysis<'a> {
                 state.0 = *basic_block_start;
                 for insn in self.instructions[basic_block.instructions.clone()].iter() {
                     match insn.opc {
+                        // V2 reuses legacy arithmetic opcodes for memory accesses.
+                        ebpf::LD_1B_REG | ebpf::LD_2B_REG | ebpf::LD_4B_REG | ebpf::LD_8B_REG
+                            if sbpf_version.move_memory_instruction_classes() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Memory);
+                            bind(&mut state, insn, false, DataResource::Register(insn.src));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::ST_1B_IMM | ebpf::ST_2B_IMM | ebpf::ST_4B_IMM | ebpf::ST_8B_IMM
+                            if sbpf_version.move_memory_instruction_classes() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Memory);
+                        }
+                        ebpf::ST_1B_REG | ebpf::ST_2B_REG | ebpf::ST_4B_REG | ebpf::ST_8B_REG
+                            if sbpf_version.move_memory_instruction_classes() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.src));
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Memory);
+                        }
+                        // PQR shares encodings with JMP32 in later versions.
+                        ebpf::LMUL32_IMM
+                        | ebpf::LMUL64_IMM
+                        | ebpf::UHMUL64_IMM
+                        | ebpf::SHMUL64_IMM
+                        | ebpf::UDIV32_IMM
+                        | ebpf::UDIV64_IMM
+                        | ebpf::SDIV32_IMM
+                        | ebpf::SDIV64_IMM
+                        | ebpf::UREM32_IMM
+                        | ebpf::UREM64_IMM
+                        | ebpf::SREM32_IMM
+                        | ebpf::SREM64_IMM
+                            if sbpf_version.enable_pqr() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::LMUL32_REG
+                        | ebpf::LMUL64_REG
+                        | ebpf::UHMUL64_REG
+                        | ebpf::SHMUL64_REG
+                        | ebpf::UDIV32_REG
+                        | ebpf::UDIV64_REG
+                        | ebpf::SDIV32_REG
+                        | ebpf::SDIV64_REG
+                        | ebpf::UREM32_REG
+                        | ebpf::UREM64_REG
+                        | ebpf::SREM32_REG
+                        | ebpf::SREM64_REG
+                            if sbpf_version.enable_pqr() =>
+                        {
+                            bind(&mut state, insn, false, DataResource::Register(insn.src));
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
                         ebpf::JEQ32_IMM
                         | ebpf::JGT32_IMM
                         | ebpf::JGE32_IMM
@@ -1050,17 +1113,15 @@ impl<'a> Analysis<'a> {
                             bind(&mut state, insn, false, DataResource::Register(insn.dst));
                         }
                         ebpf::CALL_REG | ebpf::CALL_IMM => {
-                            if insn.opc == ebpf::CALL_REG
-                                && !(ebpf::FIRST_SCRATCH_REG
-                                    ..ebpf::FIRST_SCRATCH_REG + ebpf::SCRATCH_REGS)
-                                    .contains(&(insn.imm as usize))
-                            {
-                                bind(
-                                    &mut state,
-                                    insn,
-                                    false,
-                                    DataResource::Register(insn.imm as u8),
-                                );
+                            if insn.opc == ebpf::CALL_REG {
+                                let target = if sbpf_version.callx_uses_src_reg() {
+                                    insn.src
+                                } else if sbpf_version.callx_uses_dst_reg() {
+                                    insn.dst
+                                } else {
+                                    insn.imm as u8
+                                };
+                                bind(&mut state, insn, false, DataResource::Register(target));
                             }
                             bind(&mut state, insn, false, DataResource::Memory);
                             bind(&mut state, insn, true, DataResource::Memory);
@@ -1075,52 +1136,69 @@ impl<'a> Analysis<'a> {
                                 bind(&mut state, insn, false, DataResource::Register(reg as u8));
                             }
                         }
-                        ebpf::LD_DW_IMM => {
+                        ebpf::LD_DW_IMM if !sbpf_version.disable_lddw() => {
                             bind(&mut state, insn, true, DataResource::Register(insn.dst));
                         }
-                        ebpf::LD_B_REG | ebpf::LD_H_REG | ebpf::LD_W_REG | ebpf::LD_DW_REG => {
+                        ebpf::LD_B_REG | ebpf::LD_H_REG | ebpf::LD_W_REG | ebpf::LD_DW_REG
+                            if !sbpf_version.move_memory_instruction_classes() =>
+                        {
                             bind(&mut state, insn, false, DataResource::Memory);
                             bind(&mut state, insn, false, DataResource::Register(insn.src));
                             bind(&mut state, insn, true, DataResource::Register(insn.dst));
                         }
-                        ebpf::ST_B_IMM | ebpf::ST_H_IMM | ebpf::ST_W_IMM | ebpf::ST_DW_IMM => {
+                        ebpf::ST_B_IMM | ebpf::ST_H_IMM | ebpf::ST_W_IMM | ebpf::ST_DW_IMM
+                            if !sbpf_version.move_memory_instruction_classes() =>
+                        {
                             bind(&mut state, insn, false, DataResource::Register(insn.dst));
                             bind(&mut state, insn, true, DataResource::Memory);
                         }
-                        ebpf::ST_B_REG | ebpf::ST_H_REG | ebpf::ST_W_REG | ebpf::ST_DW_REG => {
+                        ebpf::ST_B_REG | ebpf::ST_H_REG | ebpf::ST_W_REG | ebpf::ST_DW_REG
+                            if !sbpf_version.move_memory_instruction_classes() =>
+                        {
                             bind(&mut state, insn, false, DataResource::Register(insn.src));
                             bind(&mut state, insn, false, DataResource::Register(insn.dst));
                             bind(&mut state, insn, true, DataResource::Memory);
                         }
                         ebpf::ADD32_IMM
                         | ebpf::SUB32_IMM
-                        | ebpf::MUL32_IMM
-                        | ebpf::DIV32_IMM
-                        | ebpf::SDIV32_IMM
                         | ebpf::OR32_IMM
                         | ebpf::AND32_IMM
                         | ebpf::LSH32_IMM
                         | ebpf::RSH32_IMM
-                        | ebpf::MOD32_IMM
                         | ebpf::XOR32_IMM
                         | ebpf::ARSH32_IMM
                         | ebpf::ADD64_IMM
                         | ebpf::SUB64_IMM
-                        | ebpf::MUL64_IMM
-                        | ebpf::DIV64_IMM
-                        | ebpf::SDIV64_IMM
                         | ebpf::OR64_IMM
                         | ebpf::AND64_IMM
                         | ebpf::LSH64_IMM
                         | ebpf::RSH64_IMM
-                        | ebpf::MOD64_IMM
                         | ebpf::XOR64_IMM
                         | ebpf::ARSH64_IMM
-                        | ebpf::HOR64_IMM
-                        | ebpf::NEG32
-                        | ebpf::NEG64
-                        | ebpf::LE
                         | ebpf::BE => {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::NEG32 | ebpf::NEG64 if !sbpf_version.disable_neg() => {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::LE if !sbpf_version.disable_le() => {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::HOR64_IMM if sbpf_version.disable_lddw() => {
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::MUL32_IMM
+                        | ebpf::DIV32_IMM
+                        | ebpf::MOD32_IMM
+                        | ebpf::MUL64_IMM
+                        | ebpf::DIV64_IMM
+                        | ebpf::MOD64_IMM
+                            if !sbpf_version.enable_pqr() =>
+                        {
                             bind(&mut state, insn, false, DataResource::Register(insn.dst));
                             bind(&mut state, insn, true, DataResource::Register(insn.dst));
                         }
@@ -1129,28 +1207,32 @@ impl<'a> Analysis<'a> {
                         }
                         ebpf::ADD32_REG
                         | ebpf::SUB32_REG
-                        | ebpf::MUL32_REG
-                        | ebpf::DIV32_REG
-                        | ebpf::SDIV32_REG
                         | ebpf::OR32_REG
                         | ebpf::AND32_REG
                         | ebpf::LSH32_REG
                         | ebpf::RSH32_REG
-                        | ebpf::MOD32_REG
                         | ebpf::XOR32_REG
                         | ebpf::ARSH32_REG
                         | ebpf::ADD64_REG
                         | ebpf::SUB64_REG
-                        | ebpf::MUL64_REG
-                        | ebpf::DIV64_REG
-                        | ebpf::SDIV64_REG
                         | ebpf::OR64_REG
                         | ebpf::AND64_REG
                         | ebpf::LSH64_REG
                         | ebpf::RSH64_REG
-                        | ebpf::MOD64_REG
                         | ebpf::XOR64_REG
                         | ebpf::ARSH64_REG => {
+                            bind(&mut state, insn, false, DataResource::Register(insn.src));
+                            bind(&mut state, insn, false, DataResource::Register(insn.dst));
+                            bind(&mut state, insn, true, DataResource::Register(insn.dst));
+                        }
+                        ebpf::MUL32_REG
+                        | ebpf::DIV32_REG
+                        | ebpf::MOD32_REG
+                        | ebpf::MUL64_REG
+                        | ebpf::DIV64_REG
+                        | ebpf::MOD64_REG
+                            if !sbpf_version.enable_pqr() =>
+                        {
                             bind(&mut state, insn, false, DataResource::Register(insn.src));
                             bind(&mut state, insn, false, DataResource::Register(insn.dst));
                             bind(&mut state, insn, true, DataResource::Register(insn.dst));

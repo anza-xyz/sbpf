@@ -21,7 +21,7 @@ impl<'a> Arbitrary<'a> for ConfigTemplate {
     fn arbitrary(u: &mut Unstructured<'a>) -> arbitrary::Result<Self> {
         let bools = u16::arbitrary(u)?;
         // This is how the arbitrary crate quickly generates an enum variant
-        let variant = u64::from(u32::arbitrary(u)?) * 5 >> 32;
+        let variant = (u64::from(u32::arbitrary(u)?) * 5) >> 32;
         let sbpf_version = match variant {
             0 => SBPFVersion::V0,
             1 => SBPFVersion::V1,
@@ -54,28 +54,27 @@ impl<'a> Arbitrary<'a> for ConfigTemplate {
 
 impl From<ConfigTemplate> for Config {
     fn from(template: ConfigTemplate) -> Self {
-        match template {
-            ConfigTemplate {
-                max_call_depth,
-                instruction_meter_checkpoint_distance,
-                noop_instruction_rate,
-                enable_stack_frame_gaps,
-                enable_symbol_and_section_labels,
-                sanitize_user_provided_values,
-                optimize_rodata,
-                sbpf_version,
-                aligned_memory_mapping,
-            } => Config {
-                max_call_depth,
-                enable_stack_frame_gaps,
-                instruction_meter_checkpoint_distance,
-                enable_symbol_and_section_labels,
-                noop_instruction_rate,
-                sanitize_user_provided_values,
-                optimize_rodata,
-                aligned_memory_mapping: sbpf_version > SBPFVersion::V3 || aligned_memory_mapping,
-                ..Default::default()
-            },
+        let ConfigTemplate {
+            max_call_depth,
+            instruction_meter_checkpoint_distance,
+            noop_instruction_rate,
+            enable_stack_frame_gaps,
+            enable_symbol_and_section_labels,
+            sanitize_user_provided_values,
+            optimize_rodata,
+            sbpf_version,
+            aligned_memory_mapping,
+        } = template;
+        Config {
+            max_call_depth,
+            enable_stack_frame_gaps,
+            instruction_meter_checkpoint_distance,
+            enable_symbol_and_section_labels,
+            noop_instruction_rate,
+            sanitize_user_provided_values,
+            optimize_rodata,
+            aligned_memory_mapping: sbpf_version > SBPFVersion::V3 || aligned_memory_mapping,
+            ..Default::default()
         }
     }
 }

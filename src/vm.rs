@@ -30,21 +30,19 @@ use shuttle::sync::Arc;
 #[cfg(not(feature = "shuttle-test"))]
 use std::sync::Arc;
 
-#[cfg(all(feature = "jit", not(feature = "shuttle-test")))]
-use rand::{thread_rng, Rng};
-#[cfg(all(feature = "jit", feature = "shuttle-test"))]
-use shuttle::rand::{thread_rng, Rng};
-
 /// Returns (and if not done before generates) the encryption key for the VM pointer
-#[cfg(feature = "jit")]
 pub fn get_runtime_environment_key() -> i32 {
-    static RUNTIME_ENVIRONMENT_KEY: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
-    *RUNTIME_ENVIRONMENT_KEY.get_or_init(|| thread_rng().gen::<i32>() >> 1)
-}
-
-#[cfg(not(feature = "jit"))]
-pub fn get_runtime_environment_key() -> i32 {
-    0
+    cfg_select! {
+        feature = "jit" => {
+            cfg_select! {
+                feature = "shuttle-test" => { use shuttle::rand::{thread_rng, Rng}; }
+                _ => { use rand::{thread_rng, Rng}; }
+            }
+            static RUNTIME_ENVIRONMENT_KEY: std::sync::OnceLock<i32> = std::sync::OnceLock::new();
+            *RUNTIME_ENVIRONMENT_KEY.get_or_init(|| thread_rng().gen::<i32>() >> 1)
+        }
+        _ => 0
+    }
 }
 
 /// Default VM configuration settings.
@@ -116,16 +114,12 @@ pub struct Config {
     pub max_call_depth: usize,
     /// Size of a stack frame in bytes, must match the size specified in the LLVM BPF backend
     pub stack_frame_size: usize,
-    /// Enables the use of MemoryMapping and MemoryRegion for address translation
-    pub enable_address_translation: bool,
     /// Enables gaps in VM address space between the stack frames
     pub enable_stack_frame_gaps: bool,
     /// Maximal pc distance after which a new instruction meter validation is emitted by the JIT
     pub instruction_meter_checkpoint_distance: usize,
     /// Enable instruction meter and limiting
     pub enable_instruction_meter: bool,
-    /// Enable instruction tracing
-    pub enable_register_tracing: bool,
     /// Enable dynamic string allocation for labels
     pub enable_symbol_and_section_labels: bool,
     /// Reject ELF files containing issues that the verifier did not catch before (up to v0.2.21)
@@ -138,12 +132,12 @@ pub struct Config {
     pub sanitize_user_provided_values: bool,
     /// Avoid copying read only sections when possible
     pub optimize_rodata: bool,
-    /// Allow a memory region at age zero in the aligned memory mapping
-    pub allow_memory_region_zero: bool,
     /// Use aligned memory mapping
     pub aligned_memory_mapping: bool,
     /// Allowed [SBPFVersion]s
     pub enabled_sbpf_versions: std::ops::RangeInclusive<SBPFVersion>,
+    /// Size of a region when using AlignedMemoryMapping
+    pub aligned_region_size: usize,
 }
 
 impl Config {
@@ -158,11 +152,9 @@ impl Default for Config {
         Self {
             max_call_depth: 64,
             stack_frame_size: defaults::get_stack_frame_size(),
-            enable_address_translation: true,
             enable_stack_frame_gaps: true,
-            instruction_meter_checkpoint_distance: 10000,
+            instruction_meter_checkpoint_distance: 1000,
             enable_instruction_meter: true,
-            enable_register_tracing: false,
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
             #[cfg(feature = "jit")]
@@ -170,9 +162,9 @@ impl Default for Config {
             #[cfg(feature = "jit")]
             sanitize_user_provided_values: true,
             optimize_rodata: true,
-            allow_memory_region_zero: true,
             aligned_memory_mapping: false,
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
+            aligned_region_size: ebpf::MM_REGION_SIZE as usize,
         }
     }
 }
@@ -574,21 +566,14 @@ impl<C: ContextObject> EncryptedHostAddressToEbpfVm<C> {
 
 #[cold]
 #[inline(never)]
-#[cfg(feature = "debugger")]
 fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
-    let debug_port = interpreter.vm.debug_port.clone();
-    if let Some(debug_port) = debug_port {
-        crate::debugger::execute(&mut interpreter, debug_port);
-    } else {
-        while interpreter.step() {}
+    #[cfg(feature = "debugger")]
+    if let Some(debug_port) = interpreter.vm.debug_port {
+        return crate::debugger::execute(&mut interpreter, debug_port);
     }
-}
 
-#[cold]
-#[inline(never)]
-#[cfg(not(feature = "debugger"))]
-fn run_interpreter<C: ContextObject>(mut interpreter: Interpreter<C>) {
     while interpreter.step() {}
+    interpreter.vm.registers[11] = interpreter.reg[11];
 }
 
 #[cfg(test)]

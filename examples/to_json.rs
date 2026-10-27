@@ -38,7 +38,7 @@ fn to_json(program: &[u8]) -> String {
     let analysis = Analysis::from_executable(&executable).unwrap();
 
     let mut json_insns = vec![];
-    for (pc, insn) in analysis.instructions.iter().enumerate() {
+    for insn in analysis.instructions.iter() {
         json_insns.push(object!(
             "opc"  => format!("{:#x}", insn.opc), // => insn.opc,
             "dst"  => format!("{:#x}", insn.dst), // => insn.dst,
@@ -54,7 +54,7 @@ fn to_json(program: &[u8]) -> String {
             "imm"  => format!("{:#x}", insn.imm as i32), // => insn.imm,
             "desc" => analysis.disassemble_instruction(
                 insn,
-                pc
+                insn.ptr
             ),
         ));
     }

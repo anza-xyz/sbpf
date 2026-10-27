@@ -10,7 +10,15 @@ use {consts::*, types::*};
 
 /// Maximum length of section name allowed.
 pub const SECTION_NAME_LENGTH_MAXIMUM: usize = 16;
+/// Maximum length of a symbol name resolved during relocation.
+///
+/// Changing this changes which ELFs load, so it is consensus relevant.
 const SYMBOL_NAME_LENGTH_MAXIMUM: usize = 64;
+/// Maximum length of a symbol name read for debug labels.
+///
+/// Only used when `enable_symbol_and_section_labels` is set, which no
+/// consensus critical caller does.
+pub const DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM: usize = u8::MAX as usize;
 
 /// Error definitions
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -507,13 +515,16 @@ impl<'a> Elf64<'a> {
     }
 
     /// Returns the name of the `st_name` symbol
+    ///
+    /// The static symbol table only feeds debug labels, so this allows longer
+    /// names than the limit relocation resolves symbols under.
     pub fn symbol_name(&self, st_name: Elf64Word) -> Result<&'a [u8], ElfParserError> {
         Self::get_string_in_section(
             self.elf_bytes,
             self.symbol_names_section_header
                 .ok_or(ElfParserError::NoStringTable)?,
             st_name,
-            SYMBOL_NAME_LENGTH_MAXIMUM,
+            DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM,
         )
     }
 
@@ -525,6 +536,9 @@ impl<'a> Elf64<'a> {
     }
 
     /// Returns the name of the `st_name` dynamic symbol
+    ///
+    /// Relocation resolves symbols through here, so the bound stays at
+    /// `SYMBOL_NAME_LENGTH_MAXIMUM`.
     pub fn dynamic_symbol_name(&self, st_name: Elf64Word) -> Result<&'a [u8], ElfParserError> {
         Self::get_string_in_section(
             self.elf_bytes,

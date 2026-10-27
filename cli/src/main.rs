@@ -87,7 +87,6 @@ fn main() {
         .get_matches();
 
     let loader = Arc::new(BuiltinProgram::new_loader(Config {
-        enable_register_tracing: matches.is_present("trace") || matches.is_present("profile"),
         enable_symbol_and_section_labels: true,
         ..Config::default()
     }));

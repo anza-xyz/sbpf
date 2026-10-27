@@ -16,7 +16,7 @@ pub enum FuzzedOp {
     Modulo(Arch, Source),
     BitXor(Arch, Source),
     Mov(Arch, Source),
-    SRS(Arch, Source),
+    Srs(Arch, Source),
     SwapBytes(Endian),
     Load(MemSize),
     LoadAbs(MemSize),
@@ -41,8 +41,8 @@ pub enum FuzzedOp {
 
 impl FuzzedOp {
     fn similarity(&self, other: &FuzzedOp) -> Option<u8> {
-        if std::mem::discriminant(self) == std::mem::discriminant(&other) {
-            if &self == &other {
+        if std::mem::discriminant(self) == std::mem::discriminant(other) {
+            if self == other {
                 Some(0)
             } else {
                 Some(8)
@@ -166,7 +166,7 @@ pub fn make_program(
                 .set_off(inst.off)
                 .set_imm(inst.imm)
                 .push(),
-            FuzzedOp::SRS(arch, src) => code
+            FuzzedOp::Srs(arch, src) => code
                 .signed_right_shift(src, arch)
                 .set_dst(inst.dst)
                 .set_src(inst.src)

@@ -6,7 +6,7 @@ use std::{
     ptr::NonNull,
 };
 
-use crate::memory_region::HostMemoryObject;
+use crate::memory_region::{HostBuffer, HostMemoryObject};
 
 /// Scalar types, aka "plain old data"
 pub trait Pod: Copy {}
@@ -190,22 +190,20 @@ impl<const ALIGN: usize, T: AsRef<[u8]>> From<T> for AlignedMemory<ALIGN> {
 }
 
 unsafe impl<const A: usize> HostMemoryObject for &AlignedMemory<A> {
-    const WRITABLE: bool = false;
-    fn host_address(self) -> usize {
-        self.mem.ptr.as_ptr().expose_provenance()
-    }
-    fn byte_length(&self) -> usize {
-        self.len()
+    fn host(self) -> HostBuffer {
+        HostBuffer::Immutable(std::ptr::slice_from_raw_parts(
+            self.mem.ptr.as_ptr(),
+            self.len(),
+        ))
     }
 }
 
 unsafe impl<const A: usize> HostMemoryObject for &mut AlignedMemory<A> {
-    const WRITABLE: bool = true;
-    fn host_address(self) -> usize {
-        self.mem.ptr.as_ptr().expose_provenance()
-    }
-    fn byte_length(&self) -> usize {
-        self.len()
+    fn host(self) -> HostBuffer {
+        HostBuffer::Mutable(std::ptr::slice_from_raw_parts_mut(
+            self.mem.ptr.as_ptr(),
+            self.len(),
+        ))
     }
 }
 
@@ -291,10 +289,9 @@ impl<const ALIGN: usize> AlignedVec<ALIGN> {
     }
 
     fn empty() -> Self {
+        let layout = Layout::from_size_align(0, ALIGN).expect("invalid layout");
         Self {
-            // Create a dangling pointer
-            // FIXME: Use `Layout::dangling_ptr` once Rust 1.95.0 is released
-            ptr: NonNull::new(ALIGN as *mut u8).expect("alignment may not be zero"),
+            ptr: layout.dangling_ptr(),
             length: 0,
             capacity: 0,
         }

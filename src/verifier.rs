@@ -12,7 +12,10 @@
 
 //! Verifies that the bytecode is valid for the given config.
 
-use crate::{ebpf, program::SBPFVersion, vm::Config};
+use crate::{
+    ebpf,
+    program::{FunctionRegistry, SBPFVersion},
+};
 use thiserror::Error;
 
 /// Error definitions
@@ -87,8 +90,11 @@ pub trait Verifier {
     ///   - Unknown instructions.
     ///   - Bad formed instruction.
     ///   - Unknown eBPF syscall index.
-    fn verify(prog: &[u8], config: &Config, sbpf_version: SBPFVersion)
-        -> Result<(), VerifierError>;
+    fn verify<T: Copy + PartialEq>(
+        prog: &[u8],
+        sbpf_version: SBPFVersion,
+        syscall_registry: &FunctionRegistry<T>,
+    ) -> Result<(), VerifierError>;
 }
 
 fn check_prog_len(prog: &[u8]) -> Result<(), VerifierError> {
@@ -219,7 +225,7 @@ pub struct RequisiteVerifier {}
 impl Verifier for RequisiteVerifier {
     /// Check the program against the verifier's rules
     #[rustfmt::skip]
-    fn verify(prog: &[u8], _config: &Config, sbpf_version: SBPFVersion) -> Result<(), VerifierError> {
+    fn verify<T>(prog: &[u8], sbpf_version: SBPFVersion, _syscall_registry: &FunctionRegistry<T>) -> Result<(), VerifierError> {
         check_prog_len(prog)?;
 
         let program_range = 0..prog.len() / ebpf::INSN_SIZE;
@@ -415,6 +421,51 @@ impl Verifier for RequisiteVerifier {
         // insn_ptr should now be equal to number of instructions.
         if insn_ptr != prog.len() / ebpf::INSN_SIZE {
             return Err(VerifierError::JumpOutOfCode(insn_ptr, insn_ptr));
+        }
+
+        Ok(())
+    }
+}
+
+/// Verifier to run locally when someone invokes `solana deploy` and the related commands
+#[derive(Debug)]
+pub struct LocalVerifier {}
+
+impl Verifier for LocalVerifier {
+    /// Check if an SBPFv3 program contain any problematic instruction
+    fn verify<T: Copy + PartialEq>(
+        prog: &[u8],
+        sbpf_version: SBPFVersion,
+        syscall_registry: &FunctionRegistry<T>,
+    ) -> Result<(), VerifierError> {
+        if sbpf_version < SBPFVersion::V3 {
+            // Nothing to check
+            return Ok(());
+        }
+
+        let mut insn_ptr: usize = 0;
+        while (insn_ptr + 1) * ebpf::INSN_SIZE <= prog.len() {
+            let insn = ebpf::get_insn(prog, insn_ptr);
+
+            match insn.opc {
+                ebpf::LD_DW_IMM => {
+                    insn_ptr += 1;
+                }
+
+                ebpf::CALL_IMM
+                    if insn.src == 0
+                        && syscall_registry.lookup_by_key(insn.imm as u32).is_none() =>
+                {
+                    return Err(VerifierError::InvalidSyscall(insn.imm as u32));
+                }
+                ebpf::CALL_IMM if insn.src == 1 && insn.imm == -1 => {
+                    return Err(VerifierError::InvalidFunction(insn_ptr));
+                }
+
+                _ => (),
+            }
+
+            insn_ptr += 1;
         }
 
         Ok(())

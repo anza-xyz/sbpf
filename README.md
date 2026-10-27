@@ -45,7 +45,7 @@ so it should work out of the box by adding it as a dependency in your
 
 ```toml
 [dependencies]
-solana-sbpf = "0.19.0"
+solana-sbpf = "0.26.0"
 ```
 
 You can also use the development version from this GitHub repository. This
@@ -94,7 +94,7 @@ Here are the steps to follow to run an SBPF:
 ## Developer
 
 ### Dependencies
-- rustc version 1.83 or higher
+- rustc version 1.95 or higher
 
 ### Build and test instructions
 - To build run `cargo build`

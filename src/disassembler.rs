@@ -110,6 +110,7 @@ fn jmp_reg_str(name: &str, insn: &ebpf::Insn, cfg_nodes: &BTreeMap<usize, CfgNod
 
 /// Disassemble an eBPF instruction
 #[rustfmt::skip]
+#[allow(clippy::needless_late_init)] // FIXME: convert to expect on rustc >= 1.98.0
 pub fn disassemble_instruction<C: ContextObject>(
     insn: &ebpf::Insn,
     pc: usize,
@@ -122,7 +123,7 @@ pub fn disassemble_instruction<C: ContextObject>(
     let desc;
     match insn.opc {
         // BPF_LD class
-        ebpf::LD_DW_IMM  => { name = "lddw"; desc = format!("{} r{:}, {:#x}", name, insn.dst, insn.imm); },
+        ebpf::LD_DW_IMM if !sbpf_version.disable_lddw() => { name = "lddw"; desc = format!("{} r{:}, {:#x}", name, insn.dst, insn.imm); },
 
         // BPF_LDX class
         ebpf::LD_B_REG  if !sbpf_version.move_memory_instruction_classes() => { name = "ldxb";  desc = ld_reg_str(name, insn); },
@@ -172,7 +173,7 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::MOV32_REG  => { name = "mov32";  desc = alu_reg_str(name, insn);  },
         ebpf::ARSH32_IMM => { name = "arsh32"; desc = alu_imm_str(name, insn);  },
         ebpf::ARSH32_REG => { name = "arsh32"; desc = alu_reg_str(name, insn);  },
-        ebpf::LE         => { name = "le";     desc = byteswap_str(name, insn); },
+        ebpf::LE         if !sbpf_version.disable_le() => { name = "le";     desc = byteswap_str(name, insn); },
         ebpf::BE         => { name = "be";     desc = byteswap_str(name, insn); },
 
         // BPF_ALU64_STORE class
@@ -209,7 +210,7 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::MOV64_REG  => { name = "mov64";  desc = alu_reg_str(name, insn); },
         ebpf::ARSH64_IMM => { name = "arsh64"; desc = alu_imm_str(name, insn); },
         ebpf::ARSH64_REG => { name = "arsh64"; desc = alu_reg_str(name, insn); },
-        ebpf::HOR64_IMM  => { name = "hor64"; desc = alu_imm_str(name, insn); },
+        ebpf::HOR64_IMM  if sbpf_version.disable_lddw() => { name = "hor64"; desc = alu_imm_str(name, insn); },
 
         // BPF_PQR class
         ebpf::LMUL32_IMM  if sbpf_version.enable_pqr() => { name = "lmul32"; desc = alu_imm_str(name, insn); },
@@ -260,7 +261,7 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::JSLT32_REG  if sbpf_version.enable_jmp32() => { name = "jslt32"; desc = jmp_reg_str(name, insn, cfg_nodes); },
         ebpf::JSLE32_IMM  if sbpf_version.enable_jmp32() => { name = "jsle32"; desc = jmp_imm_str(name, insn, cfg_nodes); },
         ebpf::JSLE32_REG  if sbpf_version.enable_jmp32() => { name = "jsle32"; desc = jmp_reg_str(name, insn, cfg_nodes); },
-        
+
         // BPF_JMP64 class
         ebpf::JA         => {
             name = "ja";
@@ -291,11 +292,22 @@ pub fn disassemble_instruction<C: ContextObject>(
         ebpf::JSLE64_REG   => { name = "jsle"; desc = jmp_reg_str(name, insn, cfg_nodes); },
         ebpf::CALL_IMM   => {
             let key = sbpf_version.calculate_call_imm_target_pc(pc, insn.imm);
+            let lookup_function = |key| function_registry.lookup_by_key(key).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
             let mut name = "call";
-            let mut function_name = function_registry.lookup_by_key(key).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
-            if (function_name.is_none() && !sbpf_version.static_syscalls()) || insn.src == 0 {
+            let mut function_name = None;
+            // External syscall
+            if !sbpf_version.static_syscalls() || insn.src == 0 {
                 name = "syscall";
                 function_name = loader.get_function_registry().lookup_by_key(insn.imm as u32).map(|(function_name, _)| String::from_utf8_lossy(function_name).to_string());
+            }
+            // Internal call
+            if sbpf_version.static_syscalls() {
+                if insn.src == 1 {
+                    function_name = lookup_function(key).or_else(|| cfg_nodes.get(&(key as usize)).map(|cfg_node| cfg_node.label.clone()));
+                }
+            } else if let Some(internal_function_name) = lookup_function(key) {
+                name = "call";
+                function_name = Some(internal_function_name);
             }
             desc = format!("{} {}", name, function_name.unwrap_or_else(|| format!("{}", insn.imm)));
         },

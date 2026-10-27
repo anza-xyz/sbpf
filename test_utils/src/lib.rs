@@ -53,16 +53,17 @@ impl ContextObject for TestContextObject {
     }
 
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping> {
-        ptr::NonNull::from_ref(&mut self.memory_mapping)
+        ptr::NonNull::from_ref(&self.memory_mapping)
     }
 }
 
 impl TestContextObject {
     /// Initialize with instruction meter
     pub fn new(remaining: u64) -> Self {
-        let mut new = TestContextObject::default();
-        new.remaining = remaining;
-        new
+        TestContextObject {
+            remaining,
+            ..Default::default()
+        }
     }
 }
 
@@ -78,6 +79,9 @@ pub fn compare_register_trace(
     }
     interpreter == jit
 }
+
+/// Convenience value to pass to the `test_interpreter_and_jit*` macros to indicate no input.
+pub const NO_INPUT: *const [u8] = std::ptr::slice_from_raw_parts(std::ptr::dangling(), 0);
 
 // Assembly code and data for tcp_sack testcases.
 
@@ -150,7 +154,7 @@ pub const TCP_SACK_ASM: &str = "
     mov r0, 0x1
     exit";
 
-pub const TCP_SACK_BIN: [u8; 360] = [
+pub static TCP_SACK_BIN: [u8; 360] = [
     0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
     0x71, 0x12, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, //
     0x71, 0x13, 0x0d, 0x00, 0x00, 0x00, 0x00, 0x00, //
@@ -198,7 +202,7 @@ pub const TCP_SACK_BIN: [u8; 360] = [
     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
 ];
 
-pub const TCP_SACK_MATCH: [u8; 78] = [
+pub static TCP_SACK_MATCH: [u8; 78] = [
     0x00, 0x26, 0x62, 0x2f, 0x47, 0x87, 0x00, 0x1d, //
     0x60, 0xb3, 0x01, 0x84, 0x08, 0x00, 0x45, 0x00, //
     0x00, 0x40, 0xa8, 0xde, 0x40, 0x00, 0x40, 0x06, //
@@ -211,7 +215,7 @@ pub const TCP_SACK_MATCH: [u8; 78] = [
     0xca, 0x28, 0xa3, 0xc4, 0xcf, 0xd0, //
 ];
 
-pub const TCP_SACK_NOMATCH: [u8; 66] = [
+pub static TCP_SACK_NOMATCH: [u8; 66] = [
     0x00, 0x26, 0x62, 0x2f, 0x47, 0x87, 0x00, 0x1d, //
     0x60, 0xb3, 0x01, 0x84, 0x08, 0x00, 0x45, 0x00, //
     0x00, 0x40, 0xa8, 0xde, 0x40, 0x00, 0x40, 0x06, //
@@ -246,7 +250,7 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
         MemoryRegion::new(&raw mut *heap.as_slice_mut(), ebpf::MM_HEAP_START),
     ]
     .into_iter()
-    .chain(additional_regions.into_iter())
+    .chain(additional_regions)
     .collect();
 
     Ok(unsafe {
@@ -299,7 +303,7 @@ macro_rules! assert_error {
 
 #[macro_export]
 macro_rules! test_interpreter_and_jit {
-    (override_budget => $override_budget:expr, $executable:expr, $mem:tt, $context_object:expr $(,)?) => {{
+    (override_budget => $override_budget:expr, $executable:expr, $mem:expr, $context_object:expr $(,)?) => {{
         let expected_instruction_count = $context_object.get_remaining();
         #[allow(unused_mut)]
         let mut context_object = $context_object;
@@ -309,9 +313,12 @@ macro_rules! test_interpreter_and_jit {
         }
         let original_budget = context_object.remaining;
         $executable.verify::<RequisiteVerifier>().unwrap();
-        let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter) = {
-            let mut mem: [u8; _] = $mem;
-            let mem_region = MemoryRegion::new(&raw mut mem, ebpf::MM_INPUT_START);
+        let host_buffer = solana_sbpf::memory_region::HostMemoryObject::host($mem);
+        let mut jit_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
+        let (interp_input_start, jit_input_start) = (ebpf::MM_INPUT_START, ebpf::MM_INPUT_START);
+
+        let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter, due_insn_count_interpreter) = {
+            let mem_region = MemoryRegion::new(host_buffer, ebpf::MM_INPUT_START);
             let mut call_frames = vec![
                 solana_sbpf::vm::CallFrame::default();
                 $executable.get_config().max_call_depth
@@ -325,7 +332,7 @@ macro_rules! test_interpreter_and_jit {
                 vec![mem_region],
                 None
             );
-            vm.registers[1] = ebpf::MM_INPUT_START;
+            vm.registers[1] = interp_input_start;
             let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
                 &$executable,
                 &mut $crate::solana_sbpf::vm::ExecutionMode::Interpreted,
@@ -336,6 +343,7 @@ macro_rules! test_interpreter_and_jit {
                 result_interpreter,
                 vm.registers[11],
                 vm.register_trace.clone(),
+                vm.due_insn_count,
             )
         };
         #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
@@ -343,8 +351,12 @@ macro_rules! test_interpreter_and_jit {
             context_object.remaining = original_budget;
             #[allow(unused_mut)]
             let compilation_result = $executable.jit_compile();
-            let mut mem: [u8; _] = $mem;
-            let mem_region = MemoryRegion::new(&raw mut mem, ebpf::MM_INPUT_START);
+            use solana_sbpf::memory_region::HostBuffer;
+            let mem = match host_buffer {
+                HostBuffer::Immutable(_) => HostBuffer::Immutable(&raw const jit_input_mem[..]),
+                HostBuffer::Mutable(_) => HostBuffer::Mutable(&raw mut jit_input_mem[..]),
+            };
+            let mem_region = MemoryRegion::new(mem, ebpf::MM_INPUT_START);
             create_vm!(
                 vm,
                 &$executable,
@@ -357,12 +369,13 @@ macro_rules! test_interpreter_and_jit {
             match compilation_result {
                 Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
-                    vm.registers[1] = ebpf::MM_INPUT_START;
+                    vm.registers[1] = jit_input_start;
                     let (instruction_count_jit, result_jit) = vm.execute_program(
                         &$executable,
                         &mut $crate::solana_sbpf::vm::ExecutionMode::Jit,
                         &mut []
                     );
+
                     let trace_jit = &vm.register_trace;
                     let mut diverged = false;
                     if format!("{:?}", result_interpreter) != format!("{:?}", result_jit) {
@@ -379,12 +392,29 @@ macro_rules! test_interpreter_and_jit {
                         );
                         diverged = true;
                     }
+                    if vm.due_insn_count != due_insn_count_interpreter {
+                        println!(
+                            "due_insn_count of interpreter ({}) and JIT ({}) diverged",
+                            due_insn_count_interpreter, vm.due_insn_count,
+                        );
+                        diverged = true;
+                    }
                     if interpreter_final_pc != vm.registers[11] {
                         println!(
                             "Final PC of interpreter ({:?}) and JIT ({:?}) result diverged",
                             interpreter_final_pc, vm.registers[11],
                         );
                         diverged = true;
+                    }
+                    unsafe {
+                        let input_after_interp = host_buffer.ptr().as_ref().unwrap();
+                        if input_after_interp != jit_input_mem {
+                            println!(
+                                "input memory buffer is different: interp({:x?}), jit({:x?})",
+                                input_after_interp, jit_input_mem,
+                            );
+                            diverged = true;
+                        }
                     }
                     if !compare_register_trace(&_trace_interpreter, trace_jit) {
                         let analysis = Analysis::from_executable(&$executable).unwrap();
@@ -412,7 +442,7 @@ macro_rules! test_interpreter_and_jit {
         }
         result_interpreter
     }};
-    ($executable:expr, $mem:tt, $context_object:expr, $expected_result:expr $(,)?) => {
+    ($executable:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
         let expected_result = $expected_result;
         let result = test_interpreter_and_jit!(
             override_budget => false,
@@ -440,11 +470,7 @@ macro_rules! test_interpreter_and_jit_asm {
     ($source:expr, $config:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
         #[allow(unused_mut)]
         {
-            let config = Config {
-                enable_register_tracing: true,
-                ..$config
-            };
-            let loader = Arc::new(BuiltinProgram::new_loader(config));
+            let loader = Arc::new(BuiltinProgram::new_loader($config));
             let mut executable = assemble($source, loader).unwrap();
             test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
         }
@@ -469,10 +495,7 @@ macro_rules! test_syscall_asm {
         let _ = <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        let mut config = Config {
-            enable_register_tracing: true,
-            ..Config::default()
-        };
+        let mut config = Config::default();
         for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
             config.enabled_sbpf_versions = sbpf_version..=sbpf_version;
             let mut loader = BuiltinProgram::new_loader(config.clone());
@@ -501,10 +524,6 @@ macro_rules! test_interpreter_and_jit_elf {
         }
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
-        let config = Config {
-            enable_register_tracing: true,
-            ..Config::default()
-        };
-        test_interpreter_and_jit_elf!($source, config, $mem, ($($syscall_name => $syscall_function),*), $context_object, $expected_result);
+        test_interpreter_and_jit_elf!($source, Config::default(), $mem, ($($syscall_name => $syscall_function),*), $context_object, $expected_result);
     };
 }

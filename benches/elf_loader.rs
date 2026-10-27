@@ -4,19 +4,16 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
-#![feature(test)]
-
 extern crate solana_sbpf;
-extern crate test;
 extern crate test_utils;
 
+use criterion::{criterion_group, criterion_main, Criterion};
 use solana_sbpf::{
     elf::Executable,
     program::{BuiltinFunctionDefinition, BuiltinProgram},
     vm::Config,
 };
 use std::{fs::File, io::Read, sync::Arc};
-use test::Bencher;
 use test_utils::{syscalls, TestContextObject};
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
@@ -25,11 +22,15 @@ fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
     Arc::new(loader)
 }
 
-#[bench]
-fn bench_load_sbpfv0(bencher: &mut Bencher) {
+fn bench_load_sbpfv0(c: &mut Criterion) {
     let mut file = File::open("tests/elfs/syscall_reloc_64_32_sbpfv0.so").unwrap();
     let mut elf = Vec::new();
     file.read_to_end(&mut elf).unwrap();
     let loader = loader();
-    bencher.iter(|| Executable::<TestContextObject>::from_elf(&elf, loader.clone()).unwrap());
+    c.bench_function("bench_load_sbpfv0", |b| {
+        b.iter(|| Executable::<TestContextObject>::from_elf(&elf, loader.clone()).unwrap())
+    });
 }
+
+criterion_group!(benches, bench_load_sbpfv0);
+criterion_main!(benches);

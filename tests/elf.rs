@@ -7,7 +7,7 @@ use solana_sbpf::{
     elf_parser::{
         consts::{ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFOSABI_NONE, EM_BPF, ET_REL},
         types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr},
-        Elf64, ElfParserError, SECTION_NAME_LENGTH_MAXIMUM,
+        Elf64, ElfParserError, DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM, SECTION_NAME_LENGTH_MAXIMUM,
     },
     memory_region::{AccessType, MemoryMapping},
     program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
@@ -259,6 +259,45 @@ fn test_entrypoint() {
     assert_eq!(4, executable.get_entrypoint_instruction_offset());
 }
 
+#[test]
+fn test_text_section_at_region_boundary() {
+    let mut elf_bytes =
+        std::fs::read("tests/elfs/relative_call_sbpfv0.so").expect("failed to read elf file");
+
+    let (shdr_offset, mut shdr, e_entry) = {
+        let elf = Elf64::parse(&elf_bytes).unwrap();
+        let header = elf.file_header();
+        let (index, section) = elf
+            .section_header_table()
+            .iter()
+            .enumerate()
+            .find(|(_, section)| elf.section_name(section.sh_name).ok() == Some(&b".text"[..]))
+            .unwrap();
+        (
+            header.e_shoff as usize + index * header.e_shentsize as usize,
+            section.clone(),
+            header.e_entry,
+        )
+    };
+
+    let new_e_entry = ebpf::MM_REGION_SIZE + (e_entry - shdr.sh_addr);
+    shdr.sh_addr = ebpf::MM_REGION_SIZE;
+    unsafe {
+        std::ptr::write_unaligned(
+            elf_bytes.as_mut_ptr().add(shdr_offset).cast::<Elf64Shdr>(),
+            shdr,
+        );
+        let mut header = Elf64::parse(&elf_bytes).unwrap().file_header().clone();
+        header.e_entry = new_e_entry;
+        std::ptr::write(elf_bytes.as_mut_ptr().cast::<Elf64Ehdr>(), header);
+    }
+
+    assert!(matches!(
+        ElfExecutable::load(&elf_bytes, loader()),
+        Err(ElfError::ValueOutOfBounds)
+    ));
+}
+
 fn new_section(sh_addr: u64, sh_size: u64) -> Elf64Shdr {
     Elf64Shdr {
         sh_addr,
@@ -381,8 +420,10 @@ fn test_owned_ro_region_no_initial_gap() {
                 ebpf::MM_REGION_SIZE,
                 s3.sh_addr + s3.sh_size
             )
-            .unwrap(),
-        owned_section.as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        owned_section.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -433,8 +474,10 @@ fn test_owned_ro_region_initial_gap_mappable() {
                 ebpf::MM_REGION_SIZE,
                 s3.sh_addr + s3.sh_size
             )
-            .unwrap(),
-        owned_section.as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        owned_section.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -491,8 +534,10 @@ fn test_owned_ro_region_initial_gap_map_error() {
                 ebpf::MM_REGION_SIZE + s1.sh_addr,
                 s3.sh_addr + s3.sh_size - s1.sh_addr
             )
-            .unwrap(),
-        owned_section.as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        owned_section.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -579,8 +624,10 @@ fn test_borrowed_ro_region_no_initial_gap() {
                 ebpf::MM_REGION_SIZE + s1.sh_offset,
                 s2.sh_offset + s2.sh_size
             )
-            .unwrap(),
-        elf_bytes.as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        elf_bytes.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -626,8 +673,10 @@ fn test_borrowed_ro_region_initial_gap() {
                 ebpf::MM_REGION_SIZE + s2.sh_offset,
                 s3.sh_offset + s3.sh_size - s2.sh_offset
             )
-            .unwrap(),
-        elf_bytes[s2.sh_offset as usize..].as_ptr() as u64,
+            .unwrap()
+            .ptr()
+            .addr(),
+        elf_bytes[s2.sh_offset as usize..].as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -705,5 +754,70 @@ fn test_long_section_name() {
             .get(0..SECTION_NAME_LENGTH_MAXIMUM)
             .unwrap(),
         SECTION_NAME_LENGTH_MAXIMUM
+    );
+}
+
+fn loader_with_labels() -> Arc<BuiltinProgram<TestContextObject>> {
+    let mut loader = BuiltinProgram::new_loader(Config {
+        enable_symbol_and_section_labels: true,
+        ..Config::default()
+    });
+    syscalls::SyscallString::register(&mut loader, "log").unwrap();
+    syscalls::SyscallU64::register(&mut loader, "log_64").unwrap();
+    Arc::new(loader)
+}
+
+/// Asserts that the label over `SYMBOL_NAME_LENGTH_MAXIMUM` is kept and the one
+/// over `DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM` is skipped.
+fn assert_label_lengths(executable: &ElfExecutable) {
+    let lengths: Vec<usize> = executable
+        .get_function_registry()
+        .iter()
+        .map(|(_key, (name, _pc))| name.len())
+        .collect();
+    assert!(lengths.iter().any(|length| *length > 64));
+    assert!(lengths
+        .iter()
+        .all(|length| *length <= DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM));
+}
+
+#[test]
+fn test_long_symbol_name_lenient() {
+    let elf_bytes = std::fs::read("tests/elfs/long_symbol_name_sbpfv0.so").unwrap();
+    let executable = ElfExecutable::load(&elf_bytes, loader_with_labels()).unwrap();
+    assert!(executable
+        .get_function_registry()
+        .lookup_by_name(b"entrypoint")
+        .is_some());
+    assert_label_lengths(&executable);
+}
+
+#[test]
+fn test_long_symbol_name_strict() {
+    let elf_bytes = std::fs::read("tests/elfs/long_symbol_name.so").unwrap();
+    let executable = ElfExecutable::load(&elf_bytes, loader_with_labels()).unwrap();
+    assert!(executable
+        .get_function_registry()
+        .lookup_by_name(b"entrypoint")
+        .is_some());
+    assert_label_lengths(&executable);
+}
+
+#[test]
+fn test_stripped_elf_labels() {
+    // elfs.sh strips this one, which leaves an empty .strtab without a .symtab.
+    let elf_bytes = std::fs::read("tests/elfs/relative_call.so").unwrap();
+    ElfExecutable::load(&elf_bytes, loader_with_labels()).unwrap();
+}
+
+#[test]
+fn test_long_dynamic_symbol_name() {
+    // Relocation resolves symbols by name, so its limit is consensus relevant
+    // and stays where it is.
+    let elf_bytes = std::fs::read("tests/elfs/long_dynamic_symbol_name_sbpfv0.so").unwrap();
+    assert_error!(ElfExecutable::load(&elf_bytes, loader()), "UnknownSymbol");
+    assert_error!(
+        ElfExecutable::load(&elf_bytes, loader_with_labels()),
+        "UnknownSymbol"
     );
 }

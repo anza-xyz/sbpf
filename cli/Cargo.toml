@@ -1,6 +1,6 @@
 [package]
 name = "sbpf_cli"
-version = "0.20.0"
+version = "0.26.0"
 description = "CLI to test and analyze eBPF programs"
 authors = ["Anza Maintainers <maintainers@anza.xyz>"]
 repository = "https://github.com/anza-xyz/sbpf"
@@ -9,6 +9,6 @@ keywords = ["BPF", "eBPF", "interpreter", "JIT"]
 edition = "2018"
 
 [dependencies]
-solana-sbpf = { path = "../", features = ["debugger"] }
+solana-sbpf = { path = "../", features = ["debugger", "tracer"] }
 test_utils = { path = "../test_utils/" }
 clap = "3.0.0-beta.2"
