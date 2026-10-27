@@ -6,8 +6,6 @@
 
 #![cfg_attr(target_os = "windows", allow(dead_code))]
 
-use crate::error::EbpfError;
-
 #[cfg(not(target_os = "windows"))]
 extern crate libc;
 #[cfg(not(target_os = "windows"))]
@@ -103,7 +101,12 @@ pub fn round_to_page_size(value: usize, page_size: usize) -> usize {
         .saturating_mul(page_size)
 }
 
-pub unsafe fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
+/// Maps `size_in_bytes` of fresh read-write memory.
+///
+/// # Panics
+///
+/// Panics if the underlying `mmap` / `VirtualAlloc` call fails.
+pub unsafe fn allocate_pages(size_in_bytes: usize) -> *mut u8 {
     let mut raw: *mut c_void = std::ptr::null_mut();
     #[cfg(not(target_os = "windows"))]
     libc_error_guard!(
@@ -123,10 +126,15 @@ pub unsafe fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError>
         winnt::MEM_RESERVE | winnt::MEM_COMMIT,
         winnt::PAGE_READWRITE,
     );
-    Ok(raw.cast::<u8>())
+    raw.cast::<u8>()
 }
 
-pub unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) -> Result<(), EbpfError> {
+/// Unmaps `size_in_bytes` of memory starting at `raw`.
+///
+/// # Panics
+///
+/// Panics if the underlying `munmap` / `VirtualFree` call fails.
+pub unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) {
     #[cfg(not(target_os = "windows"))]
     libc_error_guard!(munmap, raw.cast::<c_void>(), size_in_bytes);
     #[cfg(target_os = "windows")]
@@ -136,14 +144,15 @@ pub unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) -> Result<(), EbpfE
         size_in_bytes,
         winnt::MEM_RELEASE, // winnt::MEM_DECOMMIT
     );
-    Ok(())
 }
 
-pub unsafe fn protect_pages(
-    raw: *mut u8,
-    size_in_bytes: usize,
-    executable_flag: bool,
-) -> Result<(), EbpfError> {
+/// Makes `size_in_bytes` of memory starting at `raw` read-only, or read-execute
+/// when `executable_flag` is set.
+///
+/// # Panics
+///
+/// Panics if the underlying `mprotect` / `VirtualProtect` call fails.
+pub unsafe fn protect_pages(raw: *mut u8, size_in_bytes: usize, executable_flag: bool) {
     #[cfg(not(target_os = "windows"))]
     {
         libc_error_guard!(
@@ -173,5 +182,4 @@ pub unsafe fn protect_pages(
             ptr_old,
         );
     }
-    Ok(())
 }
