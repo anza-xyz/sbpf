@@ -812,6 +812,7 @@ impl MemoryMapping {
     }
 
     /// Map virtual memory to host memory.
+    #[inline(always)]
     pub fn map(
         &self,
         access_type: AccessType,
@@ -1036,6 +1037,8 @@ impl MemoryMapping {
         result
     }
 
+    #[cold]
+    #[inline(never)]
     fn generate_access_violation(
         &self,
         access_type: AccessType,
@@ -1052,6 +1055,8 @@ impl MemoryMapping {
 
     /// Like [`Self::generate_access_violation`], with `region` being what
     /// `find_region(vm_addr)` returns.
+    #[cold]
+    #[inline(never)]
     fn generate_access_violation_for(
         &self,
         region: Option<&MemoryRegion>,
