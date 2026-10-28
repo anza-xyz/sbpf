@@ -11,8 +11,6 @@ use std::ops::Range;
 use std::ptr::NonNull;
 use std::sync::{Arc, LazyLock, Mutex};
 
-use crate::error::EbpfError;
-
 #[cfg(not(target_os = "windows"))]
 extern crate libc;
 #[cfg(not(target_os = "windows"))]
@@ -62,7 +60,7 @@ impl FreeList {
     /// any particular contents.
     fn alloc(&self) -> Pages {
         let pages = { self.mem.lock().unwrap_or_else(|e| e.into_inner()).pop() };
-        let mut pages = pages.unwrap_or_else(|| Pages::new(self.size).expect("allocation failed"));
+        let mut pages = pages.unwrap_or_else(|| Pages::new(self.size));
         pages.pooled = true;
         pages
     }
@@ -83,9 +81,7 @@ impl FreeList {
 
         if self.size >= MADV_DONTNEED_THRESHOLD {
             // SAFETY: `madvise` has no soundness invariants with the arguments used here.
-            if let Err(e) = unsafe { madvise(pages.raw.as_ptr(), pages.len, Advice::DontNeed) } {
-                log::error!("FreeList: unable to advise returned allocation: {e}");
-            }
+            unsafe { madvise(pages.raw.as_ptr(), pages.len, Advice::DontNeed) };
         }
 
         self.mem
@@ -176,13 +172,17 @@ unsafe impl Sync for Pages {}
 
 impl Pages {
     /// Map `len` bytes of zeroed, read-write pages.
-    fn new(len: usize) -> Result<Self, EbpfError> {
-        let raw = allocate_pages(len)?;
-        Ok(Self {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the pages cannot be mapped.
+    fn new(len: usize) -> Self {
+        let raw = allocate_pages(len);
+        Self {
             raw: NonNull::new(raw).expect("mapped pages at a null address"),
             len,
             pooled: false,
-        })
+        }
     }
 }
 
@@ -197,18 +197,12 @@ impl Drop for Pages {
             // pages in a way that `permissions` do not allow.
             //
             // Evidence: `Pages` encapsulates the mapping, and read-write allows any access.
-            match unsafe { protect_pages(raw, self.len, PagePermissions::ReadWrite) } {
-                Ok(()) => {
-                    return ALLOCATOR.free(Pages {
-                        raw: self.raw,
-                        len: self.len,
-                        pooled: false,
-                    })
-                }
-                Err(error) => {
-                    log::error!("unable to return pages to the pool: {error}");
-                }
-            }
+            unsafe { protect_pages(raw, self.len, PagePermissions::ReadWrite) };
+            return ALLOCATOR.free(Pages {
+                raw: self.raw,
+                len: self.len,
+                pooled: false,
+            });
         }
         // SAFETY:
         //
@@ -218,9 +212,7 @@ impl Drop for Pages {
         //
         // Evidence: `Pages` encapsulates the mapping. Being inside `Drop` means the last use of
         // this type is over.
-        if let Err(error) = unsafe { free_pages(raw, self.len) } {
-            log::error!("unable to free pages: {error}");
-        }
+        unsafe { free_pages(raw, self.len) };
     }
 }
 
@@ -324,7 +316,11 @@ impl Mapping {
 
 impl<A> Mapping<A> {
     /// Set the permissions of the pages that hold the bytes of `self` to `B`.
-    pub(crate) fn protect<B: Access>(self) -> Result<Mapping<B>, EbpfError> {
+    ///
+    /// # Panics
+    ///
+    /// Panics if the permissions cannot be changed.
+    pub(crate) fn protect<B: Access>(self) -> Mapping<B> {
         if self.len != 0 {
             // SAFETY:
             //
@@ -338,14 +334,14 @@ impl<A> Mapping<A> {
             // are only accessed through the mapping returned, whose type says these permissions,
             // until it is dropped. Dropping the last part makes all pages read-write before they
             // are reused.
-            unsafe { protect_pages(self.ptr.as_ptr(), self.len, B::PERMISSIONS) }?;
+            unsafe { protect_pages(self.ptr.as_ptr(), self.len, B::PERMISSIONS) };
         }
-        Ok(Mapping {
+        Mapping {
             pages: self.pages,
             ptr: self.ptr,
             len: self.len,
             access: PhantomData,
-        })
+        }
     }
 
     /// Shorten `self` to `len` bytes, if it is longer, which makes the rest inaccessible.
@@ -434,7 +430,12 @@ macro_rules! libc_error_guard {
                 let errno = *libc::__errno();
                 #[cfg(target_os = "linux")]
                 let errno = *libc::__errno_location();
-                return Err(EbpfError::LibcInvocationFailed(stringify!($function), args, errno));
+                panic!(
+                    "Libc calling {} {:?} returned error code {}",
+                    stringify!($function),
+                    args,
+                    errno
+                );
             }
         }
     }};
@@ -453,7 +454,12 @@ macro_rules! winapi_error_guard {
         if !winapi_error_guard!(succeeded?, $function, $($arg),*) {
             let args = vec![$(format!("{:?}", $arg)),*];
             let errno = GetLastError();
-            return Err(EbpfError::LibcInvocationFailed(stringify!($function), args, errno as i32));
+            panic!(
+                "WinAPI calling {} {:?} returned error code {}",
+                stringify!($function),
+                args,
+                errno as i32,
+            );
         }
     }};
 }
@@ -480,7 +486,12 @@ pub(crate) fn round_to_page_size(value: usize, page_size: usize) -> usize {
         .saturating_mul(page_size)
 }
 
-fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
+/// Map `size_in_bytes` of zeroed, read-write pages.
+///
+/// # Panics
+///
+/// Panics if the underlying `mmap` / `madvise` / `VirtualAlloc` call fails.
+fn allocate_pages(size_in_bytes: usize) -> *mut u8 {
     unsafe {
         let mut raw: *mut c_void = std::ptr::null_mut();
         cfg_select! {
@@ -519,7 +530,7 @@ fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
                 );
             }
         }
-        Ok(raw.cast())
+        raw.cast()
     }
 }
 
@@ -530,17 +541,18 @@ fn allocate_pages(size_in_bytes: usize) -> Result<*mut u8, EbpfError> {
 /// - `raw` and `size_in_bytes` must be a mapping that [`allocate_pages`] created, which is not
 ///   freed already.
 /// - Nothing may access the allocation afterwards.
-unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) -> Result<(), EbpfError> {
+///
+/// # Panics
+///
+/// Panics if the underlying `munmap` / `VirtualFree` call fails.
+unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) {
     #[cfg(not(target_os = "windows"))]
     libc_error_guard!(munmap, raw.cast::<c_void>(), size_in_bytes);
+    // MEM_RELEASE frees the whole reservation `raw` starts and requires a size of zero.
     #[cfg(target_os = "windows")]
-    winapi_error_guard!(
-        VirtualFree,
-        raw.cast::<c_void>(),
-        size_in_bytes,
-        MEM_RELEASE,
-    );
-    Ok(())
+    let _ = size_in_bytes;
+    #[cfg(target_os = "windows")]
+    winapi_error_guard!(VirtualFree, raw.cast::<c_void>(), 0, MEM_RELEASE);
 }
 
 #[derive(Copy, Clone)]
@@ -558,11 +570,11 @@ pub(crate) enum PagePermissions {
 /// - Specified pages must be in a mapping that the caller owns.
 /// - While `permissions` apply, nothing may access these pages in a way that `permissions` do not
 ///   allow.
-unsafe fn protect_pages(
-    raw: *mut u8,
-    size_in_bytes: usize,
-    permissions: PagePermissions,
-) -> Result<(), EbpfError> {
+///
+/// # Panics
+///
+/// Panics if the underlying `mprotect` / `VirtualProtect` call fails.
+unsafe fn protect_pages(raw: *mut u8, size_in_bytes: usize, permissions: PagePermissions) {
     #[cfg(not(target_os = "windows"))]
     {
         let prot = match permissions {
@@ -589,7 +601,6 @@ unsafe fn protect_pages(
             ptr_old,
         );
     }
-    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -597,7 +608,12 @@ enum Advice {
     DontNeed,
 }
 
-unsafe fn madvise(raw: *mut u8, size_in_bytes: usize, advice: Advice) -> Result<(), EbpfError> {
+/// Give the OS `advice` about the pages containing the `size_in_bytes` bytes at `raw`.
+///
+/// # Panics
+///
+/// Panics if the underlying `madvise` / `VirtualAlloc` call fails.
+unsafe fn madvise(raw: *mut u8, size_in_bytes: usize, advice: Advice) {
     #[cfg(not(target_os = "windows"))]
     {
         let advice = match advice {
@@ -620,8 +636,6 @@ unsafe fn madvise(raw: *mut u8, size_in_bytes: usize, advice: Advice) -> Result<
             PAGE_READWRITE,
         );
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -631,7 +645,7 @@ mod tests {
 
     /// `len` bytes of zeroed pages, which are not pooled.
     fn new(len: usize) -> Mapping {
-        Mapping::whole(Pages::new(len).unwrap())
+        Mapping::whole(Pages::new(len))
     }
 
     #[test]
@@ -658,16 +672,16 @@ mod tests {
         assert_eq!(c.as_ptr(), start.wrapping_add(3 * page_size));
         assert!(empty.is_empty());
         a.copy_from_slice(&[1, 2, 3, 4]);
-        let a = a.protect::<Read>().unwrap();
-        let empty = empty.protect::<ReadExecute>().unwrap();
+        let a = a.protect::<Read>();
+        let empty = empty.protect::<ReadExecute>();
         c.fill(5);
         drop(b);
         assert_eq!(*a, [1, 2, 3, 4]);
         let Ok([c0, c1]) = c.split([0..0, 0..2]) else {
             unreachable!()
         };
-        let c1 = c1.protect::<ReadExecute>().unwrap();
-        let mut c1 = c1.protect::<ReadWrite>().unwrap();
+        let c1 = c1.protect::<ReadExecute>();
+        let mut c1 = c1.protect::<ReadWrite>();
         c1[1] = 6;
         assert_eq!(*c1, [5, 6]);
         assert_eq!(a.mapped_len(), 4 * page_size);
@@ -710,8 +724,8 @@ mod tests {
             let Ok([head, tail]) = mapping.split([0..1, BUCKET_MIN / 2..BUCKET_MIN]) else {
                 unreachable!()
             };
-            let head = head.protect::<Read>().unwrap();
-            let tail = tail.protect::<ReadExecute>().unwrap();
+            let head = head.protect::<Read>();
+            let tail = tail.protect::<ReadExecute>();
             assert_eq!(tail[BUCKET_MIN / 2 - 1], 0xcc);
             drop(tail);
             assert_eq!(*head, [0xcc]);

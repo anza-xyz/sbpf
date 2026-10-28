@@ -376,8 +376,8 @@ impl UnsealedJitProgram {
         text_section[used..code_size].fill(0xcc);
         text_section.truncate(used);
         Ok(JitProgram {
-            pc_section: pc_section.protect()?,
-            text_section: text_section.protect()?,
+            pc_section: pc_section.protect(),
+            text_section: text_section.protect(),
         })
     }
 }
