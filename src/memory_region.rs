@@ -820,8 +820,9 @@ impl MemoryMapping {
         len: u64,
     ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
-        match self.find_region(vm_addr) {
-            Some((_index, region))
+        let region = self.find_region(vm_addr).map(|(_index, region)| region);
+        match region {
+            Some(region)
                 if region.host_buffer().is_mutable() || access_type != AccessType::Store =>
             {
                 if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
@@ -830,7 +831,7 @@ impl MemoryMapping {
             }
             _ => (),
         }
-        StableResult::Err(self.generate_access_violation(access_type, vm_addr, len))
+        StableResult::Err(self.generate_access_violation_for(region, access_type, vm_addr, len))
     }
 
     /// Map virtual memory to host memory and potentially call the [AccessViolationHandler].
@@ -1037,24 +1038,6 @@ impl MemoryMapping {
         result
     }
 
-    #[cold]
-    #[inline(never)]
-    fn generate_access_violation(
-        &self,
-        access_type: AccessType,
-        vm_addr: u64,
-        len: u64,
-    ) -> EbpfError {
-        self.generate_access_violation_for(
-            self.find_region(vm_addr).map(|(_, region)| region),
-            access_type,
-            vm_addr,
-            len,
-        )
-    }
-
-    /// Like [`Self::generate_access_violation`], with `region` being what
-    /// `find_region(vm_addr)` returns.
     #[cold]
     #[inline(never)]
     fn generate_access_violation_for(
