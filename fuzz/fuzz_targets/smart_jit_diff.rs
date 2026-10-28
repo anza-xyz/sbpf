@@ -22,6 +22,7 @@ mod grammar_aware;
 #[derive(arbitrary::Arbitrary, Debug)]
 struct FuzzData {
     template: ConfigTemplate,
+    append_exit: bool,
     exit_dst: u8,
     exit_src: u8,
     exit_off: i16,
@@ -33,12 +34,14 @@ struct FuzzData {
 fuzz_target!(|data: FuzzData| {
     let sbpf_version = data.template.sbpf_version;
     let mut prog = make_program(&data.prog, sbpf_version);
-    prog.exit()
-        .set_dst(data.exit_dst)
-        .set_src(data.exit_src)
-        .set_off(data.exit_off)
-        .set_imm(data.exit_imm)
-        .push();
+    if data.append_exit {
+        prog.exit()
+            .set_dst(data.exit_dst)
+            .set_src(data.exit_src)
+            .set_off(data.exit_off)
+            .set_imm(data.exit_imm)
+            .push();
+    }
     let config = data.template.into();
     let function_registry = FunctionRegistry::default();
 
