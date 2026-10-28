@@ -548,13 +548,11 @@ fn allocate_pages(size_in_bytes: usize) -> *mut u8 {
 unsafe fn free_pages(raw: *mut u8, size_in_bytes: usize) {
     #[cfg(not(target_os = "windows"))]
     libc_error_guard!(munmap, raw.cast::<c_void>(), size_in_bytes);
+    // MEM_RELEASE frees the whole reservation `raw` starts and requires a size of zero.
     #[cfg(target_os = "windows")]
-    winapi_error_guard!(
-        VirtualFree,
-        raw.cast::<c_void>(),
-        size_in_bytes,
-        MEM_RELEASE,
-    );
+    let _ = size_in_bytes;
+    #[cfg(target_os = "windows")]
+    winapi_error_guard!(VirtualFree, raw.cast::<c_void>(), 0, MEM_RELEASE);
 }
 
 #[derive(Copy, Clone)]
