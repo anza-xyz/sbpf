@@ -7,14 +7,31 @@
 extern crate solana_sbpf;
 extern crate test_utils;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion};
+use criterion::{measurement::WallTime, Throughput};
 use solana_sbpf::{
-    elf::Executable,
-    program::{BuiltinFunctionDefinition, BuiltinProgram},
+    elf::{get_sbpf_version, Executable},
+    program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
     vm::Config,
 };
-use std::{fs::File, io::Read, sync::Arc};
+use std::{fs, sync::Arc};
 use test_utils::{syscalls, TestContextObject};
+
+/// The programs in `tests/elfs` that are built for both SBPFv0, as `{name}_sbpfv0.so`, and SBPFv3,
+/// as `{name}.so`.
+const ELFS: [&str; 11] = [
+    "large_rodata",
+    "long_symbol_name",
+    "many_functions",
+    "many_relocations",
+    "relative_call",
+    "reloc_64_64",
+    "reloc_64_relative",
+    "reloc_64_relative_data",
+    "rodata_section",
+    "straight_line",
+    "struct_func_pointer",
+];
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
     let mut loader = BuiltinProgram::new_loader(Config::default());
@@ -22,15 +39,38 @@ fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
     Arc::new(loader)
 }
 
-fn bench_load_sbpfv0(c: &mut Criterion) {
-    let mut file = File::open("tests/elfs/syscall_reloc_64_32_sbpfv0.so").unwrap();
-    let mut elf = Vec::new();
-    file.read_to_end(&mut elf).unwrap();
-    let loader = loader();
-    c.bench_function("bench_load_sbpfv0", |b| {
-        b.iter(|| Executable::<TestContextObject>::from_elf(&elf, loader.clone()).unwrap())
+/// Load `elf`, which is built for `version`, by ELF size.
+fn bench_load(
+    group: &mut BenchmarkGroup<WallTime>,
+    loader: &Arc<BuiltinProgram<TestContextObject>>,
+    name: &str,
+    version: SBPFVersion,
+    elf: &[u8],
+) {
+    assert_eq!(get_sbpf_version(elf).unwrap(), version);
+    group.throughput(Throughput::Bytes(elf.len() as u64));
+    let id = BenchmarkId::new(name, format!("{version:?}").to_lowercase());
+    group.bench_function(id, |b| {
+        b.iter(|| Executable::<TestContextObject>::from_elf(elf, loader.clone()).unwrap())
     });
 }
 
-criterion_group!(benches, bench_load_sbpfv0);
+/// The same programs on both loading paths: SBPFv0 is parsed leniently and relocated, and SBPFv3
+/// is parsed strictly, without relocations.
+fn bench_load_elfs(c: &mut Criterion) {
+    let loader = loader();
+    let mut group = c.benchmark_group("load");
+    for name in ELFS {
+        for (version, file) in [
+            (SBPFVersion::V0, format!("{name}_sbpfv0.so")),
+            (SBPFVersion::V3, format!("{name}.so")),
+        ] {
+            let elf = fs::read(format!("tests/elfs/{file}")).unwrap();
+            bench_load(&mut group, &loader, name, version, &elf);
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_load_elfs);
 criterion_main!(benches);
