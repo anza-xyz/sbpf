@@ -73,5 +73,9 @@ name = "memory_mapping"
 harness = false
 
 [[bench]]
+name = "verifier"
+harness = false
+
+[[bench]]
 name = "vm_execution"
 harness = false

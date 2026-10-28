@@ -8,6 +8,9 @@ TOOLCHAIN="$HOME"/.cache/solana/v1.52/platform-tools/
 CC_V0="$TOOLCHAIN/llvm/bin/clang -Werror -target sbf -O2 -fno-builtin -fPIC"
 CC_V3="$CC_V0 -mcpu=v3"
 
+AS_V0="$TOOLCHAIN/llvm/bin/clang -Werror -target sbf"
+AS_V3="$AS_V0 -mcpu=v3"
+
 RUST_COMMON="$TOOLCHAIN/rust/bin/rustc --crate-type lib -C panic=abort -C opt-level=2"
 RC_V0="$RUST_COMMON --target sbpf-solana-solana"
 RC_V3="$RUST_COMMON --target sbpfv3-solana-solana -C target_feature=+static-syscalls"
@@ -86,5 +89,33 @@ $LD_V0 -o long_dynamic_symbol_name_sbpfv0.so long_dynamic_symbol_name.o
 
 # $RC_V1 -o callx_unaligned.o callx_unaligned.rs
 # $LD_V1 -o callx_unaligned.so callx_unaligned.o
+
+$RC_V0 -o many_functions.o many_functions.rs
+$LD_V0 -s -o many_functions_sbpfv0.so many_functions.o
+
+$RC_V3 -o many_functions.o many_functions.rs
+$LD_V3 -x -o many_functions.so many_functions.o
+$OBJCOPY many_functions.so many_functions.so
+
+$RC_V0 -o many_relocations.o many_relocations.rs
+$LD_V0 -s -o many_relocations_sbpfv0.so many_relocations.o
+
+$RC_V3 -o many_relocations.o many_relocations.rs
+$LD_V3 -x -o many_relocations.so many_relocations.o
+$OBJCOPY many_relocations.so many_relocations.so
+
+$RC_V0 -o large_rodata.o large_rodata.rs
+$LD_V0 -s -o large_rodata_sbpfv0.so large_rodata.o
+
+$RC_V3 -o large_rodata.o large_rodata.rs
+$LD_V3 -x -o large_rodata.so large_rodata.o
+$OBJCOPY large_rodata.so large_rodata.so
+
+$AS_V0 -c -o straight_line.o straight_line.s
+$LD_V0 -s -o straight_line_sbpfv0.so straight_line.o
+
+$AS_V3 -c -o straight_line.o straight_line.s
+$LD_V3 -x -o straight_line.so straight_line.o
+$OBJCOPY straight_line.so straight_line.so
 
 rm *.o
