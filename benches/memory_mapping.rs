@@ -333,13 +333,15 @@ fn do_bench_mapping_operation(c: &mut Criterion, name: &str, op: MemoryOperation
             });
         }
         MemoryOperation::Load => {
-            let f: for<'a> fn(&'a mut _, _) -> _ = hint::black_box(MemoryMapping::load::<u64>);
+            let f: for<'a> fn(&'a mut _, _) -> _ =
+                hint::black_box(MemoryMapping::load_first_attempt::<u64>);
             c.bench_function(name, move |b| {
                 b.iter(|| f(&mut memory_mapping, hint::black_box(vm_addr)))
             });
         }
         MemoryOperation::Store(val) => {
-            let f: for<'a> fn(&'a mut _, _, _) -> _ = hint::black_box(MemoryMapping::store);
+            let f: for<'a> fn(&'a mut _, _, _) -> _ =
+                hint::black_box(MemoryMapping::store_first_attempt);
             c.bench_function(name, move |b| {
                 b.iter(|| {
                     f(

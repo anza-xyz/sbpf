@@ -151,8 +151,10 @@ const ANCHOR_CALL_UNSUPPORTED_INSTRUCTION: usize = 11;
 const ANCHOR_EXTERNAL_FUNCTION_CALL: usize = 12;
 const ANCHOR_INTERNAL_FUNCTION_CALL_PROLOGUE: usize = 13;
 const ANCHOR_INTERNAL_FUNCTION_CALL_REG: usize = 14;
-const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 21;
-const ANCHOR_COUNT: usize = 33; // Update me when adding or removing anchors
+const ANCHOR_LOAD_FIRST_ATTEMPT_SUCCESS: usize = 15;
+const ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS: usize = 16;
+const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 23;
+const ANCHOR_COUNT: usize = 35; // Update me when adding or removing anchors
 
 /// Mapping of guest to host registers
 pub const REGISTER_MAP: [X86Register; 11] = [
@@ -1561,6 +1563,14 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::pop(REGISTER_MAP[0]));
         self.emit_ins(X86Instruction::jump_reg(RSP, Some(X86IndirectAccess::OffsetIndexShift(-24, RSP, 0)))); // Tail call to host_target_address
 
+        self.set_anchor(ANCHOR_LOAD_FIRST_ATTEMPT_SUCCESS);
+        // unwrap() the result into REGISTER_SCRATCH
+        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_SCRATCH, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
+        // Fall through
+        self.set_anchor(ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS);
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // Pop into void
+        self.emit_ins(X86Instruction::return_near());
+
         // Translates a vm memory address to a host memory address
         let lower_key = self.immediate_value_key as i32 as i64;
         for (anchor_base, len) in &[
@@ -1579,10 +1589,24 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
             if *anchor_base == 0 { // AccessType::Load
                 let load = match len {
-                    1 => MemoryMapping::load::<u8> as *const u8 as i64,
-                    2 => MemoryMapping::load::<u16> as *const u8 as i64,
-                    4 => MemoryMapping::load::<u32> as *const u8 as i64,
-                    8 => MemoryMapping::load::<u64> as *const u8 as i64,
+                    1 => MemoryMapping::load_first_attempt::<u8> as *const u8 as i64,
+                    2 => MemoryMapping::load_first_attempt::<u16> as *const u8 as i64,
+                    4 => MemoryMapping::load_first_attempt::<u32> as *const u8 as i64,
+                    8 => MemoryMapping::load_first_attempt::<u64> as *const u8 as i64,
+                    _ => unreachable!()
+                };
+                self.emit_rust_call(Value::Constant64(load, false), &[
+                    Argument { index: 2, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
+                    Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
+                    Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
+                ], None);
+                self.emit_check_result_is_ok();
+                self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_LOAD_FIRST_ATTEMPT_SUCCESS, 6)));
+                let load = match len {
+                    1 => MemoryMapping::load_second_attempt::<u8> as *const u8 as i64,
+                    2 => MemoryMapping::load_second_attempt::<u16> as *const u8 as i64,
+                    4 => MemoryMapping::load_second_attempt::<u32> as *const u8 as i64,
+                    8 => MemoryMapping::load_second_attempt::<u64> as *const u8 as i64,
                     _ => unreachable!()
                 };
                 self.emit_rust_call(Value::Constant64(load, false), &[
@@ -1596,10 +1620,25 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(-80, RSP, 0))));
                 }
                 let store = match len {
-                    1 => MemoryMapping::store::<u8> as *const u8 as i64,
-                    2 => MemoryMapping::store::<u16> as *const u8 as i64,
-                    4 => MemoryMapping::store::<u32> as *const u8 as i64,
-                    8 => MemoryMapping::store::<u64> as *const u8 as i64,
+                    1 => MemoryMapping::store_first_attempt::<u8> as *const u8 as i64,
+                    2 => MemoryMapping::store_first_attempt::<u16> as *const u8 as i64,
+                    4 => MemoryMapping::store_first_attempt::<u32> as *const u8 as i64,
+                    8 => MemoryMapping::store_first_attempt::<u64> as *const u8 as i64,
+                    _ => unreachable!()
+                };
+                self.emit_rust_call(Value::Constant64(store, false), &[
+                    Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
+                    Argument { index: 2, value: Value::RegisterIndirect(RSP, -8, false) },
+                    Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
+                    Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
+                ], None);
+                self.emit_check_result_is_ok();
+                self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS, 6)));
+                let store = match len {
+                    1 => MemoryMapping::store_second_attempt::<u8> as *const u8 as i64,
+                    2 => MemoryMapping::store_second_attempt::<u16> as *const u8 as i64,
+                    4 => MemoryMapping::store_second_attempt::<u32> as *const u8 as i64,
+                    8 => MemoryMapping::store_second_attempt::<u64> as *const u8 as i64,
                     _ => unreachable!()
                 };
                 self.emit_rust_call(Value::Constant64(store, false), &[
