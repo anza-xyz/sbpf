@@ -566,15 +566,14 @@ where
     ) -> Result<u64, Self::Error>;
 
     /// The VM wrapper.
-    #[expect(clippy::arithmetic_side_effects)]
     fn vm(mut vm: EncryptedHostAddressToEbpfVm<C>, a: u64, b: u64, c: u64, d: u64, e: u64) {
         unsafe {
             // SAFETY: Sound under the stacked lifetimes model – we've only one `VmAddress`.
             vm.with_vm(|vm| {
                 let enable_insn_meter = vm.loader.get_config().enable_instruction_meter;
                 if enable_insn_meter {
-                    let used_cus = vm.previous_instruction_meter - vm.due_insn_count;
-                    vm.context().consume(used_cus);
+                    let due_insn_count = vm.due_insn_count;
+                    vm.context().consume(due_insn_count);
                 }
                 let converted_result: crate::error::ProgramResult =
                     Self::rust(vm.context(), a, b, c, d, e)
