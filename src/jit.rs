@@ -969,6 +969,68 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_profile_instruction_count(target_pc);
     }
 
+    /// Handes over the instruction meter to the VM
+    ///
+    /// with self-pc in REGISTER_SCRATCH.
+    pub fn emit_instruction_meter_to_vm(&mut self, pc: Value) {
+        if !self.config.enable_instruction_meter {
+            return;
+        }
+        // self.emit_profile_instruction_count(0);
+        // instruction_meter -= self.pc + 1;
+        match pc {
+            Value::Register(reg) => {
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, reg, None));
+                self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None));
+            },
+            Value::RegisterIndirect(reg, offset, _user_provided) => {
+                let indirect_access = if reg == RSP {
+                    X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)
+                } else {
+                    X86IndirectAccess::Offset(offset)
+                };
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, reg, Some(indirect_access)));
+                self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None));
+            },
+            _ => {
+                #[cfg(debug_assertions)]
+                unreachable!();
+            }
+        }
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter))))); // instruction_meter -= *PreviousInstructionMeter;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xf7, 3, REGISTER_INSTRUCTION_METER, 0, None)); // REGISTER_INSTRUCTION_METER = -REGISTER_INSTRUCTION_METER;
+        self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DueInsnCount)))); // *DueInsnCount = REGISTER_INSTRUCTION_METER;
+    }
+
+    /// Takes back the instruction meter from the VM
+    pub fn emit_instruction_meter_from_vm(&mut self, pc: Value) {
+        if !self.config.enable_instruction_meter {
+            return;
+        }
+        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_INSTRUCTION_METER, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter)))); // REGISTER_INSTRUCTION_METER = *PreviousInstructionMeter;
+        // self.emit_undo_profile_instruction_count(0);
+        // instruction_meter += self.pc + 1;
+        match pc {
+            Value::Register(reg) => {
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, reg, REGISTER_INSTRUCTION_METER, None));
+                self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None));
+            },
+            Value::RegisterIndirect(reg, offset, _user_provided) => {
+                let indirect_access = if reg == RSP {
+                    X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)
+                } else {
+                    X86IndirectAccess::Offset(offset)
+                };
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, reg, REGISTER_INSTRUCTION_METER, Some(indirect_access)));
+                self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None));
+            },
+            _ => {
+                #[cfg(debug_assertions)]
+                unreachable!();
+            }
+        }
+    }
+
     /// Calls an external Rust function
     pub fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<X86Register>) {
         let mut saved_registers = CALLER_SAVED_REGISTERS.to_vec();
@@ -1461,13 +1523,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.set_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL);
         if self.config.enable_instruction_meter {
             self.emit_validate_instruction_count(None);
-            // self.emit_profile_instruction_count(0);
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, REGISTER_SCRATCH, None)); // instruction_meter -= self.pc;
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter -= 1;
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter))))); // instruction_meter -= *PreviousInstructionMeter;
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xf7, 3, REGISTER_INSTRUCTION_METER, 0, None)); // REGISTER_INSTRUCTION_METER = -REGISTER_INSTRUCTION_METER;
-            self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DueInsnCount)))); // *DueInsnCount = REGISTER_INSTRUCTION_METER;
         }
+        self.emit_instruction_meter_to_vm(Value::Register(REGISTER_SCRATCH));
         self.emit_rust_call(Value::RegisterIndirect(RSP, 0x50, false), &[
             Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
             Argument { index: 4, value: Value::Register(ARGUMENT_REGISTERS[4]) },
@@ -1476,12 +1533,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[1]) },
             Argument { index: 0, value: Value::Register(REGISTER_PTR_TO_VM) },
         ], None);
-        if self.config.enable_instruction_meter {
-            self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_INSTRUCTION_METER, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter)))); // REGISTER_INSTRUCTION_METER = *PreviousInstructionMeter;
-            // self.emit_undo_profile_instruction_count(0);
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // instruction_meter += self.pc;
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // instruction_meter += 1;
-        }
+        self.emit_instruction_meter_from_vm(Value::Register(REGISTER_SCRATCH));
         // Test if result indicates that an error occured
         self.emit_check_result_is_ok();
         self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION_UNCHECKED, 6)));
