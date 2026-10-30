@@ -630,7 +630,6 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
     }
 
     fn dispatch_syscall(&mut self, function: BuiltinFunction<C>) -> &ProgramResult {
-        self.vm.due_insn_count = self.vm.previous_instruction_meter - self.vm.due_insn_count;
         self.vm.registers[0..6].copy_from_slice(&self.reg[0..6]);
         self.vm.invoke_function(function);
         self.vm.due_insn_count = 0;
