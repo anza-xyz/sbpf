@@ -6,6 +6,10 @@
 
 #![cfg_attr(target_os = "windows", allow(dead_code))]
 
+#[cfg(feature = "shuttle-test")]
+use shuttle::rand;
+
+use rand::{thread_rng, Rng};
 use std::marker::PhantomData;
 use std::ops::Range;
 use std::ptr::NonNull;
@@ -61,7 +65,7 @@ impl FreeList {
     fn alloc(&self) -> Pages {
         let pages = { self.mem.lock().unwrap_or_else(|e| e.into_inner()).pop() };
         let mut pages = pages.unwrap_or_else(|| Pages::new(self.size));
-        pages.pooled = true;
+        pages.origin = Origin::Pooled;
         pages
     }
 
@@ -161,8 +165,7 @@ static ALLOCATOR: LazyLock<BucketedFreeList> = LazyLock::new(BucketedFreeList::n
 struct Pages {
     raw: NonNull<u8>,
     len: usize,
-    /// Does this allocation return to [`ALLOCATOR`] when dropped?
-    pooled: bool,
+    origin: Origin,
 }
 
 // SAFETY: Proof by authority: `Pages` is roughly equivalent to a `Box<[u8]>`, which is `Send +
@@ -177,19 +180,55 @@ impl Pages {
     ///
     /// Panics if the pages cannot be mapped.
     fn new(len: usize) -> Self {
-        let raw = allocate_pages(len);
+        let raw = allocate_pages(len, std::ptr::null_mut());
         Self {
             raw: NonNull::new(raw).expect("mapped pages at a null address"),
             len,
-            pooled: false,
+            origin: Origin::Anonymous,
         }
+    }
+
+    /// Map `len` bytes of zeroed, read-write pages so that all addresses within the mapping fit
+    /// within `i32::MAX`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no such pages could be mapped.
+    fn new_sub2g(len: usize) -> Self {
+        const ALIGNMENT: usize = 64 * 1024;
+        const LOWEST: usize = 256 * 1024 * 1024;
+        const HIGHEST: usize = 2 * 1024 * 1024 * 1024;
+        const ATTEMPTS: usize = 64;
+
+        let slots = HIGHEST
+            .saturating_sub(LOWEST)
+            .checked_sub(len)
+            .map(|spare| spare.saturating_div(ALIGNMENT).saturating_add(1));
+        for _ in 0..slots.map_or(0, |_| ATTEMPTS) {
+            let slot = thread_rng().gen_range(0..slots.unwrap_or(1));
+            let hint = LOWEST.saturating_add(slot.saturating_mul(ALIGNMENT)) as *mut c_void;
+            let Some(raw) = NonNull::new(allocate_pages(len, hint)) else {
+                continue;
+            };
+            let pages = Self {
+                raw,
+                len,
+                origin: Origin::Anonymous,
+            };
+            // Without `MAP_FIXED` the address hint is only honored if the range is free. The
+            // allocated pages might be elsewhere.
+            if pages.raw.as_ptr() == hint.cast() {
+                return pages;
+            }
+        }
+        panic!("unable to map {} bytes below 2 GiB", len);
     }
 }
 
 impl Drop for Pages {
     fn drop(&mut self) {
         let raw = self.raw.as_ptr();
-        if self.pooled {
+        if self.origin == Origin::Pooled {
             // SAFETY:
             //
             // Contract from `protect_pages`: These pages must an allocation that the caller owns.
@@ -201,7 +240,7 @@ impl Drop for Pages {
             return ALLOCATOR.free(Pages {
                 raw: self.raw,
                 len: self.len,
-                pooled: false,
+                origin: Origin::Anonymous,
             });
         }
         // SAFETY:
@@ -214,6 +253,15 @@ impl Drop for Pages {
         // this type is over.
         unsafe { free_pages(raw, self.len) };
     }
+}
+
+/// How [`Pages`] were materialized.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Origin {
+    /// Anonymous memory.
+    Anonymous,
+    /// Memory from the pool [`ALLOCATOR`].
+    Pooled,
 }
 
 /// Access permissions of [`Mapping`].
@@ -267,6 +315,16 @@ impl Mapping {
     /// The data in allocated pages is can be arbitrary.
     pub(crate) fn pooled(len: usize) -> Self {
         Self::whole(ALLOCATOR.alloc(len))
+    }
+
+    /// Map `len` bytes of zeroed pages that end below 2 GiB.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no such pages could be mapped.
+    #[cfg_attr(not(all(test, not(target_os = "macos"))), expect(dead_code))]
+    pub(crate) fn sub2g(len: usize) -> Self {
+        Self::whole(Pages::new_sub2g(len))
     }
 
     /// All of the read-write `pages`.
@@ -488,14 +546,20 @@ pub(crate) fn round_to_page_size(value: usize, page_size: usize) -> usize {
 
 /// Map `size_in_bytes` of zeroed, read-write pages.
 ///
+/// The mapping is placed at `hint` if it is non-null and the range is free. Otherwise it is placed
+/// wherever the system prefers, or on Windows, null is returned instead.
+///
 /// # Panics
 ///
 /// Panics if the underlying `mmap` / `madvise` / `VirtualAlloc` call fails.
-fn allocate_pages(size_in_bytes: usize) -> *mut u8 {
+fn allocate_pages(size_in_bytes: usize, hint: *mut c_void) -> *mut u8 {
     unsafe {
-        let mut raw: *mut c_void = std::ptr::null_mut();
+        let mut raw: *mut c_void = hint;
         cfg_select! {
-            windows => {
+            windows => if !hint.is_null() {
+                // Unlike `mmap`, `VirtualAlloc` fails rather than relocating if `hint` is occupied.
+                raw = VirtualAlloc(hint, size_in_bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+            } else {
                 winapi_error_guard!(
                     VirtualAlloc,
                     &mut raw,
@@ -712,6 +776,21 @@ mod tests {
     fn split_reversed() {
         let page_size = get_system_page_size();
         assert!(new(2 * page_size).split([page_size..1]).is_err());
+    }
+
+    // macOS reserves the first 4 GiB of the address space of 64-bit processes (`__PAGEZERO`), so
+    // there is nothing to map below 2 GiB.
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn low_mapping() {
+        let len = 2 * get_system_page_size();
+        let mut mapping = Mapping::sub2g(len);
+        let end = mapping.as_ptr_range().end as usize;
+        assert!(end <= 1 << 31, "{:#x}", end);
+        assert!(mapping.iter().all(|&byte| byte == 0));
+        mapping.fill(0xcc);
+        let mapping = mapping.protect::<ReadExecute>();
+        assert!(mapping.iter().all(|&byte| byte == 0xcc));
     }
 
     /// Pooled pages come back read-write from the pool, whatever they were made before.
