@@ -4652,6 +4652,55 @@ fn test_stack_gaps() {
     );
 }
 
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[test]
+fn test_jmp32_sbpfv0() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    // There is no JMP32 class in SBPFv0, which the verifier rejects, so the program is not
+    // verified.
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+        ..Config::default()
+    };
+    let program = [
+        [0xb7, 0x00, 0, 0, 0, 0, 0, 0], // mov64 r0, 0
+        [0xb7, 0x10, 0, 0, 1, 0, 0, 0], // mov64 r1, 1
+        [0x16, 0x01, 1, 0, 1, 0, 0, 0], // jeq32 r1, 1, +1
+        [0xb7, 0x00, 0, 0, 1, 0, 0, 0], // mov64 r0, 1
+        [0x95, 0, 0, 0, 0, 0, 0, 0],    // exit
+    ]
+    .concat();
+    let executable = Executable::<TestContextObject>::from_text_bytes(
+        &program,
+        Arc::new(BuiltinProgram::new_loader(config)),
+        SBPFVersion::V0,
+        FunctionRegistry::default(),
+    )
+    .unwrap();
+    executable.parrot_compile().unwrap();
+    for (name, mode) in [
+        ("interpreter", ExecutionMode::Interpreted),
+        ("parrot jit", ExecutionMode::Jit),
+        ("parrot interpreter", ExecutionMode::ParrotInterpreted),
+    ] {
+        let mut context_object = TestContextObject::new(10);
+        create_vm!(
+            vm,
+            &executable,
+            &mut context_object,
+            stack,
+            heap,
+            vec![],
+            None
+        );
+        let mut mode = mode;
+        let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+        let (_, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+        let expected = ProgramResult::Err(EbpfError::UnsupportedInstruction);
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "{name}");
+    }
+}
+
 #[test]
 fn test_lddw_exceeding_budget() {
     use solana_sbpf::vm::{CallFrame, ExecutionMode};
@@ -4687,12 +4736,13 @@ fn test_lddw_exceeding_budget() {
             )
             .unwrap();
             executable.verify::<RequisiteVerifier>().unwrap();
-            executable.jit_compile().unwrap();
+            executable.parrot_compile().unwrap();
             for budget in 0..5 {
                 let mut results = Vec::new();
                 for (name, mode) in [
                     ("interpreter", ExecutionMode::Interpreted),
-                    ("jit", ExecutionMode::Jit),
+                    ("parrot jit", ExecutionMode::Jit),
+                    ("parrot interpreter", ExecutionMode::ParrotInterpreted),
                 ] {
                     let mut context_object = TestContextObject::new(budget);
                     create_vm!(
@@ -4749,11 +4799,12 @@ fn test_entrypoint_in_lddw() {
     .unwrap();
     assert_eq!(executable.get_entrypoint_instruction_offset(), 1);
     executable.verify::<RequisiteVerifier>().unwrap();
-    executable.jit_compile().unwrap();
+    executable.parrot_compile().unwrap();
     let mut results = Vec::new();
     for (name, mode) in [
         ("interpreter", ExecutionMode::Interpreted),
-        ("jit", ExecutionMode::Jit),
+        ("parrot interpreter", ExecutionMode::ParrotInterpreted),
+        ("parrot jit", ExecutionMode::Jit),
     ] {
         let mut context_object = TestContextObject::new(10);
         create_vm!(
@@ -4775,6 +4826,53 @@ fn test_entrypoint_in_lddw() {
 
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
 #[test]
+fn test_parrot_compile_cached() {
+    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+        let executable = assemble::<TestContextObject>(
+            r#"
+            mov64 r0, 0
+            mov64 r1, 0
+            add64 r1, 1
+            call function_foo
+            jlt r1, 10, -3
+            exit
+            function_foo:
+            add64 r0, r1
+            exit
+            "#,
+            Arc::new(BuiltinProgram::new_loader(config)),
+        )
+        .unwrap();
+        executable.parrot_compile().unwrap();
+        let mut results = Vec::new();
+        for mode in [ExecutionMode::Interpreted, ExecutionMode::Jit] {
+            let mut context_object = TestContextObject::new(100);
+            create_vm!(
+                vm,
+                &executable,
+                &mut context_object,
+                stack,
+                heap,
+                vec![],
+                None
+            );
+            let mut mode = mode;
+            let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
+            let (count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+            results.push((count, format!("{result:?}")));
+        }
+        assert_eq!(results[0], results[1], "{sbpf_version:?}");
+        assert_eq!(results[0].1, format!("{:?}", ProgramResult::Ok(55)));
+    }
+}
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#[test]
 fn test_max_call_depth_zero() {
     use solana_sbpf::vm::{CallFrame, ExecutionMode};
     // FIXME: The interpreter panics.
@@ -4791,8 +4889,17 @@ fn test_max_call_depth_zero() {
         Arc::new(BuiltinProgram::new_loader(config)),
     )
     .unwrap();
-    executable.jit_compile().unwrap();
-    {
+    for (name, mode) in [
+        ("jit", ExecutionMode::Jit),
+        ("parrot jit", ExecutionMode::Jit),
+        ("parrot interpreter", ExecutionMode::ParrotInterpreted),
+    ] {
+        match name {
+            "jit" => executable.jit_compile().unwrap(),
+            "parrot jit" => executable.parrot_compile().unwrap(),
+            "parrot interpreter" => {}
+            _ => unreachable!(),
+        }
         let mut context_object = TestContextObject::new(10);
         create_vm!(
             vm,
@@ -4803,11 +4910,11 @@ fn test_max_call_depth_zero() {
             vec![],
             None
         );
+        let mut mode = mode;
         let mut call_frames = vec![CallFrame::default(); 1];
-        let (_, result) =
-            vm.execute_program(&executable, &mut ExecutionMode::Jit, &mut call_frames);
+        let (_, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
         let expected = ProgramResult::Err(EbpfError::CallDepthExceeded);
-        assert_eq!(format!("{result:?}"), format!("{expected:?}"));
-        assert_eq!(vm.registers[11], 0);
+        assert_eq!(format!("{result:?}"), format!("{expected:?}"), "{name}");
+        assert_eq!(vm.registers[11], 0, "{name}");
     }
 }

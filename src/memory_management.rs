@@ -322,7 +322,10 @@ impl Mapping {
     /// # Panics
     ///
     /// Panics if no such pages could be mapped.
-    #[cfg_attr(not(all(test, not(target_os = "macos"))), expect(dead_code))]
+    #[cfg_attr(
+        not(any(target_arch = "x86_64", all(test, not(target_os = "macos")))),
+        expect(dead_code)
+    )]
     pub(crate) fn sub2g(len: usize) -> Self {
         Self::whole(Pages::new_sub2g(len))
     }
