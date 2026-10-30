@@ -26,15 +26,15 @@ extern crate thiserror;
 
 use solana_sbpf::{
     assembler::assemble,
-    ebpf,
+    assert_error, create_vm, ebpf,
     elf::Executable,
     program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
+    test_syscalls,
+    test_utils::TestContextObject,
     verifier::{LocalVerifier, RequisiteVerifier, Verifier, VerifierError},
     vm::Config,
 };
 use std::sync::Arc;
-use test_utils::syscalls::SyscallU64;
-use test_utils::{assert_error, create_vm, syscalls, TestContextObject};
 use thiserror::Error;
 
 /// Error definitions
@@ -337,7 +337,7 @@ fn test_verifier_known_syscall() {
     ];
 
     let mut loader = BuiltinProgram::new_loader(Config::default());
-    syscalls::SyscallString::register(&mut loader, "gather_bytes").unwrap();
+    test_syscalls::SyscallString::register(&mut loader, "gather_bytes").unwrap();
     let executable = Executable::<TestContextObject>::from_text_bytes(
         prog,
         Arc::new(loader),
@@ -526,7 +526,7 @@ fn local_verifier_invalid_syscall() {
 #[test]
 fn local_verifier_valid_program() {
     let mut loader = BuiltinProgram::new_loader(Config::default());
-    SyscallU64::register(&mut loader, "log").unwrap();
+    test_syscalls::SyscallU64::register(&mut loader, "log").unwrap();
 
     let executable = assemble::<TestContextObject>(
         "add64 r10, 0

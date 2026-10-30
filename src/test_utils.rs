@@ -8,8 +8,7 @@
 
 #![allow(dead_code)]
 
-pub use solana_sbpf;
-use solana_sbpf::{
+use crate::{
     aligned_memory::AlignedMemory,
     ebpf::{self, HOST_ALIGN},
     elf::Executable,
@@ -20,8 +19,6 @@ use solana_sbpf::{
     vm::{Config, ContextObject},
 };
 use std::ptr;
-
-pub mod syscalls;
 
 /// Simple instruction meter for testing
 #[derive(Debug)]
@@ -275,7 +272,7 @@ macro_rules! create_vm {
         );
         let mut $heap = solana_sbpf::aligned_memory::AlignedMemory::with_capacity(0);
         let stack_len = $stack.len();
-        $context_object.memory_mapping = test_utils::create_memory_mapping(
+        $context_object.memory_mapping = solana_sbpf::test_utils::create_memory_mapping(
             $verified_executable,
             &mut $stack,
             &mut $heap,
@@ -335,7 +332,7 @@ macro_rules! test_interpreter_and_jit {
             vm.registers[1] = interp_input_start;
             let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
                 &$executable,
-                &mut $crate::solana_sbpf::vm::ExecutionMode::Interpreted,
+                &mut solana_sbpf::vm::ExecutionMode::Interpreted,
                 &mut call_frames,
             );
             (
@@ -372,7 +369,7 @@ macro_rules! test_interpreter_and_jit {
                     vm.registers[1] = jit_input_start;
                     let (instruction_count_jit, result_jit) = vm.execute_program(
                         &$executable,
-                        &mut $crate::solana_sbpf::vm::ExecutionMode::Jit,
+                        &mut solana_sbpf::vm::ExecutionMode::Jit,
                         &mut []
                     );
 

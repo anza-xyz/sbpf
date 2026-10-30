@@ -1,10 +1,13 @@
-use solana_sbpf::{ebpf, elf::Executable, program::SBPFVersion, static_analysis::Analysis};
 use solana_sbpf::{
+    ebpf,
+    elf::Executable,
+    program::SBPFVersion,
     program::{BuiltinProgram, FunctionRegistry},
+    static_analysis::Analysis,
     static_analysis::{DataResource, DfgEdgeKind, DfgNode},
+    test_utils::TestContextObject as Context,
 };
 use std::sync::Arc;
-use test_utils::TestContextObject as Context;
 
 fn insn(opc: u8, dst: u8, src: u8, off: i16, imm: i32) -> [u8; 8] {
     let mut bytes = [opc, dst | src << 4, 0, 0, 0, 0, 0, 0];

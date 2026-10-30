@@ -288,8 +288,7 @@ fn resolve_label(
 /// # Examples
 ///
 /// ```
-/// use solana_sbpf::{assembler::assemble, program::BuiltinProgram, vm::Config};
-/// use test_utils::TestContextObject;
+/// use solana_sbpf::{assembler::assemble, program::BuiltinProgram, vm::Config, test_utils::TestContextObject};
 /// let executable = assemble::<TestContextObject>(
 ///    "add64 r1, 0x605
 ///     mov64 r2, 0x32

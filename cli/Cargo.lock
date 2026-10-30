@@ -262,6 +262,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "qualifier_attr"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e2e25ee72f5b24d773cae88422baddefff7714f97aab68d96fe2b6fc4a28fb2"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.106",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -312,7 +323,6 @@ version = "0.26.0"
 dependencies = [
  "clap",
  "solana-sbpf",
- "test_utils",
 ]
 
 [[package]]
@@ -325,6 +335,7 @@ dependencies = [
  "hash32",
  "libc",
  "log",
+ "qualifier_attr",
  "rand",
  "rustc-demangle",
  "thiserror",
@@ -366,14 +377,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bb6bfa289a4d7c5766392812c0a1f4c1ba45afa1ad47803c11e1f407d846d75f"
 dependencies = [
  "winapi-util",
-]
-
-[[package]]
-name = "test_utils"
-version = "0.26.0"
-dependencies = [
- "libc",
- "solana-sbpf",
 ]
 
 [[package]]

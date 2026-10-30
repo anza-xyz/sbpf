@@ -13,15 +13,16 @@ use solana_sbpf::{
     },
     program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::CfgNode,
+    test_syscalls,
+    test_utils::TestContextObject,
     vm::Config,
 };
 use std::{collections::BTreeMap, sync::Arc};
-use test_utils::{syscalls, TestContextObject};
 
 fn create_mockup_executable(config: Config, program: &[u8]) -> Executable<TestContextObject> {
     let sbpf_version = *config.enabled_sbpf_versions.end();
     let mut loader = BuiltinProgram::new_loader(config);
-    syscalls::SyscallGatherBytes::register(&mut loader, "gather_bytes").unwrap();
+    test_syscalls::SyscallGatherBytes::register(&mut loader, "gather_bytes").unwrap();
     let mut function_registry = FunctionRegistry::default();
     function_registry
         .register_function(8, *b"function_foo", 8)

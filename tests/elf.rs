@@ -2,7 +2,7 @@
 
 use byteorder::{ByteOrder, LittleEndian};
 use solana_sbpf::{
-    ebpf,
+    assert_error, ebpf,
     elf::{get_ro_region, ElfError, Executable, Section},
     elf_parser::{
         consts::{ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFOSABI_NONE, EM_BPF, ET_REL},
@@ -11,17 +11,18 @@ use solana_sbpf::{
     },
     memory_region::{AccessType, MemoryMapping},
     program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
+    test_syscalls,
+    test_utils::TestContextObject,
     vm::Config,
 };
 use std::{fs::File, io::Read, sync::Arc};
-use test_utils::{assert_error, syscalls, TestContextObject};
 
 type ElfExecutable = Executable<TestContextObject>;
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
     let mut loader = BuiltinProgram::new_loader(Config::default());
-    syscalls::SyscallString::register(&mut loader, "log").unwrap();
-    syscalls::SyscallU64::register(&mut loader, "log_64").unwrap();
+    test_syscalls::SyscallString::register(&mut loader, "log").unwrap();
+    test_syscalls::SyscallU64::register(&mut loader, "log_64").unwrap();
     Arc::new(loader)
 }
 
@@ -762,8 +763,8 @@ fn loader_with_labels() -> Arc<BuiltinProgram<TestContextObject>> {
         enable_symbol_and_section_labels: true,
         ..Config::default()
     });
-    syscalls::SyscallString::register(&mut loader, "log").unwrap();
-    syscalls::SyscallU64::register(&mut loader, "log_64").unwrap();
+    test_syscalls::SyscallString::register(&mut loader, "log").unwrap();
+    test_syscalls::SyscallU64::register(&mut loader, "log_64").unwrap();
     Arc::new(loader)
 }
 

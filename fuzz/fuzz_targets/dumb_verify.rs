@@ -5,14 +5,14 @@ use std::hint::black_box;
 use libfuzzer_sys::fuzz_target;
 
 use solana_sbpf::{
-    ebpf,
+    create_vm, ebpf,
     elf::Executable,
     memory_region::MemoryRegion,
     program::{BuiltinProgram, FunctionRegistry},
+    test_utils::TestContextObject,
     verifier::{RequisiteVerifier, Verifier},
     vm::{CallFrame, ExecutionMode},
 };
-use test_utils::{create_vm, TestContextObject};
 
 use crate::common::ConfigTemplate;
 

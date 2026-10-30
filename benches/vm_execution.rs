@@ -9,15 +9,16 @@ extern crate solana_sbpf;
 use criterion::{criterion_group, criterion_main, Criterion};
 use solana_sbpf::{
     assembler::assemble,
-    ebpf,
+    create_vm, ebpf,
     elf::Executable,
     memory_region::MemoryRegion,
     program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
+    test_syscalls,
+    test_utils::TestContextObject,
     verifier::RequisiteVerifier,
     vm::{CallFrame, Config, ExecutionMode},
 };
 use std::{fs::File, io::Read, sync::Arc};
-use test_utils::{create_vm, syscalls, TestContextObject};
 
 fn bench_backends(
     c: &mut Criterion,
@@ -621,9 +622,9 @@ fn bench_syscalls(c: &mut Criterion) {
             &format!("syscalls/{name}"),
             &assembly,
             |loader| {
-                syscalls::SyscallGatherBytes::register(loader, "bpf_gather_bytes").unwrap();
-                syscalls::SyscallMemFrob::register(loader, "bpf_mem_frob").unwrap();
-                syscalls::SyscallStrCmp::register(loader, "bpf_str_cmp").unwrap();
+                test_syscalls::SyscallGatherBytes::register(loader, "bpf_gather_bytes").unwrap();
+                test_syscalls::SyscallMemFrob::register(loader, "bpf_mem_frob").unwrap();
+                test_syscalls::SyscallStrCmp::register(loader, "bpf_str_cmp").unwrap();
             },
             &mut mem,
         );

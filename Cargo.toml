@@ -57,7 +57,6 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 elf = "0.0.10"
 json = "0.12"
 rand = { version = "0.8.5", features = ["small_rng"] }
-test_utils = { path = "test_utils/" }
 
 [[bench]]
 name = "elf_loader"

@@ -4,15 +4,15 @@ use libfuzzer_sys::fuzz_target;
 
 use semantic_aware::*;
 use solana_sbpf::{
-    ebpf,
+    create_vm, ebpf,
     elf::Executable,
     insn_builder::IntoBytes,
     memory_region::MemoryRegion,
     program::{BuiltinProgram, FunctionRegistry},
+    test_utils::TestContextObject,
     verifier::{RequisiteVerifier, Verifier},
     vm::{CallFrame, ExecutionMode},
 };
-use test_utils::{create_vm, TestContextObject};
 
 use crate::common::ConfigTemplate;
 

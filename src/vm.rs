@@ -281,10 +281,10 @@ pub enum RuntimeEnvironmentSlot {
 ///     elf::Executable,
 ///     memory_region::{MemoryMapping, MemoryRegion},
 ///     program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+///     test_utils::TestContextObject,
 ///     verifier::RequisiteVerifier,
 ///     vm::{CallFrame, Config, EbpfVm, ExecutionMode},
 /// };
-/// use test_utils::TestContextObject;
 ///
 /// let prog = &[
 ///     0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // add64 r0, 0

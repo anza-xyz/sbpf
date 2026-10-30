@@ -10,13 +10,14 @@ extern crate solana_sbpf;
 mod x86_64 {
     use criterion::{criterion_group, Criterion, Throughput};
     use solana_sbpf::{
+        create_vm,
         elf::Executable,
         program::{BuiltinProgram, FunctionRegistry, SBPFVersion},
+        test_utils::TestContextObject,
         verifier::RequisiteVerifier,
         vm::Config,
     };
     use std::{fs::File, io::Read, sync::Arc};
-    use test_utils::{create_vm, TestContextObject};
 
     fn bench_init_vm(c: &mut Criterion) {
         let mut file = File::open("tests/elfs/relative_call_sbpfv0.so").unwrap();
