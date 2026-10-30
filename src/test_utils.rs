@@ -6,6 +6,8 @@
 // the MIT license <http://opensource.org/licenses/MIT>, at your option. This file may not be
 // copied, modified, or distributed except according to those terms.
 
+//! This module contains helpers for testing and benchmarking.
+
 #![allow(dead_code)]
 
 use crate::{
@@ -25,6 +27,7 @@ use std::ptr;
 pub struct TestContextObject {
     /// Maximal amount of instructions which still can be executed
     pub remaining: u64,
+    /// The memory mapping
     pub memory_mapping: MemoryMapping,
 }
 
@@ -82,6 +85,7 @@ pub const NO_INPUT: *const [u8] = std::ptr::slice_from_raw_parts(std::ptr::dangl
 
 // Assembly code and data for tcp_sack testcases.
 
+/// Test program which analyzes a network packet
 pub const PROG_TCP_PORT_80: &str = "
     add64 r10, 0
     ldxb r2, [r1+0xc]
@@ -104,6 +108,7 @@ pub const PROG_TCP_PORT_80: &str = "
     mov64 r0, 0x1
     exit";
 
+/// Test program which analyzes a network packet
 pub const TCP_SACK_ASM: &str = "
     add64 r10, 0
     ldxb r2, [r1+12]
@@ -151,6 +156,7 @@ pub const TCP_SACK_ASM: &str = "
     mov r0, 0x1
     exit";
 
+/// Test program which analyzes a network packet
 pub static TCP_SACK_BIN: [u8; 360] = [
     0x47, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
     0x71, 0x12, 0x0c, 0x00, 0x00, 0x00, 0x00, 0x00, //
@@ -199,6 +205,7 @@ pub static TCP_SACK_BIN: [u8; 360] = [
     0x95, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, //
 ];
 
+/// Test program which analyzes a network packet
 pub static TCP_SACK_MATCH: [u8; 78] = [
     0x00, 0x26, 0x62, 0x2f, 0x47, 0x87, 0x00, 0x1d, //
     0x60, 0xb3, 0x01, 0x84, 0x08, 0x00, 0x45, 0x00, //
@@ -212,6 +219,7 @@ pub static TCP_SACK_MATCH: [u8; 78] = [
     0xca, 0x28, 0xa3, 0xc4, 0xcf, 0xd0, //
 ];
 
+/// Test program which analyzes a network packet
 pub static TCP_SACK_NOMATCH: [u8; 66] = [
     0x00, 0x26, 0x62, 0x2f, 0x47, 0x87, 0x00, 0x1d, //
     0x60, 0xb3, 0x01, 0x84, 0x08, 0x00, 0x45, 0x00, //
@@ -224,6 +232,7 @@ pub static TCP_SACK_NOMATCH: [u8; 66] = [
     0x9e, 0x27, //
 ];
 
+/// Creates a mock-up MemoryMapping
 pub fn create_memory_mapping<'a, C: ContextObject>(
     executable: &'a Executable<C>,
     stack: &'a mut AlignedMemory<{ HOST_ALIGN }>,
@@ -264,6 +273,7 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
     })
 }
 
+/// Creates a mock-up EbpfVm
 #[macro_export]
 macro_rules! create_vm {
     ($vm_name:ident, $verified_executable:expr, $context_object:expr, $stack:ident, $heap:ident, $additional_regions:expr, $access_violation_handler:expr) => {
@@ -291,6 +301,7 @@ macro_rules! create_vm {
     };
 }
 
+/// Assert that a StableResult is Err
 #[macro_export]
 macro_rules! assert_error {
     ($result:expr, $($error:expr),+) => {
@@ -298,6 +309,7 @@ macro_rules! assert_error {
     }
 }
 
+/// Run and compare the interpreter vs JIT (with an Executable)
 #[macro_export]
 macro_rules! test_interpreter_and_jit {
     (override_budget => $override_budget:expr, $executable:expr, $mem:expr, $context_object:expr $(,)?) => {{
@@ -462,6 +474,7 @@ macro_rules! test_interpreter_and_jit {
     };
 }
 
+/// Run and compare the interpreter vs JIT (with an assembly program)
 #[macro_export]
 macro_rules! test_interpreter_and_jit_asm {
     ($source:expr, $config:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
@@ -486,6 +499,7 @@ macro_rules! test_interpreter_and_jit_asm {
     };
 }
 
+/// Run and compare the interpreter vs JIT (with syscalls and an assembly program)
 #[macro_export]
 macro_rules! test_syscall_asm {
     (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
@@ -503,6 +517,7 @@ macro_rules! test_syscall_asm {
     };
 }
 
+/// Run and compare the interpreter vs JIT (with and ELF program)
 #[macro_export]
 macro_rules! test_interpreter_and_jit_elf {
     (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
