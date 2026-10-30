@@ -41,6 +41,10 @@ mod memory_management;
 pub mod memory_region;
 pub mod program;
 pub mod static_analysis;
+#[cfg(feature = "dev-context-only-utils")]
+pub mod test_syscalls;
+#[cfg(feature = "dev-context-only-utils")]
+pub mod test_utils;
 pub mod verifier;
 pub mod vm;
 #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]

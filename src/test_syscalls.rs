@@ -21,8 +21,7 @@
 //! value. Hence some syscalls have unused arguments, or return a 0 value in all cases, in order to
 //! respect this convention.
 
-use crate::TestContextObject;
-use solana_sbpf::{declare_builtin_function, memory_region::AccessType};
+use crate::{declare_builtin_function, memory_region::AccessType, test_utils::TestContextObject};
 use std::str::from_utf8;
 
 declare_builtin_function!(

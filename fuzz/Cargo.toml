@@ -13,11 +13,10 @@ arbitrary = { version = "1.0", features = ["derive"] }
 libfuzzer-sys = "0.4"
 num-traits = "0.2"
 rayon = "1.5"
-test_utils = { path = "../test_utils/" }
 
 [dependencies.solana-sbpf]
 path = ".."
-features = ["fuzzer-not-safe-for-production"]
+features = ["fuzzer-not-safe-for-production", "dev-context-only-utils"]
 
 # Prevent this from interfering with workspaces
 [workspace]

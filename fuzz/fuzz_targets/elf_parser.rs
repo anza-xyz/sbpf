@@ -5,14 +5,14 @@ use libfuzzer_sys::fuzz_target;
 use std::sync::Arc;
 
 use solana_sbpf::{
-    ebpf,
+    create_vm, ebpf,
     elf::Executable,
     memory_region::MemoryRegion,
     program::BuiltinProgram,
+    test_utils::TestContextObject,
     verifier::RequisiteVerifier,
     vm::{CallFrame, ExecutionMode},
 };
-use test_utils::{create_vm, TestContextObject};
 
 fuzz_target!(|prog: &[u8]| {
     let config = solana_sbpf::vm::Config {

@@ -2,20 +2,20 @@
 
 use solana_sbpf::{
     program::{BuiltinFunctionDefinition, BuiltinProgram},
+    test_syscalls,
     vm::Config,
 };
-use test_utils::syscalls;
 
 #[test]
 fn test_builtin_program_eq() {
     let mut builtin_program_a = BuiltinProgram::new_loader(Config::default());
     let mut builtin_program_b = BuiltinProgram::new_loader(Config::default());
     let mut builtin_program_c = BuiltinProgram::new_loader(Config::default());
-    syscalls::SyscallString::register(&mut builtin_program_a, "log").unwrap();
-    syscalls::SyscallU64::register(&mut builtin_program_a, "log_64").unwrap();
-    syscalls::SyscallU64::register(&mut builtin_program_b, "log_64").unwrap();
-    syscalls::SyscallString::register(&mut builtin_program_b, "log").unwrap();
-    syscalls::SyscallU64::register(&mut builtin_program_c, "log_64").unwrap();
+    test_syscalls::SyscallString::register(&mut builtin_program_a, "log").unwrap();
+    test_syscalls::SyscallU64::register(&mut builtin_program_a, "log_64").unwrap();
+    test_syscalls::SyscallU64::register(&mut builtin_program_b, "log_64").unwrap();
+    test_syscalls::SyscallString::register(&mut builtin_program_b, "log").unwrap();
+    test_syscalls::SyscallU64::register(&mut builtin_program_c, "log_64").unwrap();
     assert_eq!(builtin_program_a, builtin_program_b);
     assert_ne!(builtin_program_a, builtin_program_c);
 }
@@ -24,14 +24,17 @@ fn test_builtin_program_eq() {
 #[test]
 fn test_gdbstub_architecture() {
     use byteorder::{ReadBytesExt, WriteBytesExt};
-    use solana_sbpf::elf::Executable;
-    use solana_sbpf::vm::{CallFrame, ExecutionMode};
+    use solana_sbpf::{
+        create_vm,
+        elf::Executable,
+        test_utils::TestContextObject,
+        vm::{CallFrame, ExecutionMode},
+    };
     use std::fs::File;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
     use std::time::Duration;
-    use test_utils::{create_vm, TestContextObject};
 
     const GDBSTUB_TEST_DEBUG_PORT: &str = "11212";
     const METADATA: &str = "6CSmiViMaAguKgxNVwU8TWMPViQbtL5KKoFrDwWwtYNR";
@@ -153,10 +156,14 @@ fn test_gdbstub_sbpfv3_pc_and_text() {
         conn::Connection,
         stub::{state_machine::GdbStubStateMachine, GdbStub},
     };
-    use solana_sbpf::{elf::Executable, interpreter::Interpreter, vm::CallFrame};
-    use std::convert::{Infallible, TryInto};
-    use std::sync::Arc;
-    use test_utils::{create_vm, TestContextObject};
+    use solana_sbpf::{
+        create_vm, elf::Executable, interpreter::Interpreter, test_utils::TestContextObject,
+        vm::CallFrame,
+    };
+    use std::{
+        convert::{Infallible, TryInto},
+        sync::Arc,
+    };
 
     struct TestConnection(Vec<u8>);
 

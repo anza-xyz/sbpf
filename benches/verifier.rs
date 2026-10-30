@@ -5,18 +5,18 @@
 // copied, modified, or distributed except according to those terms.
 
 extern crate solana_sbpf;
-extern crate test_utils;
 
 use criterion::{criterion_group, criterion_main, BenchmarkGroup, BenchmarkId, Criterion};
 use criterion::{measurement::WallTime, Throughput};
 use solana_sbpf::{
     elf::Executable,
     program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
+    test_syscalls,
+    test_utils::TestContextObject,
     verifier::RequisiteVerifier,
     vm::Config,
 };
 use std::{fs, sync::Arc};
-use test_utils::{syscalls, TestContextObject};
 
 /// The programs in `tests/elfs` that are built for both SBPFv0, as `{name}_sbpfv0.so`, and SBPFv3,
 /// as `{name}.so`.
@@ -36,7 +36,7 @@ const ELFS: [&str; 11] = [
 
 fn loader() -> Arc<BuiltinProgram<TestContextObject>> {
     let mut loader = BuiltinProgram::new_loader(Config::default());
-    syscalls::SyscallString::register(&mut loader, "log").unwrap();
+    test_syscalls::SyscallString::register(&mut loader, "log").unwrap();
     Arc::new(loader)
 }
 
