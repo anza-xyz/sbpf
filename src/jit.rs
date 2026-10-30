@@ -969,15 +969,15 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_profile_instruction_count(target_pc);
     }
 
-    /// Handes over the instruction meter to the VM
+    /// Hands over the instruction meter to the VM
     ///
     /// with self-pc in REGISTER_SCRATCH.
     pub fn emit_instruction_meter_to_vm(&mut self, pc: Value) {
         if !self.config.enable_instruction_meter {
             return;
         }
-        // self.emit_profile_instruction_count(0);
-        // instruction_meter -= self.pc + 1;
+        // The code below does: self.emit_profile_instruction_count(0);
+        // Which comes down to: instruction_meter -= self.pc + 1;
         match pc {
             Value::Register(reg) => {
                 self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2b, REGISTER_INSTRUCTION_METER, reg, None));
@@ -1008,8 +1008,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             return;
         }
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_INSTRUCTION_METER, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter)))); // REGISTER_INSTRUCTION_METER = *PreviousInstructionMeter;
-        // self.emit_undo_profile_instruction_count(0);
-        // instruction_meter += self.pc + 1;
+        // The code below does: self.emit_undo_profile_instruction_count(0);
+        // Which comes down to: instruction_meter += self.pc + 1;
         match pc {
             Value::Register(reg) => {
                 self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, reg, REGISTER_INSTRUCTION_METER, None));
@@ -1021,7 +1021,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 } else {
                     X86IndirectAccess::Offset(offset)
                 };
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, reg, REGISTER_INSTRUCTION_METER, Some(indirect_access)));
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_INSTRUCTION_METER, reg, Some(indirect_access)));
                 self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None));
             },
             _ => {
