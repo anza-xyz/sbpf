@@ -138,6 +138,28 @@ fn test_jeq() {
 }
 
 #[test]
+fn test_call_reg_field_per_sbpf_version() {
+    for &version in SBPFVersion::ALL {
+        let config = Config {
+            enabled_sbpf_versions: version..=version,
+            ..Config::default()
+        };
+        let expected = if version.callx_uses_src_reg() {
+            insn(0, ebpf::CALL_REG, 0, 3, 0, 0)
+        } else if version.callx_uses_dst_reg() {
+            insn(0, ebpf::CALL_REG, 3, 0, 0, 0)
+        } else {
+            insn(0, ebpf::CALL_REG, 0, 0, 0, 3)
+        };
+        assert_eq!(
+            asm_with_config("callx r3", config),
+            Ok(vec![expected]),
+            "callx encoding changed at {version:?}"
+        );
+    }
+}
+
+#[test]
 fn test_call_reg() {
     assert_eq!(
         asm("callx r3"),
