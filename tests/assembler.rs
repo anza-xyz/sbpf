@@ -137,14 +137,6 @@ fn test_jeq() {
     );
 }
 
-/// The register a `callx` reads lives in a different instruction field at each
-/// SBPF version: the immediate before V2, the source register at V2, and the
-/// destination register from V3 on, which is what SIMD-0377 changed.
-///
-/// Four places decide this independently — the assembler, the verifier, the
-/// interpreter and the JIT — and each spells the same three-way choice out by
-/// hand. Only the destination form was pinned by a test, so a change to one
-/// placement could leave the others disagreeing without anything failing.
 #[test]
 fn test_call_reg_field_per_sbpf_version() {
     for &version in SBPFVersion::ALL {

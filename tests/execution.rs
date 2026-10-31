@@ -2340,12 +2340,6 @@ fn test_callx() {
     );
 }
 
-/// `callx` reads its target from the source register at V2, where every other
-/// version uses the immediate (before V2) or the destination register (V3 on,
-/// per SIMD-0377). Four places decide that independently — the assembler, the
-/// verifier, the interpreter and the JIT — and `test_callx_imm` covers the
-/// immediate form at V0 while the default version covers the destination form,
-/// leaving the source form unexercised.
 #[test]
 fn test_callx_src_reg() {
     let config = Config {
