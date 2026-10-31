@@ -11,7 +11,6 @@
 extern crate byteorder;
 extern crate libc;
 extern crate solana_sbpf;
-extern crate test_utils;
 extern crate thiserror;
 
 use byteorder::{ByteOrder, LittleEndian};
@@ -19,21 +18,22 @@ use byteorder::{ByteOrder, LittleEndian};
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use solana_sbpf::{
     assembler::assemble,
-    declare_builtin_function, ebpf,
+    assert_error, create_vm, declare_builtin_function, ebpf,
     elf::Executable,
     error::{EbpfError, ProgramResult},
     memory_region::{AccessType, MemoryRegion},
     program::{BuiltinFunctionDefinition, BuiltinProgram, FunctionRegistry, SBPFVersion},
     static_analysis::Analysis,
+    test_interpreter_and_jit, test_interpreter_and_jit_asm, test_interpreter_and_jit_elf,
+    test_syscall_asm, test_syscalls,
+    test_utils::{
+        compare_register_trace, TestContextObject, NO_INPUT, PROG_TCP_PORT_80, TCP_SACK_ASM,
+        TCP_SACK_MATCH, TCP_SACK_NOMATCH,
+    },
     verifier::RequisiteVerifier,
     vm::{Config, ContextObject},
 };
 use std::{fs::File, io::Read, sync::Arc};
-use test_utils::{
-    assert_error, compare_register_trace, create_vm, syscalls, test_interpreter_and_jit,
-    test_interpreter_and_jit_asm, test_interpreter_and_jit_elf, test_syscall_asm,
-    TestContextObject, NO_INPUT, PROG_TCP_PORT_80, TCP_SACK_ASM, TCP_SACK_MATCH, TCP_SACK_NOMATCH,
-};
 
 // BPF_ALU32_LOAD : Arithmetic and Logic
 
@@ -1904,8 +1904,8 @@ fn test_stack2() {
         exit",
         NO_INPUT,
         (
-            "bpf_mem_frob" => syscalls::SyscallMemFrob,
-            "bpf_gather_bytes" => syscalls::SyscallGatherBytes,
+            "bpf_mem_frob" => test_syscalls::SyscallMemFrob,
+            "bpf_gather_bytes" => test_syscalls::SyscallGatherBytes,
         ),
         TestContextObject::new(17),
         ProgramResult::Ok(0x01020304),
@@ -1947,7 +1947,7 @@ fn test_string_stack() {
         exit",
         NO_INPUT,
         (
-            "bpf_str_cmp" => syscalls::SyscallStrCmp,
+            "bpf_str_cmp" => test_syscalls::SyscallStrCmp,
         ),
         TestContextObject::new(29),
         ProgramResult::Ok(0x0),
@@ -2312,7 +2312,7 @@ fn test_syscall_parameter_on_stack() {
         exit",
         NO_INPUT,
         (
-            "bpf_syscall_string" => syscalls::SyscallString,
+            "bpf_syscall_string" => test_syscalls::SyscallString,
         ),
         TestContextObject::new(7),
         ProgramResult::Ok(0),
@@ -2532,7 +2532,7 @@ fn test_err_reg_stack_depth() {
 
 // CALL_IMM : Syscalls
 
-/* TODO: syscalls::trash_registers needs asm!().
+/* TODO: test_syscalls::trash_registers needs asm!().
 // https://github.com/rust-lang/rust/issues/72016
 #[test]
 fn test_call_save() {
@@ -2551,7 +2551,7 @@ fn test_call_save() {
         exit",
         NO_INPUT,
         (
-            0 => syscalls::trash_registers,
+            0 => test_syscalls::trash_registers,
         ),
         { |_vm, res: ProgramResult| { res.unwrap() == 0 } }
     );
@@ -2569,7 +2569,7 @@ fn test_err_syscall_string() {
         exit",
         &raw const input,
         (
-            "bpf_syscall_string" => syscalls::SyscallString,
+            "bpf_syscall_string" => test_syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -2588,7 +2588,7 @@ fn test_syscall_string() {
         exit",
         &raw const input,
         (
-            "bpf_syscall_string" => syscalls::SyscallString,
+            "bpf_syscall_string" => test_syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -2610,7 +2610,7 @@ fn test_syscall() {
         exit",
         NO_INPUT,
         (
-            "bpf_syscall_u64" => syscalls::SyscallU64,
+            "bpf_syscall_u64" => test_syscalls::SyscallU64,
         ),
         TestContextObject::new(9),
         ProgramResult::Ok(0),
@@ -2756,7 +2756,7 @@ fn test_syscall_in_internal_call() {
         exit",
         NO_INPUT,
         (
-            "bpf_gather_bytes" => syscalls::SyscallGatherBytes,
+            "bpf_gather_bytes" => test_syscalls::SyscallGatherBytes,
         ),
         TestContextObject::new(10),
         ProgramResult::Ok(0x0102030406),
@@ -2795,7 +2795,7 @@ fn test_call_gather_bytes() {
         exit",
         NO_INPUT,
         (
-            "bpf_gather_bytes" => syscalls::SyscallGatherBytes,
+            "bpf_gather_bytes" => test_syscalls::SyscallGatherBytes,
         ),
         TestContextObject::new(8),
         ProgramResult::Ok(0x0102030405),
@@ -2817,7 +2817,7 @@ fn test_call_memfrob() {
         exit",
         &raw mut input,
         (
-            "bpf_mem_frob" => syscalls::SyscallMemFrob,
+            "bpf_mem_frob" => test_syscalls::SyscallMemFrob,
         ),
         TestContextObject::new(8),
         ProgramResult::Ok(0x102292e2f2c0708),
@@ -3018,7 +3018,7 @@ fn test_instruction_count_syscall() {
         exit",
         &raw const input,
         (
-            "bpf_syscall_string" => syscalls::SyscallString,
+            "bpf_syscall_string" => test_syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -3037,7 +3037,7 @@ fn test_err_instruction_count_syscall_capped() {
         exit",
         &raw const input,
         (
-            "bpf_syscall_string" => syscalls::SyscallString,
+            "bpf_syscall_string" => test_syscalls::SyscallString,
         ),
         TestContextObject::new(4),
         ProgramResult::Err(EbpfError::ExceededMaxInstructions),
@@ -3258,7 +3258,7 @@ fn test_syscall_static() {
         config,
         NO_INPUT,
         (
-            "log" => syscalls::SyscallString,
+            "log" => test_syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -3276,7 +3276,7 @@ fn test_syscall_reloc_64_32() {
         config,
         NO_INPUT,
         (
-            "log" => syscalls::SyscallString,
+            "log" => test_syscalls::SyscallString,
         ),
         TestContextObject::new(5),
         ProgramResult::Ok(0),
@@ -3813,7 +3813,7 @@ fn test_call_imm_does_not_dispatch_syscalls() {
         exit",
         NO_INPUT,
         (
-            "bpf_syscall_string" => syscalls::SyscallString,
+            "bpf_syscall_string" => test_syscalls::SyscallString,
         ),
         TestContextObject::new(6),
         ProgramResult::Ok(42),
@@ -4564,7 +4564,7 @@ fn test_symbol_relocation() {
         exit",
         &raw const input,
         (
-            "bpf_syscall_string" => syscalls::SyscallString,
+            "bpf_syscall_string" => test_syscalls::SyscallString,
         ),
         TestContextObject::new(7),
         ProgramResult::Ok(0),

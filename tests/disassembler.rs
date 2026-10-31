@@ -9,15 +9,18 @@
 // copied, modified, or distributed except according to those terms.
 
 extern crate solana_sbpf;
-use solana_sbpf::disassembler::disassemble_instruction;
-use solana_sbpf::ebpf::{self, Insn};
-use solana_sbpf::program::{FunctionRegistry, SBPFVersion};
 use solana_sbpf::{
-    assembler::assemble, program::BuiltinProgram, static_analysis::Analysis, vm::Config,
+    assembler::assemble,
+    disassembler::disassemble_instruction,
+    ebpf::{self, Insn},
+    program::BuiltinProgram,
+    program::{FunctionRegistry, SBPFVersion},
+    static_analysis::Analysis,
+    test_utils::TestContextObject,
+    vm::Config,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
-use test_utils::TestContextObject;
 
 // Using a macro to keep actual line numbers in failure output
 macro_rules! disasm {

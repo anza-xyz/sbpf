@@ -1126,8 +1126,8 @@ impl MappingCache {
 
 #[cfg(test)]
 mod test {
+    use crate::assert_error;
     use std::{cell::RefCell, rc::Rc};
-    use test_utils::assert_error;
 
     use super::*;
 
