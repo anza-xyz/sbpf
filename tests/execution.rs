@@ -2341,6 +2341,31 @@ fn test_callx() {
 }
 
 #[test]
+fn test_callx_src_reg() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V2..=SBPFVersion::V2,
+        ..Config::default()
+    };
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        mov64 r0, 0x0
+        mov64 r8, 0x1
+        lsh64 r8, 0x20
+        or64 r8, 0x38
+        callx r8
+        exit
+        function_foo:
+        mov64 r0, 0x2A
+        exit",
+        config,
+        NO_INPUT,
+        TestContextObject::new(9),
+        ProgramResult::Ok(42),
+    );
+}
+
+#[test]
 fn test_callx_unaligned_target() {
     // The target is truncated to the instruction containing it.
     test_interpreter_and_jit_asm!(
