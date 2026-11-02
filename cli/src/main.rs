@@ -7,11 +7,11 @@ use solana_sbpf::{
     memory_region::{MemoryMapping, MemoryRegion},
     program::BuiltinProgram,
     static_analysis::Analysis,
+    test_utils::TestContextObject,
     verifier::RequisiteVerifier,
     vm::{CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionMode},
 };
 use std::{fs::File, io::Read, path::Path, sync::Arc};
-use test_utils::TestContextObject;
 
 fn main() {
     let matches = App::new("Solana BPF CLI")
