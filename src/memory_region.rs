@@ -909,11 +909,12 @@ impl MemoryMapping {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         debug_assert!(self.initialized);
-        let ptr = match self.map(AccessType::Load, vm_addr, len) {
-            StableResult::Err(e) => return ProgramResult::Err(e),
-            StableResult::Ok(buf) => buf.ptr(),
-        };
-        ProgramResult::Ok(unsafe { ptr::read_unaligned::<T>(ptr.cast()).into() })
+        match self.map(AccessType::Load, vm_addr, len) {
+            StableResult::Err(e) => ProgramResult::Err(e),
+            StableResult::Ok(buf) => unsafe {
+                ProgramResult::Ok(ptr::read_unaligned::<T>(buf.ptr().cast()).into())
+            },
+        }
     }
 
     /// Stores `value` at the given guest address without invoking the access_violation_handler.
@@ -922,14 +923,13 @@ impl MemoryMapping {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         debug_assert!(self.initialized);
-        let ptr = match self.map(AccessType::Store, vm_addr, len) {
-            StableResult::Err(e) => return ProgramResult::Err(e),
-            StableResult::Ok(buf) => buf.ptr_mut(),
-        };
-        unsafe {
-            ptr::write_unaligned::<T>(ptr.cast(), value);
+        match self.map(AccessType::Store, vm_addr, len) {
+            StableResult::Err(e) => ProgramResult::Err(e),
+            StableResult::Ok(buf) => unsafe {
+                ptr::write_unaligned::<T>(buf.ptr_mut().cast(), value);
+                StableResult::Ok(0)
+            },
         }
-        StableResult::Ok(0)
     }
 
     /// Invokes access_violation_handler then loads `size_of::<T>()` bytes at the given guest address.
@@ -939,12 +939,12 @@ impl MemoryMapping {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         debug_assert!(self.initialized);
-        let ptr =
-            match self.invoke_access_violation_handler_then_map(AccessType::Load, vm_addr, len) {
-                StableResult::Err(e) => return ProgramResult::Err(e),
-                StableResult::Ok(buf) => buf.ptr(),
-            };
-        ProgramResult::Ok(unsafe { ptr::read_unaligned::<T>(ptr.cast()).into() })
+        match self.invoke_access_violation_handler_then_map(AccessType::Load, vm_addr, len) {
+            StableResult::Err(e) => ProgramResult::Err(e),
+            StableResult::Ok(buf) => unsafe {
+                ProgramResult::Ok(ptr::read_unaligned::<T>(buf.ptr().cast()).into())
+            },
+        }
     }
 
     /// Invokes access_violation_handler then stores `value` at the given guest address.
@@ -954,15 +954,13 @@ impl MemoryMapping {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         debug_assert!(self.initialized);
-        let ptr =
-            match self.invoke_access_violation_handler_then_map(AccessType::Store, vm_addr, len) {
-                StableResult::Err(e) => return ProgramResult::Err(e),
-                StableResult::Ok(buf) => buf.ptr_mut(),
-            };
-        unsafe {
-            ptr::write_unaligned::<T>(ptr.cast(), value);
+        match self.invoke_access_violation_handler_then_map(AccessType::Store, vm_addr, len) {
+            StableResult::Err(e) => ProgramResult::Err(e),
+            StableResult::Ok(buf) => unsafe {
+                ptr::write_unaligned::<T>(buf.ptr_mut().cast(), value);
+                StableResult::Ok(0)
+            },
         }
-        StableResult::Ok(0)
     }
 
     /// Returns the `MemoryRegion` which may contain the given address.
