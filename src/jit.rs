@@ -1704,9 +1704,9 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             }
 
             // Throw error if the result indicates one
-            self.emit_check_result_is_ok();
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 16, None)); // RSP += 16
             self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH)); // REGISTER_SCRATCH = pc
+            self.emit_check_result_is_ok();
             self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 6)));
 
             if *anchor_base == 0 { // AccessType::Load
