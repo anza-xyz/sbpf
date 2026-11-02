@@ -1198,7 +1198,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     /// Helper for load and store instructions
     pub fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
-        let value_stack_slot = X86IndirectAccess::OffsetIndexShift(-96-8, RSP, 0);
+        let value_stack_slot = X86IndirectAccess::OffsetIndexShift(-24, RSP, 0);
 
         match value {
             Some(Value::Register(reg)) => {
@@ -1671,7 +1671,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             } else { // AccessType::Store
                 if *anchor_base == 8 {
                     // Second half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
-                    self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(-80, RSP, 0))));
+                    self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0))));
                 }
                 let store = match len {
                     1 => MemoryMapping::store_first_attempt::<u8> as *const u8 as i64,
@@ -1682,7 +1682,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 };
                 self.emit_rust_call(Value::Constant64(store, false), &[
                     Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
-                    Argument { index: 2, value: Value::RegisterIndirect(RSP, -8, false) },
+                    Argument { index: 2, value: Value::RegisterIndirect(RSP, 72, false) },
                     Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                     Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
                 ], None);
@@ -1697,7 +1697,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 };
                 self.emit_rust_call(Value::Constant64(store, false), &[
                     Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
-                    Argument { index: 2, value: Value::RegisterIndirect(RSP, -8, false) },
+                    Argument { index: 2, value: Value::RegisterIndirect(RSP, 72, false) },
                     Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                     Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
                 ], None);
