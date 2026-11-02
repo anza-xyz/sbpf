@@ -1198,7 +1198,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     /// Helper for load and store instructions
     pub fn emit_address_translation(&mut self, dst: Option<X86Register>, vm_addr: Value, len: u64, value: Option<Value>) {
         debug_assert_ne!(dst.is_some(), value.is_some());
-        let value_stack_slot = X86IndirectAccess::OffsetIndexShift(-96, RSP, 0);
+        let value_stack_slot = X86IndirectAccess::OffsetIndexShift(-96-8, RSP, 0);
 
         match value {
             Some(Value::Register(reg)) => {
@@ -1622,7 +1622,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_SCRATCH, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
         // Fall through
         self.set_anchor(ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS);
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // Pop into void
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 16, None)); // Pop into void
         self.emit_ins(X86Instruction::return_near());
 
         // Translates a vm memory address to a host memory address
@@ -1638,8 +1638,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x3B, REGISTER_INSTRUCTION_METER, RSP, Some(X86IndirectAccess::OffsetIndexShift(-8, RSP, 0)))); // cmp REGISTER_INSTRUCTION_METER, pc (on rsp);
                 self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
             }
-            // skip over the pc slot pushed by the caller, we'll pop it before returning
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 8, None)); // RSP -= 8
+            // skip over the two slots pushed by the caller, we'll pop them before returning
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 16, None)); // RSP -= 16
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
             if *anchor_base == 0 { // AccessType::Load
                 let load = match len {
@@ -1705,6 +1705,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
             // Throw error if the result indicates one
             self.emit_check_result_is_ok();
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // Pop into void
             self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH)); // REGISTER_SCRATCH = pc
             self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 6)));
 
