@@ -1622,7 +1622,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_SCRATCH, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
         // Fall through
         self.set_anchor(ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS);
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 16, None)); // Pop into void
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 24, None)); // RSP += 24
         self.emit_ins(X86Instruction::return_near());
 
         // Translates a vm memory address to a host memory address
@@ -1639,7 +1639,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
             }
             // skip over the two slots pushed by the caller, we'll pop them before returning
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 16, None)); // RSP -= 16
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 24, None)); // RSP -= 24
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
             if *anchor_base == 0 { // AccessType::Load
                 let load = match len {
@@ -1671,7 +1671,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             } else { // AccessType::Store
                 if *anchor_base == 8 {
                     // Second half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
-                    self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(0, RSP, 0))));
+                    self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, lower_key, Some(X86IndirectAccess::OffsetIndexShift(8, RSP, 0))));
                 }
                 let store = match len {
                     1 => MemoryMapping::store_first_attempt::<u8> as *const u8 as i64,
@@ -1682,7 +1682,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 };
                 self.emit_rust_call(Value::Constant64(store, false), &[
                     Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
-                    Argument { index: 2, value: Value::RegisterIndirect(RSP, 72, false) },
+                    Argument { index: 2, value: Value::RegisterIndirect(RSP, 80, false) },
                     Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                     Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
                 ], None);
@@ -1697,7 +1697,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 };
                 self.emit_rust_call(Value::Constant64(store, false), &[
                     Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
-                    Argument { index: 2, value: Value::RegisterIndirect(RSP, 72, false) },
+                    Argument { index: 2, value: Value::RegisterIndirect(RSP, 80, false) },
                     Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                     Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
                 ], None);
@@ -1705,7 +1705,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
             // Throw error if the result indicates one
             self.emit_check_result_is_ok();
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8, None)); // Pop into void
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 16, None)); // RSP += 16
             self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH)); // REGISTER_SCRATCH = pc
             self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 6)));
 
