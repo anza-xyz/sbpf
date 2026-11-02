@@ -938,16 +938,27 @@ impl MemoryMapping {
     pub fn load_second_attempt<T: Pod + Into<u64>, C: ContextObject>(
         &mut self,
         vm_addr: u64,
-        mut _vm: EncryptedHostAddressToEbpfVm<C>,
-    ) -> ProgramResult {
-        let len = mem::size_of::<T>() as u64;
-        debug_assert!(len <= mem::size_of::<u64>() as u64);
-        debug_assert!(self.initialized);
-        match self.invoke_access_violation_handler_then_map(AccessType::Load, vm_addr, len) {
-            StableResult::Err(e) => ProgramResult::Err(e),
-            StableResult::Ok(buf) => unsafe {
-                ProgramResult::Ok(ptr::read_unaligned::<T>(buf.ptr().cast()).into())
-            },
+        mut vm: EncryptedHostAddressToEbpfVm<C>,
+    ) {
+        unsafe {
+            vm.with_vm(|vm| {
+                let due_insn_count = vm.due_insn_count;
+                vm.context().consume(due_insn_count);
+                let len = mem::size_of::<T>() as u64;
+                debug_assert!(len <= mem::size_of::<u64>() as u64);
+                debug_assert!(self.initialized);
+                vm.program_result = match self.invoke_access_violation_handler_then_map(
+                    AccessType::Load,
+                    vm_addr,
+                    len,
+                ) {
+                    StableResult::Err(e) => ProgramResult::Err(e),
+                    StableResult::Ok(buf) => {
+                        ProgramResult::Ok(ptr::read_unaligned::<T>(buf.ptr().cast()).into())
+                    }
+                };
+                vm.previous_instruction_meter = vm.context().get_remaining();
+            })
         }
     }
 
@@ -958,17 +969,28 @@ impl MemoryMapping {
         &mut self,
         value: T,
         vm_addr: u64,
-        mut _vm: EncryptedHostAddressToEbpfVm<C>,
-    ) -> ProgramResult {
-        let len = mem::size_of::<T>() as u64;
-        debug_assert!(len <= mem::size_of::<u64>() as u64);
-        debug_assert!(self.initialized);
-        match self.invoke_access_violation_handler_then_map(AccessType::Store, vm_addr, len) {
-            StableResult::Err(e) => ProgramResult::Err(e),
-            StableResult::Ok(buf) => unsafe {
-                ptr::write_unaligned::<T>(buf.ptr_mut().cast(), value);
-                StableResult::Ok(0)
-            },
+        mut vm: EncryptedHostAddressToEbpfVm<C>,
+    ) {
+        unsafe {
+            vm.with_vm(|vm| {
+                let due_insn_count = vm.due_insn_count;
+                vm.context().consume(due_insn_count);
+                let len = mem::size_of::<T>() as u64;
+                debug_assert!(len <= mem::size_of::<u64>() as u64);
+                debug_assert!(self.initialized);
+                vm.program_result = match self.invoke_access_violation_handler_then_map(
+                    AccessType::Store,
+                    vm_addr,
+                    len,
+                ) {
+                    StableResult::Err(e) => ProgramResult::Err(e),
+                    StableResult::Ok(buf) => {
+                        ptr::write_unaligned::<T>(buf.ptr_mut().cast(), value);
+                        StableResult::Ok(0)
+                    }
+                };
+                vm.previous_instruction_meter = vm.context().get_remaining();
+            })
         }
     }
 
@@ -2059,8 +2081,7 @@ mod test {
             );
             assert!(copied.borrow().is_empty());
 
-            m.store_second_attempt(33u8, ebpf::MM_REGION_SIZE, vm.encrypted_host_address())
-                .unwrap();
+            m.store_second_attempt(33u8, ebpf::MM_REGION_SIZE, vm.encrypted_host_address());
             assert_eq!(original[0], 11);
             assert_eq!(
                 m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE).unwrap(),
@@ -2117,8 +2138,7 @@ mod test {
                 0,
             );
 
-            m.store_second_attempt(55u8, ebpf::MM_REGION_SIZE, vm.encrypted_host_address())
-                .unwrap();
+            m.store_second_attempt(55u8, ebpf::MM_REGION_SIZE, vm.encrypted_host_address());
             assert_eq!(original1[0], 11);
             assert_eq!(
                 m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE).unwrap(),

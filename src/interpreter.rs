@@ -30,15 +30,17 @@ macro_rules! translate_memory_access {
             ProgramResult::Ok(v) => v,
             ProgramResult::Err(_err) => {
                 let encrypted_vm = $self.vm.encrypted_host_address();
-                match $self.vm.memory().$second_op::<$T, $C>(
+                $self.vm.memory().$second_op::<$T, $C>(
                     $($rest,)*
                     $vm_addr,
                     encrypted_vm,
-                ) {
-                    ProgramResult::Ok(v) => v,
-                    ProgramResult::Err(err) => {
-                        throw_error!($self, err);
-                    },
+                );
+                $self.vm.due_insn_count = 0;
+                if let ProgramResult::Ok(v) = &$self.vm.program_result {
+                    *v
+                } else {
+                    $self.vm.registers[11] = $self.reg[11];
+                    return false;
                 }
             },
         }
