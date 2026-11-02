@@ -277,12 +277,12 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
 #[macro_export]
 macro_rules! create_vm {
     ($vm_name:ident, $verified_executable:expr, $context_object:expr, $stack:ident, $heap:ident, $additional_regions:expr, $access_violation_handler:expr) => {
-        let mut $stack = solana_sbpf::aligned_memory::AlignedMemory::zero_filled(
+        let mut $stack = $crate::aligned_memory::AlignedMemory::zero_filled(
             $verified_executable.get_config().stack_size(),
         );
-        let mut $heap = solana_sbpf::aligned_memory::AlignedMemory::with_capacity(0);
+        let mut $heap = $crate::aligned_memory::AlignedMemory::with_capacity(0);
         let stack_len = $stack.len();
-        $context_object.memory_mapping = solana_sbpf::test_utils::create_memory_mapping(
+        $context_object.memory_mapping = $crate::test_utils::create_memory_mapping(
             $verified_executable,
             &mut $stack,
             &mut $heap,
@@ -291,13 +291,13 @@ macro_rules! create_vm {
         )
         .unwrap();
 
-        let mut $vm_name = solana_sbpf::vm::EbpfVm::new(
+        let mut $vm_name = $crate::vm::EbpfVm::new(
             $verified_executable.get_loader().clone(),
             $verified_executable.get_sbpf_version(),
             $context_object,
             stack_len,
         );
-        $vm_name.registers[1] = solana_sbpf::ebpf::MM_INPUT_START;
+        $vm_name.registers[1] = $crate::ebpf::MM_INPUT_START;
     };
 }
 
@@ -322,14 +322,14 @@ macro_rules! test_interpreter_and_jit {
         }
         let original_budget = context_object.remaining;
         $executable.verify::<RequisiteVerifier>().unwrap();
-        let host_buffer = solana_sbpf::memory_region::HostMemoryObject::host($mem);
+        let host_buffer = $crate::memory_region::HostMemoryObject::host($mem);
         let mut jit_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
         let (interp_input_start, jit_input_start) = (ebpf::MM_INPUT_START, ebpf::MM_INPUT_START);
 
         let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter, due_insn_count_interpreter) = {
             let mem_region = MemoryRegion::new(host_buffer, ebpf::MM_INPUT_START);
             let mut call_frames = vec![
-                solana_sbpf::vm::CallFrame::default();
+                $crate::vm::CallFrame::default();
                 $executable.get_config().max_call_depth
             ];
             create_vm!(
@@ -344,7 +344,7 @@ macro_rules! test_interpreter_and_jit {
             vm.registers[1] = interp_input_start;
             let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
                 &$executable,
-                &mut solana_sbpf::vm::ExecutionMode::Interpreted,
+                &mut $crate::vm::ExecutionMode::Interpreted,
                 &mut call_frames,
             );
             (
@@ -360,7 +360,7 @@ macro_rules! test_interpreter_and_jit {
             context_object.remaining = original_budget;
             #[allow(unused_mut)]
             let compilation_result = $executable.jit_compile();
-            use solana_sbpf::memory_region::HostBuffer;
+            use $crate::memory_region::HostBuffer;
             let mem = match host_buffer {
                 HostBuffer::Immutable(_) => HostBuffer::Immutable(&raw const jit_input_mem[..]),
                 HostBuffer::Mutable(_) => HostBuffer::Mutable(&raw mut jit_input_mem[..]),
@@ -381,7 +381,7 @@ macro_rules! test_interpreter_and_jit {
                     vm.registers[1] = jit_input_start;
                     let (instruction_count_jit, result_jit) = vm.execute_program(
                         &$executable,
-                        &mut solana_sbpf::vm::ExecutionMode::Jit,
+                        &mut $crate::vm::ExecutionMode::Jit,
                         &mut []
                     );
 
@@ -463,7 +463,7 @@ macro_rules! test_interpreter_and_jit {
             format!("{:?}", result), format!("{:?}", expected_result),
             "Unexpected result",
         );
-        if !matches!(expected_result, ProgramResult::Err(solana_sbpf::error::EbpfError::ExceededMaxInstructions)) {
+        if !matches!(expected_result, ProgramResult::Err($crate::error::EbpfError::ExceededMaxInstructions)) {
             test_interpreter_and_jit!(
                 override_budget => true,
                 $executable,
@@ -503,7 +503,7 @@ macro_rules! test_interpreter_and_jit_asm {
 #[macro_export]
 macro_rules! test_syscall_asm {
     (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
-        let _ = <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
+        let _ = <$syscall as $crate::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut config = Config::default();
@@ -521,7 +521,7 @@ macro_rules! test_syscall_asm {
 #[macro_export]
 macro_rules! test_interpreter_and_jit_elf {
     (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
-        <$syscall as solana_sbpf::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
+        <$syscall as $crate::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
     };
     ($source:expr, $config:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         let mut file = File::open($source).unwrap();
