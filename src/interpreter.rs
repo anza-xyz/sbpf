@@ -22,16 +22,18 @@ use crate::{
 
 /// Virtual memory operation helper.
 macro_rules! translate_memory_access {
-    (_impl, $self:ident, $first_op:ident, $second_op:ident, $vm_addr:ident, $T:ty, $($rest:expr),*) => {
+    (_impl, $self:ident, $C:ty, $first_op:ident, $second_op:ident, $vm_addr:ident, $T:ty, $($rest:expr),*) => {
         match $self.vm.memory().$first_op::<$T>(
             $($rest,)*
             $vm_addr,
         ) {
             ProgramResult::Ok(v) => v,
             ProgramResult::Err(_err) => {
-                match $self.vm.memory().$second_op::<$T>(
+                let encrypted_vm = $self.vm.encrypted_host_address();
+                match $self.vm.memory().$second_op::<$T, $C>(
                     $($rest,)*
                     $vm_addr,
+                    encrypted_vm,
                 ) {
                     ProgramResult::Ok(v) => v,
                     ProgramResult::Err(err) => {
@@ -43,13 +45,13 @@ macro_rules! translate_memory_access {
     };
 
     // MemoryMapping::load()
-    ($self:ident, load, $vm_addr:ident, $T:ty) => {
-        translate_memory_access!(_impl, $self, load_first_attempt, load_second_attempt, $vm_addr, $T,)
+    ($self:ident, $C:ty, load, $vm_addr:ident, $T:ty) => {
+        translate_memory_access!(_impl, $self, $C, load_first_attempt, load_second_attempt, $vm_addr, $T,)
     };
 
     // MemoryMapping::store()
-    ($self:ident, store, $value:expr, $vm_addr:ident, $T:ty) => {
-        translate_memory_access!(_impl, $self, store_first_attempt, store_second_attempt, $vm_addr, $T, ($value) as $T);
+    ($self:ident, $C:ty, store, $value:expr, $vm_addr:ident, $T:ty) => {
+        translate_memory_access!(_impl, $self, $C, store_first_attempt, store_second_attempt, $vm_addr, $T, ($value) as $T);
     };
 }
 
@@ -232,55 +234,55 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             // BPF_LDX class
             ebpf::LD_B_REG  if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[src] as i64).wrapping_add(insn.off as i64) as u64;
-                self.reg[dst] = translate_memory_access!(self, load, vm_addr, u8);
+                self.reg[dst] = translate_memory_access!(self, C, load, vm_addr, u8);
             },
             ebpf::LD_H_REG  if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[src] as i64).wrapping_add(insn.off as i64) as u64;
-                self.reg[dst] = translate_memory_access!(self, load, vm_addr, u16);
+                self.reg[dst] = translate_memory_access!(self, C, load, vm_addr, u16);
             },
             ebpf::LD_W_REG  if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[src] as i64).wrapping_add(insn.off as i64) as u64;
-                self.reg[dst] = translate_memory_access!(self, load, vm_addr, u32);
+                self.reg[dst] = translate_memory_access!(self, C, load, vm_addr, u32);
             },
             ebpf::LD_DW_REG if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[src] as i64).wrapping_add(insn.off as i64) as u64;
-                self.reg[dst] = translate_memory_access!(self, load, vm_addr, u64);
+                self.reg[dst] = translate_memory_access!(self, C, load, vm_addr, u64);
             },
 
             // BPF_ST class
             ebpf::ST_B_IMM  if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, insn.imm, vm_addr, u8);
+                translate_memory_access!(self, C, store, insn.imm, vm_addr, u8);
             },
             ebpf::ST_H_IMM  if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, insn.imm, vm_addr, u16);
+                translate_memory_access!(self, C, store, insn.imm, vm_addr, u16);
             },
             ebpf::ST_W_IMM  if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, insn.imm, vm_addr, u32);
+                translate_memory_access!(self, C, store, insn.imm, vm_addr, u32);
             },
             ebpf::ST_DW_IMM if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, insn.imm, vm_addr, u64);
+                translate_memory_access!(self, C, store, insn.imm, vm_addr, u64);
             },
 
             // BPF_STX class
             ebpf::ST_B_REG  if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, self.reg[src], vm_addr, u8);
+                translate_memory_access!(self, C, store, self.reg[src], vm_addr, u8);
             },
             ebpf::ST_H_REG  if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, self.reg[src], vm_addr, u16);
+                translate_memory_access!(self, C, store, self.reg[src], vm_addr, u16);
             },
             ebpf::ST_W_REG  if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, self.reg[src], vm_addr, u32);
+                translate_memory_access!(self, C, store, self.reg[src], vm_addr, u32);
             },
             ebpf::ST_DW_REG if !self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, self.reg[src], vm_addr, u64);
+                translate_memory_access!(self, C, store, self.reg[src], vm_addr, u64);
             },
 
             // BPF_ALU32_LOAD class
@@ -296,7 +298,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             ebpf::MUL32_REG  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] = self.sign_extension((self.reg[dst] as i32).wrapping_mul(self.reg[src] as i32)),
             ebpf::LD_1B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[src] as i64).wrapping_add(insn.off as i64) as u64;
-                self.reg[dst] = translate_memory_access!(self, load, vm_addr, u8);
+                self.reg[dst] = translate_memory_access!(self, C, load, vm_addr, u8);
             },
             ebpf::DIV32_IMM  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] = (self.reg[dst] as u32             / insn.imm as u32)      as u64,
             ebpf::DIV32_REG  if !self.executable.get_sbpf_version().enable_pqr() => {
@@ -305,7 +307,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             },
             ebpf::LD_2B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[src] as i64).wrapping_add(insn.off as i64) as u64;
-                self.reg[dst] = translate_memory_access!(self, load, vm_addr, u16);
+                self.reg[dst] = translate_memory_access!(self, C, load, vm_addr, u16);
             },
             ebpf::OR32_IMM   => self.reg[dst] = (self.reg[dst] as u32             | insn.imm as u32)      as u64,
             ebpf::OR32_REG   => self.reg[dst] = (self.reg[dst] as u32             | self.reg[src] as u32) as u64,
@@ -318,7 +320,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             ebpf::NEG32      if !self.executable.get_sbpf_version().disable_neg() => self.reg[dst] = (self.reg[dst] as i32).wrapping_neg()                     as u64 & (u32::MAX as u64),
             ebpf::LD_4B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[src] as i64).wrapping_add(insn.off as i64) as u64;
-                self.reg[dst] = translate_memory_access!(self, load, vm_addr, u32);
+                self.reg[dst] = translate_memory_access!(self, C, load, vm_addr, u32);
             },
             ebpf::MOD32_IMM  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] = (self.reg[dst] as u32             % insn.imm as u32)      as u64,
             ebpf::MOD32_REG  if !self.executable.get_sbpf_version().enable_pqr() => {
@@ -327,7 +329,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             },
             ebpf::LD_8B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[src] as i64).wrapping_add(insn.off as i64) as u64;
-                self.reg[dst] = translate_memory_access!(self, load, vm_addr, u64);
+                self.reg[dst] = translate_memory_access!(self, C, load, vm_addr, u64);
             },
             ebpf::XOR32_IMM  => self.reg[dst] = (self.reg[dst] as u32             ^ insn.imm as u32)      as u64,
             ebpf::XOR32_REG  => self.reg[dst] = (self.reg[dst] as u32             ^ self.reg[src] as u32) as u64,
@@ -372,17 +374,17 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             ebpf::MUL64_IMM  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] =  self.reg[dst].wrapping_mul(insn.imm as u64),
             ebpf::ST_1B_IMM  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, insn.imm, vm_addr, u8);
+                translate_memory_access!(self, C, store, insn.imm, vm_addr, u8);
             },
             ebpf::MUL64_REG  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] =  self.reg[dst].wrapping_mul(self.reg[src]),
             ebpf::ST_1B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, self.reg[src], vm_addr, u8);
+                translate_memory_access!(self, C, store, self.reg[src], vm_addr, u8);
             },
             ebpf::DIV64_IMM  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] /= insn.imm as u64,
             ebpf::ST_2B_IMM  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, insn.imm, vm_addr, u16);
+                translate_memory_access!(self, C, store, insn.imm, vm_addr, u16);
             },
             ebpf::DIV64_REG  if !self.executable.get_sbpf_version().enable_pqr() => {
                 throw_error!(DivideByZero; self, self.reg[src], u64);
@@ -390,7 +392,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             },
             ebpf::ST_2B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, self.reg[src], vm_addr, u16);
+                translate_memory_access!(self, C, store, self.reg[src], vm_addr, u16);
             },
             ebpf::OR64_IMM   => self.reg[dst] |= insn.imm as u64,
             ebpf::OR64_REG   => self.reg[dst] |= self.reg[src],
@@ -402,17 +404,17 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             ebpf::RSH64_REG  => self.reg[dst] =  self.reg[dst].wrapping_shr(self.reg[src] as u32),
             ebpf::ST_4B_IMM  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, insn.imm, vm_addr, u32);
+                translate_memory_access!(self, C, store, insn.imm, vm_addr, u32);
             },
             ebpf::NEG64      if !self.executable.get_sbpf_version().disable_neg() => self.reg[dst] = (self.reg[dst] as i64).wrapping_neg() as u64,
             ebpf::ST_4B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, self.reg[src], vm_addr, u32);
+                translate_memory_access!(self, C, store, self.reg[src], vm_addr, u32);
             },
             ebpf::MOD64_IMM  if !self.executable.get_sbpf_version().enable_pqr() => self.reg[dst] %= insn.imm as u64,
             ebpf::ST_8B_IMM  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, insn.imm, vm_addr, u64);
+                translate_memory_access!(self, C, store, insn.imm, vm_addr, u64);
             },
             ebpf::MOD64_REG  if !self.executable.get_sbpf_version().enable_pqr() => {
                 throw_error!(DivideByZero; self, self.reg[src], u64);
@@ -420,7 +422,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             },
             ebpf::ST_8B_REG  if self.executable.get_sbpf_version().move_memory_instruction_classes() => {
                 let vm_addr = (self.reg[dst] as i64).wrapping_add(insn.off as i64) as u64;
-                translate_memory_access!(self, store, self.reg[src], vm_addr, u64);
+                translate_memory_access!(self, C, store, self.reg[src], vm_addr, u64);
             },
             ebpf::XOR64_IMM  => self.reg[dst] ^= insn.imm as u64,
             ebpf::XOR64_REG  => self.reg[dst] ^= self.reg[src],

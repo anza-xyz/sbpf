@@ -1635,13 +1635,14 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_check_result_is_ok();
                 self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_LOAD_FIRST_ATTEMPT_SUCCESS, 6)));
                 let load = match len {
-                    1 => MemoryMapping::load_second_attempt::<u8> as *const u8 as i64,
-                    2 => MemoryMapping::load_second_attempt::<u16> as *const u8 as i64,
-                    4 => MemoryMapping::load_second_attempt::<u32> as *const u8 as i64,
-                    8 => MemoryMapping::load_second_attempt::<u64> as *const u8 as i64,
+                    1 => MemoryMapping::load_second_attempt::<u8, C> as *const u8 as i64,
+                    2 => MemoryMapping::load_second_attempt::<u16, C> as *const u8 as i64,
+                    4 => MemoryMapping::load_second_attempt::<u32, C> as *const u8 as i64,
+                    8 => MemoryMapping::load_second_attempt::<u64, C> as *const u8 as i64,
                     _ => unreachable!()
                 };
                 self.emit_rust_call(Value::Constant64(load, false), &[
+                    Argument { index: 3, value: Value::Register(REGISTER_PTR_TO_VM) },
                     Argument { index: 2, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
                     Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                     Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
@@ -1667,13 +1668,14 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 self.emit_check_result_is_ok();
                 self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS, 6)));
                 let store = match len {
-                    1 => MemoryMapping::store_second_attempt::<u8> as *const u8 as i64,
-                    2 => MemoryMapping::store_second_attempt::<u16> as *const u8 as i64,
-                    4 => MemoryMapping::store_second_attempt::<u32> as *const u8 as i64,
-                    8 => MemoryMapping::store_second_attempt::<u64> as *const u8 as i64,
+                    1 => MemoryMapping::store_second_attempt::<u8, C> as *const u8 as i64,
+                    2 => MemoryMapping::store_second_attempt::<u16, C> as *const u8 as i64,
+                    4 => MemoryMapping::store_second_attempt::<u32, C> as *const u8 as i64,
+                    8 => MemoryMapping::store_second_attempt::<u64, C> as *const u8 as i64,
                     _ => unreachable!()
                 };
                 self.emit_rust_call(Value::Constant64(store, false), &[
+                    Argument { index: 4, value: Value::Register(REGISTER_PTR_TO_VM) },
                     Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
                     Argument { index: 2, value: Value::RegisterIndirect(RSP, 80, false) },
                     Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
