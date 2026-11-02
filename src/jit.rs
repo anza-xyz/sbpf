@@ -1007,7 +1007,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 } else {
                     X86IndirectAccess::Offset(offset)
                 };
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_INSTRUCTION_METER, reg, Some(indirect_access)));
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x03, REGISTER_INSTRUCTION_METER, reg, Some(indirect_access)));
                 self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None));
             },
             _ => {
