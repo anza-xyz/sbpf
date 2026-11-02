@@ -560,7 +560,11 @@ impl<C: ContextObject> EncryptedHostAddressToEbpfVm<C> {
                 .as_mut()
                 .unwrap()
         };
-        cb(vm)
+        let due_insn_count = vm.due_insn_count;
+        vm.context().consume(due_insn_count);
+        let result = cb(vm);
+        vm.previous_instruction_meter = vm.context().get_remaining();
+        result
     }
 }
 

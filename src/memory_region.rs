@@ -942,8 +942,6 @@ impl MemoryMapping {
     ) {
         unsafe {
             vm.with_vm(|vm| {
-                let due_insn_count = vm.due_insn_count;
-                vm.context().consume(due_insn_count);
                 let len = mem::size_of::<T>() as u64;
                 debug_assert!(len <= mem::size_of::<u64>() as u64);
                 debug_assert!(self.initialized);
@@ -957,7 +955,6 @@ impl MemoryMapping {
                         ProgramResult::Ok(ptr::read_unaligned::<T>(buf.ptr().cast()).into())
                     }
                 };
-                vm.previous_instruction_meter = vm.context().get_remaining();
             })
         }
     }
@@ -973,8 +970,6 @@ impl MemoryMapping {
     ) {
         unsafe {
             vm.with_vm(|vm| {
-                let due_insn_count = vm.due_insn_count;
-                vm.context().consume(due_insn_count);
                 let len = mem::size_of::<T>() as u64;
                 debug_assert!(len <= mem::size_of::<u64>() as u64);
                 debug_assert!(self.initialized);
@@ -989,7 +984,6 @@ impl MemoryMapping {
                         StableResult::Ok(0)
                     }
                 };
-                vm.previous_instruction_meter = vm.context().get_remaining();
             })
         }
     }
