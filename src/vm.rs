@@ -420,7 +420,6 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
     ) -> (u64, ProgramResult) {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
-        let config = executable.get_config();
         let initial_insn_count = self.context().get_remaining();
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
@@ -434,7 +433,11 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 ExecutionMode::PreferJit => {
                     if let Some(compiled_program) = executable.get_compiled_program() {
                         *mode = ExecutionMode::Jit;
-                        break 'execute compiled_program.invoke(config, self, self.registers);
+                        break 'execute compiled_program.invoke(
+                            executable.get_config(),
+                            self,
+                            self.registers,
+                        );
                     }
                 }
                 #[cfg(not(all(
@@ -450,7 +453,11 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                         return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
                     };
                     *mode = ExecutionMode::Jit;
-                    break 'execute compiled_program.invoke(config, self, self.registers);
+                    break 'execute compiled_program.invoke(
+                        executable.get_config(),
+                        self,
+                        self.registers,
+                    );
                 }
                 #[cfg(not(all(
                     feature = "jit",
