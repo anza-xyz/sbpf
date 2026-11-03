@@ -25,6 +25,8 @@ use crate::{
 pub use defaults::get_stack_frame_size;
 use std::{collections::BTreeMap, fmt::Debug, marker::PhantomData, mem::offset_of, ptr};
 
+#[cfg(feature = "dev-context-only-utils")]
+use qualifier_attr::qualifiers;
 #[cfg(feature = "shuttle-test")]
 use shuttle::sync::Arc;
 #[cfg(not(feature = "shuttle-test"))]
@@ -502,6 +504,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
     /// Note that this type is effectively a mutable pointer to `self` and although it valid to
     /// create multiple of these addresses, using them to violate the Rust mutable references'
     /// uniqueness rule is not sound.
+    #[cfg_attr(feature = "dev-context-only-utils", qualifiers(pub))]
     pub(crate) fn encrypted_host_address(&mut self) -> EncryptedHostAddressToEbpfVm<C> {
         let addr = (&raw mut *self).expose_provenance() as isize;
         EncryptedHostAddressToEbpfVm(
