@@ -15,6 +15,7 @@
 use crate::{
     ebpf,
     program::{FunctionRegistry, SBPFVersion},
+    vm::Config,
 };
 use thiserror::Error;
 
@@ -93,6 +94,7 @@ pub trait Verifier {
     fn verify<T: Copy + PartialEq>(
         prog: &[u8],
         sbpf_version: SBPFVersion,
+        config: &Config,
         syscall_registry: &FunctionRegistry<T>,
     ) -> Result<(), VerifierError>;
 }
@@ -225,7 +227,7 @@ pub struct RequisiteVerifier {}
 impl Verifier for RequisiteVerifier {
     /// Check the program against the verifier's rules
     #[rustfmt::skip]
-    fn verify<T>(prog: &[u8], sbpf_version: SBPFVersion, _syscall_registry: &FunctionRegistry<T>) -> Result<(), VerifierError> {
+    fn verify<T: Copy + PartialEq>(prog: &[u8], sbpf_version: SBPFVersion, config: &Config, syscall_registry: &FunctionRegistry<T>) -> Result<(), VerifierError> {
         check_prog_len(prog)?;
 
         let program_range = 0..prog.len() / ebpf::INSN_SIZE;
@@ -404,6 +406,12 @@ impl Verifier for RequisiteVerifier {
                 | ebpf::JSLT64_REG
                 | ebpf::JSLE64_IMM
                 | ebpf::JSLE64_REG   => { check_jmp_offset(prog, insn_ptr, &program_range)?; },
+                ebpf::CALL_IMM   if sbpf_version.static_syscalls()
+                    && config.reject_unregistered_static_syscalls
+                    && insn.src == 0
+                    && syscall_registry.lookup_by_key(insn.imm as u32).is_none() => {
+                    return Err(VerifierError::InvalidSyscall(insn.imm as u32));
+                },
                 ebpf::CALL_IMM   => {},
                 ebpf::CALL_REG   => { check_callx_register(&insn, insn_ptr, sbpf_version)?; },
                 ebpf::EXIT       => {},
@@ -436,6 +444,7 @@ impl Verifier for LocalVerifier {
     fn verify<T: Copy + PartialEq>(
         prog: &[u8],
         sbpf_version: SBPFVersion,
+        _config: &Config,
         syscall_registry: &FunctionRegistry<T>,
     ) -> Result<(), VerifierError> {
         if sbpf_version < SBPFVersion::V3 {

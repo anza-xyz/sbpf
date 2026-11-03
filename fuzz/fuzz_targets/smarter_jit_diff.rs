@@ -29,10 +29,12 @@ struct FuzzData {
 fuzz_target!(|data: FuzzData| {
     let sbpf_version = data.template.sbpf_version;
     let prog = make_program(&data.prog, sbpf_version);
-    let config = data.template.into();
+    let config = solana_sbpf::vm::Config::from(data.template);
     let function_registry = FunctionRegistry::default();
 
-    if RequisiteVerifier::verify(prog.into_bytes(), sbpf_version, &function_registry).is_err() {
+    if RequisiteVerifier::verify(prog.into_bytes(), sbpf_version, &config, &function_registry)
+        .is_err()
+    {
         // verify please
         return;
     }

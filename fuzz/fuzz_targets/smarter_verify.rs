@@ -26,7 +26,12 @@ fuzz_target!(|data: FuzzData| {
     let function_registry = FunctionRegistry::<usize>::default();
 
     #[allow(unused)]
-    let res = RequisiteVerifier::verify(prog.into_bytes(), sbpf_version, &function_registry);
+    let res = RequisiteVerifier::verify(
+        prog.into_bytes(),
+        sbpf_version,
+        &solana_sbpf::vm::Config::default(),
+        &function_registry,
+    );
     #[cfg(feature = "only-verified")]
     assert!(res.is_ok(), "Verification failed: {:?}", res.err());
 });

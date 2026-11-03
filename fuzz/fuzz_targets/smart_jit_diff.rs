@@ -42,10 +42,12 @@ fuzz_target!(|data: FuzzData| {
             .set_imm(data.exit_imm)
             .push();
     }
-    let config = data.template.into();
+    let config = solana_sbpf::vm::Config::from(data.template);
     let function_registry = FunctionRegistry::default();
 
-    if RequisiteVerifier::verify(prog.into_bytes(), sbpf_version, &function_registry).is_err() {
+    if RequisiteVerifier::verify(prog.into_bytes(), sbpf_version, &config, &function_registry)
+        .is_err()
+    {
         // verify please
         return;
     }

@@ -49,6 +49,7 @@ impl Verifier for TautologyVerifier {
     fn verify<T>(
         _prog: &[u8],
         _sbpf_version: SBPFVersion,
+        _config: &Config,
         _syscall_registry: &FunctionRegistry<T>,
     ) -> std::result::Result<(), VerifierError> {
         Ok(())
@@ -60,6 +61,7 @@ impl Verifier for ContradictionVerifier {
     fn verify<T>(
         _prog: &[u8],
         _sbpf_version: SBPFVersion,
+        _config: &Config,
         _syscall_registry: &FunctionRegistry<T>,
     ) -> std::result::Result<(), VerifierError> {
         Err(VerifierError::NoProgram)
@@ -539,4 +541,29 @@ fn local_verifier_valid_program() {
 
     let result = executable.verify::<LocalVerifier>();
     assert!(result.is_ok());
+}
+
+#[test]
+fn requisite_verifier_unregistered_static_syscall() {
+    let config = Config {
+        enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V4,
+        reject_unregistered_static_syscalls: true,
+        ..Config::default()
+    };
+    let program = "add64 r10, 0
+        syscall log
+        exit";
+
+    let executable = assemble::<TestContextObject>(
+        program,
+        Arc::new(BuiltinProgram::new_loader(config.clone())),
+    )
+    .unwrap();
+    let result = executable.verify::<RequisiteVerifier>();
+    assert_error!(result, "VerifierError(InvalidSyscall(1811268606))");
+
+    let mut loader = BuiltinProgram::new_loader(config);
+    test_syscalls::SyscallU64::register(&mut loader, "log").unwrap();
+    let executable = assemble::<TestContextObject>(program, Arc::new(loader)).unwrap();
+    executable.verify::<RequisiteVerifier>().unwrap();
 }

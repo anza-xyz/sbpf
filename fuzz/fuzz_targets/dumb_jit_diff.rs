@@ -26,10 +26,10 @@ struct DumbFuzzData {
 fuzz_target!(|data: DumbFuzzData| {
     let prog = data.prog;
     let sbpf_version = data.template.sbpf_version;
-    let config = data.template.into();
+    let config = solana_sbpf::vm::Config::from(data.template);
     let function_registry = FunctionRegistry::default();
 
-    if RequisiteVerifier::verify(&prog, sbpf_version, &function_registry).is_err() {
+    if RequisiteVerifier::verify(&prog, sbpf_version, &config, &function_registry).is_err() {
         // verify please
         return;
     }
