@@ -935,9 +935,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     /// Emits a instruction meter check (without any updates thereof)
     pub fn emit_validate_instruction_count(&mut self, pc: Option<usize>) {
-        if !self.config.enable_instruction_meter {
-            return;
-        }
         // Update `MACHINE_CODE_PER_INSTRUCTION_METER_CHECKPOINT` if you change the code generation here
         if let Some(pc) = pc {
             self.last_instruction_meter_validation_pc = pc;
@@ -950,17 +947,12 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     /// Charges the instruction meter (without any check thereof)
     pub fn emit_profile_instruction_count(&mut self, target_pc: usize) {
-        if !self.config.enable_instruction_meter {
-            return;
-        }
         self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, target_pc as i64 - self.pc as i64 - 1); // instruction_meter += target_pc - (self.pc + 1);
     }
 
     /// Refunds the instruction meter (without any check thereof)
     pub fn emit_undo_profile_instruction_count(&mut self, target_pc: usize) {
-        if self.config.enable_instruction_meter {
-            self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, self.pc as i64 + 1 - target_pc as i64); // instruction_meter += (self.pc + 1) - target_pc;
-        }
+        self.emit_sanitized_alu(OperandSize::S64, 0x01, 0, REGISTER_INSTRUCTION_METER, self.pc as i64 + 1 - target_pc as i64); // instruction_meter += (self.pc + 1) - target_pc;
     }
 
     /// Checks and charges the instruction meter
@@ -973,9 +965,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     ///
     /// with self-pc in REGISTER_SCRATCH.
     pub fn emit_instruction_meter_to_vm(&mut self, pc: Value) {
-        if !self.config.enable_instruction_meter {
-            return;
-        }
         // The code below does: self.emit_profile_instruction_count(0);
         // Which comes down to: instruction_meter -= self.pc + 1;
         match pc {
@@ -1004,9 +993,6 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
     /// Takes back the instruction meter from the VM
     pub fn emit_instruction_meter_from_vm(&mut self, pc: Value) {
-        if !self.config.enable_instruction_meter {
-            return;
-        }
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_INSTRUCTION_METER, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter)))); // REGISTER_INSTRUCTION_METER = *PreviousInstructionMeter;
         // The code below does: self.emit_undo_profile_instruction_count(0);
         // Which comes down to: instruction_meter += self.pc + 1;
@@ -1434,14 +1420,12 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
         // Epilogue
         self.set_anchor(ANCHOR_EPILOGUE);
-        if self.config.enable_instruction_meter {
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER -= 1;
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // REGISTER_INSTRUCTION_METER -= pc;
-            // *DueInsnCount = *PreviousInstructionMeter - REGISTER_INSTRUCTION_METER;
-            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2B, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter))))); // REGISTER_INSTRUCTION_METER -= *PreviousInstructionMeter;
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xf7, 3, REGISTER_INSTRUCTION_METER, 0, None)); // REGISTER_INSTRUCTION_METER = -REGISTER_INSTRUCTION_METER;
-            self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DueInsnCount)))); // *DueInsnCount = REGISTER_INSTRUCTION_METER;
-        }
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER -= 1;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x29, REGISTER_SCRATCH, REGISTER_INSTRUCTION_METER, None)); // REGISTER_INSTRUCTION_METER -= pc;
+        // *DueInsnCount = *PreviousInstructionMeter - REGISTER_INSTRUCTION_METER;
+        self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x2B, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, Some(X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::PreviousInstructionMeter))))); // REGISTER_INSTRUCTION_METER -= *PreviousInstructionMeter;
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0xf7, 3, REGISTER_INSTRUCTION_METER, 0, None)); // REGISTER_INSTRUCTION_METER = -REGISTER_INSTRUCTION_METER;
+        self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_INSTRUCTION_METER, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::DueInsnCount)))); // *DueInsnCount = REGISTER_INSTRUCTION_METER;
         // Print stop watch value
         fn stopwatch_result(numerator: u64, denominator: u64) {
             println!("Stop watch: {} / {} = {}", numerator, denominator, if denominator == 0 { 0.0 } else { numerator as f64 / denominator as f64 });
@@ -1471,9 +1455,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
         // Quit gracefully
         self.set_anchor(ANCHOR_EXIT);
-        if self.config.enable_instruction_meter {
-            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER += 1;
-        }
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None)); // REGISTER_INSTRUCTION_METER += 1;
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_SCRATCH, REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::Registers) + 11 * std::mem::size_of::<u64>() as i32))); // registers[11] = pc;
         self.emit_ins(X86Instruction::store(OperandSize::S64, REGISTER_MAP[0], REGISTER_PTR_TO_VM, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32))); // result.return_value = R0;
         self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x31, REGISTER_SCRATCH, REGISTER_SCRATCH, None)); // REGISTER_SCRATCH ^= REGISTER_SCRATCH; // REGISTER_SCRATCH = 0;
@@ -1521,9 +1503,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
 
         // Routine for external functions
         self.set_anchor(ANCHOR_EXTERNAL_FUNCTION_CALL);
-        if self.config.enable_instruction_meter {
-            self.emit_validate_instruction_count(None);
-        }
+        self.emit_validate_instruction_count(None);
         self.emit_instruction_meter_to_vm(Value::Register(REGISTER_SCRATCH));
         self.emit_rust_call(Value::RegisterIndirect(RSP, 0x50, false), &[
             Argument { index: 5, value: Value::Register(ARGUMENT_REGISTERS[5]) },
@@ -1634,10 +1614,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         ] {
             let target_offset = *anchor_base + len.trailing_zeros() as usize;
             self.set_anchor(ANCHOR_TRANSLATE_MEMORY_ADDRESS + target_offset);
-            if self.config.enable_instruction_meter {
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x3B, REGISTER_INSTRUCTION_METER, RSP, Some(X86IndirectAccess::OffsetIndexShift(-8, RSP, 0)))); // cmp REGISTER_INSTRUCTION_METER, pc (on rsp);
-                self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
-            }
+            self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x3B, REGISTER_INSTRUCTION_METER, RSP, Some(X86IndirectAccess::OffsetIndexShift(-8, RSP, 0)))); // cmp REGISTER_INSTRUCTION_METER, pc (on rsp);
+            self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
             // skip over the two slots pushed by the caller, we'll pop them before returning
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 24, None)); // RSP -= 24
             // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
