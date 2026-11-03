@@ -941,6 +941,7 @@ impl MemoryMapping {
         mut vm: EncryptedHostAddressToEbpfVm<C>,
     ) {
         unsafe {
+            // SAFETY: Sound under the stacked lifetimes model – we've only one `VmAddress`.
             vm.with_vm(|vm| {
                 let len = mem::size_of::<T>() as u64;
                 debug_assert!(len <= mem::size_of::<u64>() as u64);
@@ -969,6 +970,7 @@ impl MemoryMapping {
         mut vm: EncryptedHostAddressToEbpfVm<C>,
     ) {
         unsafe {
+            // SAFETY: Sound under the stacked lifetimes model – we've only one `VmAddress`.
             vm.with_vm(|vm| {
                 let len = mem::size_of::<T>() as u64;
                 debug_assert!(len <= mem::size_of::<u64>() as u64);
