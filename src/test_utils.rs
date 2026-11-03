@@ -443,12 +443,10 @@ macro_rules! test_interpreter_and_jit {
                 }
             }
         }
-        if $executable.get_config().enable_instruction_meter {
-            assert_eq!(
-                instruction_count_interpreter, expected_instruction_count,
-                "Instruction meter did not consume expected amount"
-            );
-        }
+        assert_eq!(
+            instruction_count_interpreter, expected_instruction_count,
+            "Instruction meter did not consume expected amount"
+        );
         result_interpreter
     }};
     ($executable:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {

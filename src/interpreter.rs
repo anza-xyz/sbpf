@@ -206,7 +206,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
     pub fn step(&mut self) -> bool {
         let config = &self.executable.get_config();
 
-        if config.enable_instruction_meter && self.vm.due_insn_count >= self.vm.previous_instruction_meter {
+        if self.vm.due_insn_count >= self.vm.previous_instruction_meter {
             throw_error!(self, EbpfError::ExceededMaxInstructions);
         }
         self.vm.due_insn_count += 1;
@@ -607,7 +607,7 @@ impl<'a, 'b, 'c, C: ContextObject> Interpreter<'a, 'b, 'c, C> {
             }
             ebpf::EXIT       => {
                 if self.vm.call_depth == 0 {
-                    if config.enable_instruction_meter && self.vm.due_insn_count > self.vm.previous_instruction_meter {
+                    if self.vm.due_insn_count > self.vm.previous_instruction_meter {
                         throw_error!(self, EbpfError::ExceededMaxInstructions);
                     }
                     self.vm.program_result = ProgramResult::Ok(self.reg[0]);

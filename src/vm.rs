@@ -118,8 +118,6 @@ pub struct Config {
     pub enable_stack_frame_gaps: bool,
     /// Maximal pc distance after which a new instruction meter validation is emitted by the JIT
     pub instruction_meter_checkpoint_distance: usize,
-    /// Enable instruction meter and limiting
-    pub enable_instruction_meter: bool,
     /// Enable dynamic string allocation for labels
     pub enable_symbol_and_section_labels: bool,
     /// Reject ELF files containing issues that the verifier did not catch before (up to v0.2.21)
@@ -154,7 +152,6 @@ impl Default for Config {
             stack_frame_size: defaults::get_stack_frame_size(),
             enable_stack_frame_gaps: true,
             instruction_meter_checkpoint_distance: 1000,
-            enable_instruction_meter: true,
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
             #[cfg(feature = "jit")]
@@ -468,14 +465,10 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
             break 'execute run_interpreter(interpreter);
         }
 
-        let instruction_count = if config.enable_instruction_meter {
-            let due_insn_count = self.due_insn_count;
-            let context = self.context();
-            context.consume(due_insn_count);
-            initial_insn_count.saturating_sub(context.get_remaining())
-        } else {
-            0
-        };
+        let due_insn_count = self.due_insn_count;
+        let context = self.context();
+        context.consume(due_insn_count);
+        let instruction_count = initial_insn_count.saturating_sub(context.get_remaining());
         let mut result = ProgramResult::Ok(0);
         std::mem::swap(&mut result, &mut self.program_result);
         (instruction_count, result)
