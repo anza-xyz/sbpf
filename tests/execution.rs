@@ -3788,9 +3788,7 @@ fn execute_generated_program(prog: &[u8]) -> bool {
             .unwrap();
         panic!();
     }
-    if executable.get_config().enable_instruction_meter {
-        assert_eq!(instruction_count_interpreter, instruction_count_jit);
-    }
+    assert_eq!(instruction_count_interpreter, instruction_count_jit);
     true
 }
 
