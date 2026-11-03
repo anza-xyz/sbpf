@@ -5,7 +5,7 @@ use crate::{
     ebpf,
     error::{EbpfError, ProgramResult, StableResult},
     program::SBPFVersion,
-    vm::Config,
+    vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
 };
 use std::fmt::Formatter;
 use std::{array, cell::UnsafeCell, fmt, mem, ops::Range, ptr};
@@ -909,11 +909,12 @@ impl MemoryMapping {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         debug_assert!(self.initialized);
-        let ptr = match self.map(AccessType::Load, vm_addr, len) {
-            StableResult::Err(e) => return ProgramResult::Err(e),
-            StableResult::Ok(buf) => buf.ptr(),
-        };
-        ProgramResult::Ok(unsafe { ptr::read_unaligned::<T>(ptr.cast()).into() })
+        match self.map(AccessType::Load, vm_addr, len) {
+            StableResult::Err(e) => ProgramResult::Err(e),
+            StableResult::Ok(buf) => unsafe {
+                ProgramResult::Ok(ptr::read_unaligned::<T>(buf.ptr().cast()).into())
+            },
+        }
     }
 
     /// Stores `value` at the given guest address without invoking the access_violation_handler.
@@ -922,47 +923,71 @@ impl MemoryMapping {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
         debug_assert!(self.initialized);
-        let ptr = match self.map(AccessType::Store, vm_addr, len) {
-            StableResult::Err(e) => return ProgramResult::Err(e),
-            StableResult::Ok(buf) => buf.ptr_mut(),
-        };
-        unsafe {
-            ptr::write_unaligned::<T>(ptr.cast(), value);
+        match self.map(AccessType::Store, vm_addr, len) {
+            StableResult::Err(e) => ProgramResult::Err(e),
+            StableResult::Ok(buf) => unsafe {
+                ptr::write_unaligned::<T>(buf.ptr_mut().cast(), value);
+                StableResult::Ok(0)
+            },
         }
-        StableResult::Ok(0)
     }
 
     /// Invokes access_violation_handler then loads `size_of::<T>()` bytes at the given guest address.
     #[cold]
     #[inline(never)]
-    pub fn load_second_attempt<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> ProgramResult {
-        let len = mem::size_of::<T>() as u64;
-        debug_assert!(len <= mem::size_of::<u64>() as u64);
-        debug_assert!(self.initialized);
-        let ptr =
-            match self.invoke_access_violation_handler_then_map(AccessType::Load, vm_addr, len) {
-                StableResult::Err(e) => return ProgramResult::Err(e),
-                StableResult::Ok(buf) => buf.ptr(),
-            };
-        ProgramResult::Ok(unsafe { ptr::read_unaligned::<T>(ptr.cast()).into() })
+    pub fn load_second_attempt<T: Pod + Into<u64>, C: ContextObject>(
+        &mut self,
+        vm_addr: u64,
+        mut vm: EncryptedHostAddressToEbpfVm<C>,
+    ) {
+        unsafe {
+            // SAFETY: Sound under the stacked lifetimes model – we've only one `VmAddress`.
+            vm.with_vm(|vm| {
+                let len = mem::size_of::<T>() as u64;
+                debug_assert!(len <= mem::size_of::<u64>() as u64);
+                debug_assert!(self.initialized);
+                vm.program_result = match self.invoke_access_violation_handler_then_map(
+                    AccessType::Load,
+                    vm_addr,
+                    len,
+                ) {
+                    StableResult::Err(e) => ProgramResult::Err(e),
+                    StableResult::Ok(buf) => {
+                        ProgramResult::Ok(ptr::read_unaligned::<T>(buf.ptr().cast()).into())
+                    }
+                };
+            })
+        }
     }
 
     /// Invokes access_violation_handler then stores `value` at the given guest address.
     #[cold]
     #[inline(never)]
-    pub fn store_second_attempt<T: Pod>(&mut self, value: T, vm_addr: u64) -> ProgramResult {
-        let len = mem::size_of::<T>() as u64;
-        debug_assert!(len <= mem::size_of::<u64>() as u64);
-        debug_assert!(self.initialized);
-        let ptr =
-            match self.invoke_access_violation_handler_then_map(AccessType::Store, vm_addr, len) {
-                StableResult::Err(e) => return ProgramResult::Err(e),
-                StableResult::Ok(buf) => buf.ptr_mut(),
-            };
+    pub fn store_second_attempt<T: Pod, C: ContextObject>(
+        &mut self,
+        value: T,
+        vm_addr: u64,
+        mut vm: EncryptedHostAddressToEbpfVm<C>,
+    ) {
         unsafe {
-            ptr::write_unaligned::<T>(ptr.cast(), value);
+            // SAFETY: Sound under the stacked lifetimes model – we've only one `VmAddress`.
+            vm.with_vm(|vm| {
+                let len = mem::size_of::<T>() as u64;
+                debug_assert!(len <= mem::size_of::<u64>() as u64);
+                debug_assert!(self.initialized);
+                vm.program_result = match self.invoke_access_violation_handler_then_map(
+                    AccessType::Store,
+                    vm_addr,
+                    len,
+                ) {
+                    StableResult::Err(e) => ProgramResult::Err(e),
+                    StableResult::Ok(buf) => {
+                        ptr::write_unaligned::<T>(buf.ptr_mut().cast(), value);
+                        StableResult::Ok(0)
+                    }
+                };
+            })
         }
-        StableResult::Ok(0)
     }
 
     /// Returns the `MemoryRegion` which may contain the given address.
@@ -1126,7 +1151,7 @@ impl MappingCache {
 
 #[cfg(test)]
 mod test {
-    use crate::assert_error;
+    use crate::{assert_error, program::BuiltinProgram, test_utils::TestContextObject, vm::EbpfVm};
     use std::{cell::RefCell, rc::Rc};
 
     use super::*;
@@ -2005,6 +2030,7 @@ mod test {
                 aligned_memory_mapping,
                 ..Config::default()
             };
+            let loader = std::sync::Arc::new(BuiltinProgram::new_mock());
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
             let mut regions = vec![MemoryRegion::new(&raw const original, ebpf::MM_REGION_SIZE)];
@@ -2024,6 +2050,13 @@ mod test {
                 )
                 .unwrap()
             };
+            let mut context_object = TestContextObject::new(0);
+            let mut vm = EbpfVm::new(
+                loader,
+                *config.enabled_sbpf_versions.end(),
+                &mut context_object,
+                0,
+            );
 
             assert_eq!(
                 m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
@@ -2044,7 +2077,7 @@ mod test {
             );
             assert!(copied.borrow().is_empty());
 
-            m.store_second_attempt(33u8, ebpf::MM_REGION_SIZE).unwrap();
+            m.store_second_attempt(33u8, ebpf::MM_REGION_SIZE, vm.encrypted_host_address());
             assert_eq!(original[0], 11);
             assert_eq!(
                 m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE).unwrap(),
@@ -2065,6 +2098,7 @@ mod test {
                 aligned_memory_mapping,
                 ..Config::default()
             };
+            let loader = std::sync::Arc::new(BuiltinProgram::new_mock());
             let original1 = [11, 22];
             let original2 = [33, 44];
             let copied = Rc::new(RefCell::new(Vec::new()));
@@ -2092,8 +2126,15 @@ mod test {
                 )
                 .unwrap()
             };
+            let mut context_object = TestContextObject::new(0);
+            let mut vm = EbpfVm::new(
+                loader,
+                *config.enabled_sbpf_versions.end(),
+                &mut context_object,
+                0,
+            );
 
-            m.store_second_attempt(55u8, ebpf::MM_REGION_SIZE).unwrap();
+            m.store_second_attempt(55u8, ebpf::MM_REGION_SIZE, vm.encrypted_host_address());
             assert_eq!(original1[0], 11);
             assert_eq!(
                 m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE).unwrap(),

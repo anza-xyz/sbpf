@@ -1007,7 +1007,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 } else {
                     X86IndirectAccess::Offset(offset)
                 };
-                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x01, REGISTER_INSTRUCTION_METER, reg, Some(indirect_access)));
+                self.emit_ins(X86Instruction::alu(OperandSize::S64, 0x03, REGISTER_INSTRUCTION_METER, reg, Some(indirect_access)));
                 self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, REGISTER_INSTRUCTION_METER, 1, None));
             },
             _ => {
@@ -1634,18 +1634,20 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ], None);
                 self.emit_check_result_is_ok();
                 self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_LOAD_FIRST_ATTEMPT_SUCCESS, 6)));
+                self.emit_instruction_meter_to_vm(Value::RegisterIndirect(RSP, 16, false));
                 let load = match len {
-                    1 => MemoryMapping::load_second_attempt::<u8> as *const u8 as i64,
-                    2 => MemoryMapping::load_second_attempt::<u16> as *const u8 as i64,
-                    4 => MemoryMapping::load_second_attempt::<u32> as *const u8 as i64,
-                    8 => MemoryMapping::load_second_attempt::<u64> as *const u8 as i64,
+                    1 => MemoryMapping::load_second_attempt::<u8, C> as *const u8 as i64,
+                    2 => MemoryMapping::load_second_attempt::<u16, C> as *const u8 as i64,
+                    4 => MemoryMapping::load_second_attempt::<u32, C> as *const u8 as i64,
+                    8 => MemoryMapping::load_second_attempt::<u64, C> as *const u8 as i64,
                     _ => unreachable!()
                 };
                 self.emit_rust_call(Value::Constant64(load, false), &[
-                    Argument { index: 2, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
-                    Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
-                    Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
+                    Argument { index: 2, value: Value::Register(REGISTER_PTR_TO_VM) },
+                    Argument { index: 1, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
+                    Argument { index: 0, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                 ], None);
+                self.emit_instruction_meter_from_vm(Value::RegisterIndirect(RSP, 16, false));
             } else { // AccessType::Store
                 if *anchor_base == 8 {
                     // Second half of emit_sanitized_load_immediate(stack_slot_of_value_to_store, constant)
@@ -1666,26 +1668,28 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 ], None);
                 self.emit_check_result_is_ok();
                 self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS, 6)));
+                self.emit_instruction_meter_to_vm(Value::RegisterIndirect(RSP, 16, false));
                 let store = match len {
-                    1 => MemoryMapping::store_second_attempt::<u8> as *const u8 as i64,
-                    2 => MemoryMapping::store_second_attempt::<u16> as *const u8 as i64,
-                    4 => MemoryMapping::store_second_attempt::<u32> as *const u8 as i64,
-                    8 => MemoryMapping::store_second_attempt::<u64> as *const u8 as i64,
+                    1 => MemoryMapping::store_second_attempt::<u8, C> as *const u8 as i64,
+                    2 => MemoryMapping::store_second_attempt::<u16, C> as *const u8 as i64,
+                    4 => MemoryMapping::store_second_attempt::<u32, C> as *const u8 as i64,
+                    8 => MemoryMapping::store_second_attempt::<u64, C> as *const u8 as i64,
                     _ => unreachable!()
                 };
                 self.emit_rust_call(Value::Constant64(store, false), &[
-                    Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
-                    Argument { index: 2, value: Value::RegisterIndirect(RSP, 80, false) },
-                    Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
-                    Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
+                    Argument { index: 3, value: Value::Register(REGISTER_PTR_TO_VM) },
+                    Argument { index: 2, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
+                    Argument { index: 1, value: Value::RegisterIndirect(RSP, 80, false) },
+                    Argument { index: 0, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
                 ], None);
+                self.emit_instruction_meter_from_vm(Value::RegisterIndirect(RSP, 16, false));
             }
 
             // Throw error if the result indicates one
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 16, None)); // RSP += 16
             self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH)); // REGISTER_SCRATCH = pc
             self.emit_check_result_is_ok();
-            self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION, 6)));
+            self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_THROW_EXCEPTION_UNCHECKED, 6)));
 
             if *anchor_base == 0 { // AccessType::Load
                 // unwrap() the result into REGISTER_SCRATCH

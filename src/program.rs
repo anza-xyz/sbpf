@@ -570,14 +570,9 @@ where
         unsafe {
             // SAFETY: Sound under the stacked lifetimes model – we've only one `VmAddress`.
             vm.with_vm(|vm| {
-                let due_insn_count = vm.due_insn_count;
-                vm.context().consume(due_insn_count);
-                let converted_result: crate::error::ProgramResult =
-                    Self::rust(vm.context(), a, b, c, d, e)
-                        .map_err(|err| crate::error::EbpfError::SyscallError(err.into()))
-                        .into();
-                vm.program_result = converted_result;
-                vm.previous_instruction_meter = vm.context().get_remaining();
+                vm.program_result = Self::rust(vm.context(), a, b, c, d, e)
+                    .map_err(|err| crate::error::EbpfError::SyscallError(err.into()))
+                    .into();
             })
         }
     }
