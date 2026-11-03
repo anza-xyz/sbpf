@@ -24,7 +24,7 @@ use {
         System::{
             Memory::{
                 VirtualAlloc, VirtualFree, VirtualProtect, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE,
-                MEM_RESET, PAGE_EXECUTE_READ, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
+                PAGE_EXECUTE_READ, PAGE_PROTECTION_FLAGS, PAGE_READONLY, PAGE_READWRITE,
             },
             SystemInformation::{GetSystemInfo, SYSTEM_INFO},
         },
@@ -69,19 +69,8 @@ impl FreeList {
     ///
     /// The memory being inserted is expected to be read-write across the entire accessible range.
     fn free(&self, pages: Pages) {
-        /// The threshold for discarding physical backing from returned memory.
-        ///
-        /// Allocations at or above 128 MiB are uncommon, so drop their
-        /// resident pages when they are returned to the pool.
-        const MADV_DONTNEED_THRESHOLD: usize = 1024 * 1024 * 128; // 128 MiB
-
         if pages.len != self.size {
             panic!("size mismatch: expected {}, got {}", self.size, pages.len);
-        }
-
-        if self.size >= MADV_DONTNEED_THRESHOLD {
-            // SAFETY: `madvise` has no soundness invariants with the arguments used here.
-            unsafe { madvise(pages.raw.as_ptr(), pages.len, Advice::DontNeed) };
         }
 
         self.mem
@@ -599,41 +588,6 @@ unsafe fn protect_pages(raw: *mut u8, size_in_bytes: usize, permissions: PagePer
             size_in_bytes,
             prot,
             ptr_old,
-        );
-    }
-}
-
-#[derive(Clone, Copy)]
-enum Advice {
-    DontNeed,
-}
-
-/// Give the OS `advice` about the pages containing the `size_in_bytes` bytes at `raw`.
-///
-/// # Panics
-///
-/// Panics if the underlying `madvise` / `VirtualAlloc` call fails.
-unsafe fn madvise(raw: *mut u8, size_in_bytes: usize, advice: Advice) {
-    #[cfg(not(target_os = "windows"))]
-    {
-        let advice = match advice {
-            Advice::DontNeed => libc::MADV_DONTNEED,
-        };
-        libc_error_guard!(madvise, raw.cast::<c_void>(), size_in_bytes, advice);
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let mut ptr = raw.cast::<c_void>();
-        let advice = match advice {
-            Advice::DontNeed => MEM_RESET,
-        };
-        winapi_error_guard!(
-            VirtualAlloc,
-            &mut ptr,
-            size_in_bytes,
-            advice,
-            PAGE_READWRITE,
         );
     }
 }
