@@ -281,7 +281,7 @@ fn bench_versions(
         register(&mut loader);
         let executable = assemble::<TestContextObject>(assembly, Arc::new(loader)).unwrap();
         executable.verify::<RequisiteVerifier>().unwrap();
-        let mut context_object = TestContextObject::new(u64::MAX);
+        let mut context_object = TestContextObject::new(solana_sbpf::vm::MAX_INSTRUCTION_METER);
         let mem_region = MemoryRegion::new(mem, ebpf::MM_INPUT_START);
         create_vm!(
             vm,
