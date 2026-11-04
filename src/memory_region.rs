@@ -839,11 +839,12 @@ impl MemoryMapping {
     /// This requires the [MemoryMapping] to be mutable and
     /// can cause previously translated addresses to become invalid.
     #[inline(always)]
-    pub fn map_with_access_violation_handler(
+    pub fn map_with_access_violation_handler<C: ContextObject>(
         &mut self,
         access_type: AccessType,
         vm_addr: u64,
         len: u64,
+        context_object: &mut C,
     ) -> StableResult<HostBuffer, EbpfError> {
         debug_assert!(self.initialized);
         match self.find_region(vm_addr) {
@@ -860,7 +861,7 @@ impl MemoryMapping {
         // fast path save and restore registers they otherwise do not need to. Note, that a single
         // call site for the cold path matters. Split it up and LLVM merges their results with the
         // fast path's through the stack.
-        self.invoke_access_violation_handler_then_map(access_type, vm_addr, len)
+        self.invoke_access_violation_handler_then_map(access_type, vm_addr, len, context_object)
     }
 
     // `#[cold]`, `#[inline(never)]` have been experimentally determined to improve mapping function
@@ -868,11 +869,12 @@ impl MemoryMapping {
     // In the future using a `rust-cold` calling convention would help this further.
     #[cold]
     #[inline(never)]
-    fn invoke_access_violation_handler_then_map(
+    fn invoke_access_violation_handler_then_map<C: ContextObject>(
         &mut self,
         access_type: AccessType,
         vm_addr: u64,
         len: u64,
+        _context_object: &mut C,
     ) -> StableResult<HostBuffer, EbpfError> {
         let regions = self.get_regions();
         let Some((region_index, region)) = self.find_region(vm_addr) else {
@@ -950,6 +952,7 @@ impl MemoryMapping {
                     AccessType::Load,
                     vm_addr,
                     len,
+                    vm.context(),
                 ) {
                     StableResult::Err(e) => ProgramResult::Err(e),
                     StableResult::Ok(buf) => {
@@ -979,6 +982,7 @@ impl MemoryMapping {
                     AccessType::Store,
                     vm_addr,
                     len,
+                    vm.context(),
                 ) {
                     StableResult::Err(e) => ProgramResult::Err(e),
                     StableResult::Ok(buf) => {
@@ -1988,6 +1992,7 @@ mod test {
             };
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
+            let mut context_object = TestContextObject::new(0);
             let mut regions = vec![MemoryRegion::new(&raw const original, ebpf::MM_REGION_SIZE)];
             regions[0].access_violation_handler_payload = Some(0);
 
@@ -2007,17 +2012,27 @@ mod test {
             };
 
             assert_eq!(
-                m.map_with_access_violation_handler(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
-                    .unwrap()
-                    .ptr()
-                    .addr(),
+                m.map_with_access_violation_handler(
+                    AccessType::Load,
+                    ebpf::MM_REGION_SIZE,
+                    1,
+                    &mut context_object
+                )
+                .unwrap()
+                .ptr()
+                .addr(),
                 original.as_ptr().addr()
             );
             assert_eq!(
-                m.map_with_access_violation_handler(AccessType::Store, ebpf::MM_REGION_SIZE, 1)
-                    .unwrap()
-                    .ptr()
-                    .addr(),
+                m.map_with_access_violation_handler(
+                    AccessType::Store,
+                    ebpf::MM_REGION_SIZE,
+                    1,
+                    &mut context_object
+                )
+                .unwrap()
+                .ptr()
+                .addr(),
                 copied.borrow().as_ptr().addr()
             );
         }
