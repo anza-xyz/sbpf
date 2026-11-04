@@ -191,6 +191,15 @@ impl<C: ContextObject> Executable<C> {
     }
 }
 
+/// The largest instruction meter value the VM will track.
+///
+/// The JIT keeps the remaining budget plus the current program counter in one register, using
+/// wrapping arithmetic, so a budget within a program's length of `u64::MAX` can wrap that register
+/// and throw [`EbpfError::ExceededMaxInstructions`] while the interpreter keeps running. Capping
+/// what both engines compare against keeps them in agreement. The cap is far more instructions
+/// than any program can execute.
+pub const MAX_INSTRUCTION_METER: u64 = (1 << 48) - 1;
+
 /// Runtime context
 pub trait ContextObject {
     /// Consume instructions from meter
@@ -427,7 +436,7 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let initial_insn_count = self.context().get_remaining();
-        self.previous_instruction_meter = initial_insn_count;
+        self.previous_instruction_meter = initial_insn_count.min(MAX_INSTRUCTION_METER);
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
 
@@ -570,7 +579,7 @@ impl<C: ContextObject> EncryptedHostAddressToEbpfVm<C> {
         let due_insn_count = vm.due_insn_count;
         vm.context().consume(due_insn_count);
         let result = cb(vm);
-        vm.previous_instruction_meter = vm.context().get_remaining();
+        vm.previous_instruction_meter = vm.context().get_remaining().min(MAX_INSTRUCTION_METER);
         result
     }
 }

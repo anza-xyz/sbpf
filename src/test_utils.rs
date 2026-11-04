@@ -317,7 +317,7 @@ macro_rules! test_interpreter_and_jit {
         #[allow(unused_mut)]
         let mut context_object = $context_object;
         if $override_budget {
-            const INSTRUCTION_METER_BUDGET: u64 = 1024;
+            const INSTRUCTION_METER_BUDGET: u64 = u64::MAX;
             context_object.remaining = INSTRUCTION_METER_BUDGET;
         }
         let original_budget = context_object.remaining;
