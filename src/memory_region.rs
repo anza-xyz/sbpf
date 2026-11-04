@@ -28,10 +28,12 @@ use std::{array, cell::UnsafeCell, fmt, mem, ops::Range, ptr};
 */
 
 /// Callback executed before generate_access_violation()
-pub type AccessViolationHandler = Box<dyn Fn(&mut MemoryRegion, u64, AccessType, u64, u64)>;
+pub type AccessViolationHandler =
+    Box<dyn Fn(&mut dyn ContextObject, &mut MemoryRegion, u64, AccessType, u64, u64)>;
 /// Fail always
 #[allow(clippy::result_unit_err)]
 pub fn default_access_violation_handler(
+    _context_object: &mut dyn ContextObject,
     _region: &mut MemoryRegion,
     _region_max_len: u64,
     _access_type: AccessType,
@@ -874,7 +876,7 @@ impl MemoryMapping {
         access_type: AccessType,
         vm_addr: u64,
         len: u64,
-        _context_object: &mut C,
+        context_object: &mut C,
     ) -> StableResult<HostBuffer, EbpfError> {
         let regions = self.get_regions();
         let Some((region_index, region)) = self.find_region(vm_addr) else {
@@ -891,7 +893,14 @@ impl MemoryMapping {
             .get(region_index.saturating_add(1))
             .map_or(u64::MAX, |next_region| next_region.vm_addr)
             .saturating_sub(region.vm_addr);
-        (self.access_violation_handler)(&mut region, max_len, access_type, vm_addr, len);
+        (self.access_violation_handler)(
+            context_object,
+            &mut region,
+            max_len,
+            access_type,
+            vm_addr,
+            len,
+        );
         if region.host_buffer().is_mutable() || access_type != AccessType::Store {
             if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
                 if let Err(err) = unsafe { self.replace_region(region_index, region) } {
@@ -2002,7 +2011,7 @@ mod test {
                     regions,
                     &config,
                     SBPFVersion::V3,
-                    Box::new(move |region, _, _, _, _| {
+                    Box::new(move |_, region, _, _, _, _| {
                         let mut vec = c.borrow_mut();
                         vec.extend_from_slice(&original);
                         region.redirect(&raw mut vec[..]);
@@ -2057,7 +2066,7 @@ mod test {
                     regions,
                     &config,
                     SBPFVersion::V3,
-                    Box::new(move |region, _, _, _, _| {
+                    Box::new(move |_, region, _, _, _, _| {
                         let mut vec = c.borrow_mut();
                         vec.extend_from_slice(&original);
                         region.redirect(&raw mut vec[..]);
@@ -2130,7 +2139,7 @@ mod test {
                     regions,
                     &config,
                     SBPFVersion::V3,
-                    Box::new(move |region, _, _, _, _| {
+                    Box::new(move |_, region, _, _, _, _| {
                         // check that the argument passed to MemoryRegion::new is then passed to the
                         // callback
                         assert_eq!(region.access_violation_handler_payload, Some(42));
