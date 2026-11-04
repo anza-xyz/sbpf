@@ -520,6 +520,7 @@ impl UnalignedMemoryMapping {
 
     /// Initialize the memory mapping
     pub fn initialize(&mut self) -> Result<(), EbpfError> {
+        self.cache.get_mut().flush();
         self.regions.sort();
         let number_of_regions = self.regions.len();
         for index in 1..number_of_regions {
@@ -1151,7 +1152,10 @@ impl MappingCache {
 
 #[cfg(test)]
 mod test {
-    use crate::{assert_error, program::BuiltinProgram, test_utils::TestContextObject, vm::EbpfVm};
+    use crate::{
+        assert_error, ebpf::MM_REGION_SIZE, program::BuiltinProgram, test_utils::TestContextObject,
+        vm::EbpfVm,
+    };
     use std::{cell::RefCell, rc::Rc};
 
     use super::*;
@@ -2258,6 +2262,37 @@ mod test {
             let (index, region) = mapping.find_region(2 * region_size).unwrap();
             assert_eq!(index, 2);
             assert_eq!(region.host_buffer().ptr().cast::<u8>(), mem4.as_ptr());
+        }
+    }
+
+    #[test]
+    fn test_regression_initialize_flushes_mapping_cache() {
+        for aligned in [true, false] {
+            let config = Config {
+                aligned_memory_mapping: aligned,
+                ..Config::default()
+            };
+            let (a, b, c) = ([0xaau8; 8], [0xbbu8; 8], [0xccu8; 8]);
+            let mut mapping = unsafe {
+                MemoryMapping::new(
+                    vec![
+                        MemoryRegion::new(&raw const a[..], MM_REGION_SIZE),
+                        MemoryRegion::new(&raw const b[..], 2 * MM_REGION_SIZE),
+                        MemoryRegion::new(&raw const c[..], 3 * MM_REGION_SIZE),
+                    ],
+                    &config,
+                    SBPFVersion::V3,
+                )
+            }
+            .unwrap();
+            let can_read = |m: &MemoryMapping, addr| {
+                matches!(m.map(AccessType::Load, addr, 8), StableResult::Ok(_))
+            };
+
+            assert!(can_read(&mapping, 2 * MM_REGION_SIZE));
+            mapping.get_regions_mut()[0] = MemoryRegion::new(&raw const a[..], 4 * MM_REGION_SIZE);
+            mapping.initialize().unwrap();
+            assert!(can_read(&mapping, 2 * MM_REGION_SIZE));
         }
     }
 }
