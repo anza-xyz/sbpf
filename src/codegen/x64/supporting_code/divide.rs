@@ -53,7 +53,7 @@ impl DivideHelpers {
         // `RINSN` is saved by `invoke_support`. `RMETER` is the only thing we have to spill here.
         x64asm!(out
             ; jz =>zero
-            ; push RMETER
+            ; push rdx
             ; xor edx, edx
         );
         match (width, op) {
@@ -79,7 +79,7 @@ impl DivideHelpers {
             ),
         }
         x64asm!(out
-            ; pop RMETER
+            ; pop rdx
             ; ret
             ; =>zero
             ;; validate_meter(out)
