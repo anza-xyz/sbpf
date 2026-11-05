@@ -5,8 +5,8 @@
 use super::*;
 use crate::codegen::generate::InterpreterGenerator;
 use crate::codegen::{
-    SIG_CALL_DEPTH_EXCEEDED, SIG_CALL_OUTSIDE_TEXT_SEGMENT, SIG_DIVIDE_BY_ZERO, SIG_INVALID_INSN,
-    SIG_PROGRAM_RESULT,
+    SIG_CALL_DEPTH_EXCEEDED, SIG_CALL_OUTSIDE_TEXT_SEGMENT, SIG_DIVIDE_BY_ZERO,
+    SIG_DIVIDE_OVERFLOW, SIG_INVALID_INSN, SIG_PROGRAM_RESULT,
 };
 use crate::memory_management::{Mapping, ReadExecute};
 use crate::program::SBPFVersion;
@@ -22,17 +22,18 @@ use std::sync::LazyLock;
 pub(in crate::codegen) struct SupportingCode {
     /// `CALL_IMM` SBPFv3 onwards.
     pub(super) call_imm: u32,
-    /// `CALL_REG` SBPFv3 onwards. One helper for each register containing the callee.
+    /// `CALL_REG` of the versions that have the register of the target in the instruction (SBPFv2
+    /// and v3 onwards). One helper for each register containing the callee.
     pub(super) callx: [u32; Reg::COUNT],
     /// Syscall trampoline.
     pub(super) syscall: u32,
     /// Append registers and the pc at `RTEMP` to `vm.register_trace`.
     #[cfg(feature = "tracer")]
     pub(super) trace: u32,
-    /// SBPFv0 `CALL_IMM`.
-    pub(super) v0_call_imm: u32,
-    /// SBPFv0 `CALL_REG`.
-    pub(super) v0_callx: u32,
+    /// SBPFv0, v1 and v2 `CALL_IMM`.
+    pub(super) v0v1v2_call_imm: u32,
+    /// SBPFv0 and v1 `CALL_REG`.
+    pub(super) v0v1_callx: u32,
     /// The entrypoint to set up the machine state VM execution expects.
     pub(super) entry_point: u32,
     /// Terminate the execution after CUs have been exhausted.
@@ -69,8 +70,8 @@ impl SupportingCode {
         let mut out = Asm::new(usize::try_from(base).unwrap());
         let (meter_exceeded, invalid_insn) = Self::signals(&mut out, base);
         let call_imm = Self::call_imm(&mut out, base);
-        let v0_call_imm = Self::v0_call_imm(&mut out, base);
-        let (v0_callx, callx) = Self::callx(&mut out, base);
+        let v0v1v2_call_imm = Self::v0v1v2_call_imm(&mut out, base);
+        let (v0v1_callx, callx) = Self::callx(&mut out, base);
         let memory = MemoryHelpers::generate(&mut out, base);
         let syscall = Self::syscall(&mut out, base);
         #[cfg(feature = "tracer")]
@@ -87,8 +88,8 @@ impl SupportingCode {
         Self {
             call_imm,
             callx,
-            v0_call_imm,
-            v0_callx,
+            v0v1v2_call_imm,
+            v0v1_callx,
             syscall,
             #[cfg(feature = "tracer")]
             trace,
@@ -215,10 +216,16 @@ impl SupportingCode {
             ; push R7
             ; push R8
             ; push R9
+            // `r10` is only bumped by the call itself unless the version has the programs bump it,
+            // which they may do in the callee, so it is restored from where it was saved. The extra
+            // push keeps the stack aligned for the call.
+            ; push R10
+            ; push R10
             ; add R10, rbp => Frame[BYTE -1].stack_frame_bump
             ;; debug_assert_bpf_call_stack_alignment(out)
             ; call RTEMP
-            ; sub R10, rbp => Frame[BYTE -1].stack_frame_bump
+            ; pop R10
+            ; pop R10
             ; pop R9
             ; pop R8
             ; pop R7
@@ -278,9 +285,9 @@ impl SupportingCode {
             ;; Self::internal_call(out, Callee::AbsoluteAddress)
         );
 
-        // v0 stores the register in the immediate field.
+        // v0 and v1 store the register in the immediate field.
         // We have to do a table dispatch based on the register number.
-        let v0_callx = address(out, base, true);
+        let v0v1_callx = address(out, base, true);
         let invalid = out.new_dynamic_label();
         let stubs = i32::try_from(stubs as usize).expect("supports in the first 2 GiB");
         let last_register = (GPREG_MAP.len() as i32).checked_sub(1).unwrap();
@@ -295,12 +302,12 @@ impl SupportingCode {
             ;; validate_meter(out)
             ;; terminate(out, SIG_INVALID_INSN)
         );
-        (v0_callx, callx)
+        (v0v1_callx, callx)
     }
 }
 
 impl SupportingCode {
-    fn v0_call_imm(out: &mut Asm, base: u32) -> u32 {
+    fn v0v1v2_call_imm(out: &mut Asm, base: u32) -> u32 {
         let start = address(out, base, true);
         let [not_internal, failed] = [(); 2].map(|()| out.new_dynamic_label());
         x64asm!(out
@@ -378,7 +385,7 @@ pub(super) fn call_dispatcher<C: crate::vm::ContextObject>(version: SBPFVersion)
     }
 }
 
-/// The SBPFv0 `CALL_IMM`.
+/// The SBPFv0 to v2 `CALL_IMM`.
 extern "sysv64" fn dispatch_call<C: crate::vm::ContextObject>(
     vm: &mut crate::vm::EbpfVm<C>,
     key: u32,
@@ -623,7 +630,7 @@ enum HostCallStatus {
     Ok = 0,
     /// The error has been stored into `vm.program_result`.
     Failed = 1,
-    /// The SBPFv0 `CALL_IMM` is an internal call to the pc in `rax`, see `dispatch_call`.
+    /// The SBPFv0 to v2 `CALL_IMM` is an internal call to the pc in `rax`, see `dispatch_call`.
     CallInternal = 2,
 }
 
@@ -666,14 +673,26 @@ mod tests {
     #[test]
     fn shared_by_all_versions() {
         let supports = SupportingCode::get();
-        let divide = template_opcode(ebpf::DIV64_REG, 1, 2);
+        // `DIV64_REG` is not an instruction of the versions with `enable_pqr`, where `UDIV64_REG`
+        // is the same division.
+        let divide = |version: SBPFVersion| {
+            let op = if version.enable_pqr() {
+                ebpf::UDIV64_REG
+            } else {
+                ebpf::DIV64_REG
+            };
+            template_opcode(op, 1, 2)
+        };
         let call_imm = template_opcode(ebpf::CALL_IMM, 0, 0);
         let divide_helper = supports.divide.get(DivOp::Div, Width::W64, Reg(1), Reg(2));
         for (version, call_imm_helper) in [
-            (SBPFVersion::V0, supports.v0_call_imm),
+            (SBPFVersion::V0, supports.v0v1v2_call_imm),
+            (SBPFVersion::V1, supports.v0v1v2_call_imm),
+            (SBPFVersion::V2, supports.v0v1v2_call_imm),
             (SBPFVersion::V3, supports.syscall),
             (SBPFVersion::V4, supports.syscall),
         ] {
+            let divide = divide(version);
             let templates = jit_templates(version);
             let template = |opcode: TemplateOpcode| {
                 let len = templates.insn_layout(opcode).len();
