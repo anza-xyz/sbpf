@@ -72,6 +72,9 @@ pub enum EbpfError {
     /// Syscall error
     #[error("Syscall error: {0}")]
     SyscallError(Box<dyn Error>),
+    /// The instruction meter given to the VM exceeds [`MAX_INSTRUCTION_METER`](crate::vm::MAX_INSTRUCTION_METER)
+    #[error("instruction meter of {0} exceeds the maximum of {max}", max = crate::vm::MAX_INSTRUCTION_METER)]
+    InstructionMeterTooLarge(u64),
 }
 
 impl EbpfError {

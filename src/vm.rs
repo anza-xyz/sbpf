@@ -191,6 +191,12 @@ impl<C: ContextObject> Executable<C> {
     }
 }
 
+/// The largest instruction meter (in CUs) the VM accepts at the start of execution.
+///
+/// Keeping the meter far below `i64::MAX` ensures implementations don't need to worry about sign or
+/// limits of operations involving CU too much.
+pub const MAX_INSTRUCTION_METER: u64 = (1 << 48) - 1;
+
 /// Runtime context
 pub trait ContextObject {
     /// Consume instructions from meter
@@ -427,6 +433,12 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         debug_assert!(Arc::ptr_eq(&self.loader, executable.get_loader()));
         self.registers[11] = executable.get_entrypoint_instruction_offset() as u64;
         let initial_insn_count = self.context().get_remaining();
+        if initial_insn_count > MAX_INSTRUCTION_METER {
+            return (
+                0,
+                ProgramResult::Err(EbpfError::InstructionMeterTooLarge(initial_insn_count)),
+            );
+        }
         self.previous_instruction_meter = initial_insn_count;
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
@@ -570,7 +582,9 @@ impl<C: ContextObject> EncryptedHostAddressToEbpfVm<C> {
         let due_insn_count = vm.due_insn_count;
         vm.context().consume(due_insn_count);
         let result = cb(vm);
-        vm.previous_instruction_meter = vm.context().get_remaining();
+        let remaining = vm.context().get_remaining();
+        debug_assert!(remaining <= MAX_INSTRUCTION_METER);
+        vm.previous_instruction_meter = remaining;
         result
     }
 }
