@@ -6,9 +6,6 @@
 
 #![cfg_attr(target_os = "windows", allow(dead_code))]
 
-#[cfg(feature = "shuttle-test")]
-use shuttle::rand;
-
 use rand::{thread_rng, Rng};
 use std::marker::PhantomData;
 use std::ops::Range;
