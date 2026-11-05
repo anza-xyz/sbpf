@@ -64,9 +64,7 @@ impl FreeList {
     /// any particular contents.
     fn alloc(&self) -> Pages {
         let pages = { self.mem.lock().unwrap_or_else(|e| e.into_inner()).pop() };
-        let mut pages = pages.unwrap_or_else(|| Pages::new(self.size));
-        pages.origin = Origin::Pooled;
-        pages
+        pages.unwrap_or_else(|| Pages::new(self.size, Origin::Pooled))
     }
 
     /// Add [`Pages`] to the list.
@@ -168,12 +166,12 @@ impl Pages {
     /// # Panics
     ///
     /// Panics if the pages cannot be mapped.
-    fn new(len: usize) -> Self {
+    fn new(len: usize, origin: Origin) -> Self {
         let raw = allocate_pages(len, std::ptr::null_mut());
         Self {
             raw: NonNull::new(raw).expect("mapped pages at a null address"),
             len,
-            origin: Origin::Anonymous,
+            origin,
         }
     }
 
@@ -663,7 +661,7 @@ mod tests {
 
     /// `len` bytes of zeroed pages, which are not pooled.
     fn new(len: usize) -> Mapping {
-        Mapping::whole(Pages::new(len))
+        Mapping::whole(Pages::new(len, Origin::Anonymous))
     }
 
     #[test]
