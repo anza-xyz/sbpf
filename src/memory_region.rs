@@ -837,84 +837,6 @@ impl MemoryMapping {
         StableResult::Err(self.generate_access_violation_for(region, access_type, vm_addr, len))
     }
 
-    /// Map virtual memory to host memory and potentially call the [AccessViolationHandler].
-    ///
-    /// This requires the [MemoryMapping] to be mutable and
-    /// can cause previously translated addresses to become invalid.
-    #[inline(always)]
-    pub fn map_with_access_violation_handler<C: ContextObject>(
-        &mut self,
-        access_type: AccessType,
-        vm_addr: u64,
-        len: u64,
-        context_object: &mut C,
-    ) -> StableResult<HostBuffer, EbpfError> {
-        debug_assert!(self.initialized);
-        match self.find_region(vm_addr) {
-            Some((_index, region))
-                if region.host_buffer().is_mutable() || access_type != AccessType::Store =>
-            {
-                if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                    return StableResult::Ok(host_buffer);
-                }
-            }
-            _ => (),
-        }
-        // The slow path is out of line, so that the code in there doesn't make the callers of the
-        // fast path save and restore registers they otherwise do not need to. Note, that a single
-        // call site for the cold path matters. Split it up and LLVM merges their results with the
-        // fast path's through the stack.
-        self.invoke_access_violation_handler_then_map(access_type, vm_addr, len, context_object)
-    }
-
-    // `#[cold]`, `#[inline(never)]` have been experimentally determined to improve mapping function
-    // throughput.
-    // In the future using a `rust-cold` calling convention would help this further.
-    #[cold]
-    #[inline(never)]
-    fn invoke_access_violation_handler_then_map<C: ContextObject>(
-        &mut self,
-        access_type: AccessType,
-        vm_addr: u64,
-        len: u64,
-        context_object: &mut C,
-    ) -> StableResult<HostBuffer, EbpfError> {
-        let regions = self.get_regions();
-        let Some((region_index, region)) = self.find_region(vm_addr) else {
-            debug_assert!(self.find_region(vm_addr).is_none());
-            return StableResult::Err(self.generate_access_violation_for(
-                None,
-                access_type,
-                vm_addr,
-                len,
-            ));
-        };
-        let mut region = region.clone();
-        let max_len = regions
-            .get(region_index.saturating_add(1))
-            .map_or(u64::MAX, |next_region| next_region.vm_addr)
-            .saturating_sub(region.vm_addr);
-        (self.access_violation_handler)(
-            context_object,
-            &mut region,
-            max_len,
-            access_type,
-            vm_addr,
-            len,
-        );
-        if region.host_buffer().is_mutable() || access_type != AccessType::Store {
-            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                if let Err(err) = unsafe { self.replace_region(region_index, region) } {
-                    return StableResult::Err(err);
-                }
-                return StableResult::Ok(host_buffer);
-            }
-        }
-        // The handler did not change the region in the mapping, so the original one still applies.
-        let region = self.get_regions().get(region_index);
-        StableResult::Err(self.generate_access_violation_for(region, access_type, vm_addr, len))
-    }
-
     /// Loads `size_of::<T>()` bytes at the given guest address without invoking the access_violation_handler.
     #[inline]
     pub fn load_first_attempt<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> ProgramResult {
@@ -958,11 +880,11 @@ impl MemoryMapping {
                 let len = mem::size_of::<T>() as u64;
                 debug_assert!(len <= mem::size_of::<u64>() as u64);
                 debug_assert!(self.initialized);
-                vm.program_result = match self.invoke_access_violation_handler_then_map(
+                vm.program_result = match invoke_access_violation_handler_then_map(
+                    vm.context(),
                     AccessType::Load,
                     vm_addr,
                     len,
-                    vm.context(),
                 ) {
                     StableResult::Err(e) => ProgramResult::Err(e),
                     StableResult::Ok(buf) => {
@@ -988,11 +910,11 @@ impl MemoryMapping {
                 let len = mem::size_of::<T>() as u64;
                 debug_assert!(len <= mem::size_of::<u64>() as u64);
                 debug_assert!(self.initialized);
-                vm.program_result = match self.invoke_access_violation_handler_then_map(
+                vm.program_result = match invoke_access_violation_handler_then_map(
+                    vm.context(),
                     AccessType::Store,
                     vm_addr,
                     len,
-                    vm.context(),
                 ) {
                     StableResult::Err(e) => ProgramResult::Err(e),
                     StableResult::Ok(buf) => {
@@ -1108,6 +1030,89 @@ impl MemoryMapping {
             EbpfError::AccessViolation(access_type, vm_addr, len, region_name)
         }
     }
+}
+
+// `#[cold]`, `#[inline(never)]` have been experimentally determined to improve mapping function
+// throughput.
+// In the future using a `rust-cold` calling convention would help this further.
+#[cold]
+#[inline(never)]
+fn invoke_access_violation_handler_then_map<C: ContextObject>(
+    context_object: &mut C,
+    access_type: AccessType,
+    vm_addr: u64,
+    len: u64,
+) -> StableResult<HostBuffer, EbpfError> {
+    let memory_mapping = unsafe { context_object.active_mapping_ptr().as_mut() };
+    let regions = memory_mapping.get_regions();
+    let Some((region_index, region)) = memory_mapping.find_region(vm_addr) else {
+        debug_assert!(memory_mapping.find_region(vm_addr).is_none());
+        return StableResult::Err(memory_mapping.generate_access_violation_for(
+            None,
+            access_type,
+            vm_addr,
+            len,
+        ));
+    };
+    let mut region = region.clone();
+    let max_len = regions
+        .get(region_index.saturating_add(1))
+        .map_or(u64::MAX, |next_region| next_region.vm_addr)
+        .saturating_sub(region.vm_addr);
+    (memory_mapping.access_violation_handler)(
+        context_object,
+        &mut region,
+        max_len,
+        access_type,
+        vm_addr,
+        len,
+    );
+    let memory_mapping = unsafe { context_object.active_mapping_ptr().as_mut() };
+    if region.host_buffer().is_mutable() || access_type != AccessType::Store {
+        if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+            if let Err(err) = unsafe { memory_mapping.replace_region(region_index, region) } {
+                return StableResult::Err(err);
+            }
+            return StableResult::Ok(host_buffer);
+        }
+    }
+    // The handler did not change the region in the mapping, so the original one still applies.
+    let region = memory_mapping.get_regions().get(region_index);
+    StableResult::Err(memory_mapping.generate_access_violation_for(
+        region,
+        access_type,
+        vm_addr,
+        len,
+    ))
+}
+
+/// Map virtual memory to host memory and potentially call the [AccessViolationHandler].
+///
+/// This requires the [MemoryMapping] to be mutable and
+/// can cause previously translated addresses to become invalid.
+pub fn map_with_access_violation_handler<C: ContextObject>(
+    context_object: &mut C,
+    access_type: AccessType,
+    vm_addr: u64,
+    len: u64,
+) -> StableResult<HostBuffer, EbpfError> {
+    let memory_mapping = unsafe { context_object.active_mapping_ptr().as_mut() };
+    debug_assert!(memory_mapping.initialized);
+    match memory_mapping.find_region(vm_addr) {
+        Some((_index, region))
+            if region.host_buffer().is_mutable() || access_type != AccessType::Store =>
+        {
+            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
+                return StableResult::Ok(host_buffer);
+            }
+        }
+        _ => (),
+    }
+    // The slow path is out of line, so that the code in there doesn't make the callers of the
+    // fast path save and restore registers they otherwise do not need to. Note, that a single
+    // call site for the cold path matters. Split it up and LLVM merges their results with the
+    // fast path's through the stack.
+    invoke_access_violation_handler_then_map(context_object, access_type, vm_addr, len)
 }
 
 /// Fast, small linear cache used to speed up unaligned memory mapping.
@@ -2005,12 +2010,12 @@ mod test {
             };
             let original = [11, 22];
             let copied = Rc::new(RefCell::new(Vec::new()));
-            let mut context_object = TestContextObject::new(0);
             let mut regions = vec![MemoryRegion::new(&raw const original, ebpf::MM_REGION_SIZE)];
             regions[0].access_violation_handler_payload = Some(0);
 
             let c = Rc::clone(&copied);
-            let mut m = unsafe {
+            let mut context_object = TestContextObject::new(0);
+            context_object.memory_mapping = unsafe {
                 MemoryMapping::new_with_access_violation_handler(
                     regions,
                     &config,
@@ -2025,11 +2030,11 @@ mod test {
             };
 
             assert_eq!(
-                m.map_with_access_violation_handler(
+                map_with_access_violation_handler(
+                    &mut context_object,
                     AccessType::Load,
                     ebpf::MM_REGION_SIZE,
                     1,
-                    &mut context_object
                 )
                 .unwrap()
                 .ptr()
@@ -2037,11 +2042,11 @@ mod test {
                 original.as_ptr().addr()
             );
             assert_eq!(
-                m.map_with_access_violation_handler(
+                map_with_access_violation_handler(
+                    &mut context_object,
                     AccessType::Store,
                     ebpf::MM_REGION_SIZE,
                     1,
-                    &mut context_object
                 )
                 .unwrap()
                 .ptr()
@@ -2065,7 +2070,8 @@ mod test {
             regions[0].access_violation_handler_payload = Some(0);
 
             let c = Rc::clone(&copied);
-            let mut m = unsafe {
+            let mut context_object = TestContextObject::new(0);
+            context_object.memory_mapping = unsafe {
                 MemoryMapping::new_with_access_violation_handler(
                     regions,
                     &config,
@@ -2078,41 +2084,51 @@ mod test {
                 )
                 .unwrap()
             };
-            let mut context_object = TestContextObject::new(0);
             let mut vm = EbpfVm::new(
                 loader,
                 *config.enabled_sbpf_versions.end(),
                 &mut context_object,
                 0,
             );
+            let memory_mapping = unsafe { vm.memory_mapping.as_mut() };
 
             assert_eq!(
-                m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
+                memory_mapping
+                    .map(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
                     .unwrap()
                     .ptr()
                     .addr(),
                 original.as_ptr().addr()
             );
-
             assert_eq!(
-                m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE).unwrap(),
+                memory_mapping
+                    .load_first_attempt::<u8>(ebpf::MM_REGION_SIZE)
+                    .unwrap(),
                 11
             );
             assert_eq!(
-                m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE + 1)
+                memory_mapping
+                    .load_first_attempt::<u8>(ebpf::MM_REGION_SIZE + 1)
                     .unwrap(),
                 22
             );
             assert!(copied.borrow().is_empty());
 
-            m.store_second_attempt(33u8, ebpf::MM_REGION_SIZE, vm.encrypted_host_address());
+            memory_mapping.store_second_attempt(
+                33u8,
+                ebpf::MM_REGION_SIZE,
+                vm.encrypted_host_address(),
+            );
             assert_eq!(original[0], 11);
             assert_eq!(
-                m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE).unwrap(),
+                memory_mapping
+                    .load_first_attempt::<u8>(ebpf::MM_REGION_SIZE)
+                    .unwrap(),
                 33
             );
             assert_eq!(
-                m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE + 1)
+                memory_mapping
+                    .load_first_attempt::<u8>(ebpf::MM_REGION_SIZE + 1)
                     .unwrap(),
                 22
             );
@@ -2138,7 +2154,8 @@ mod test {
             regions[0].access_violation_handler_payload = Some(42);
 
             let c = Rc::clone(&copied);
-            let mut m = unsafe {
+            let mut context_object = TestContextObject::new(0);
+            context_object.memory_mapping = unsafe {
                 MemoryMapping::new_with_access_violation_handler(
                     regions,
                     &config,
@@ -2154,18 +2171,24 @@ mod test {
                 )
                 .unwrap()
             };
-            let mut context_object = TestContextObject::new(0);
             let mut vm = EbpfVm::new(
                 loader,
                 *config.enabled_sbpf_versions.end(),
                 &mut context_object,
                 0,
             );
+            let memory_mapping = unsafe { vm.memory_mapping.as_mut() };
 
-            m.store_second_attempt(55u8, ebpf::MM_REGION_SIZE, vm.encrypted_host_address());
+            memory_mapping.store_second_attempt(
+                55u8,
+                ebpf::MM_REGION_SIZE,
+                vm.encrypted_host_address(),
+            );
             assert_eq!(original1[0], 11);
             assert_eq!(
-                m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE).unwrap(),
+                memory_mapping
+                    .load_first_attempt::<u8>(ebpf::MM_REGION_SIZE)
+                    .unwrap(),
                 55
             );
         }
