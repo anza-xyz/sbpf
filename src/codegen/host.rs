@@ -20,7 +20,7 @@ pub(super) enum HostCallStatus {
     Ok = 0,
     /// The error has been stored into `vm.program_result`.
     Failed = 1,
-    /// The SBPFv0 `CALL_IMM` is an internal call to the pc in `value`, see `dispatch_call`.
+    /// The SBPFv0 to v2 `CALL_IMM` is an internal call to the pc in `value`, see `dispatch_call`.
     CallInternal = 2,
 }
 
@@ -60,7 +60,7 @@ impl HostCallResult {
 
 /// The address of the function to call for `CALL_IMM`, given the version.
 ///
-/// For SBPFv0 the function is [`dispatch_call`], which also resolves internal calls, otherwise
+/// For SBPFv0 to v2 the function is [`dispatch_call`], which also resolves internal calls, otherwise
 /// [`dispatch_syscall`].
 pub(super) fn call_dispatcher<C: ContextObject>(version: SBPFVersion) -> *const u8 {
     if version.static_syscalls() {
@@ -71,7 +71,7 @@ pub(super) fn call_dispatcher<C: ContextObject>(version: SBPFVersion) -> *const 
 }
 
 host_abi! {
-    /// The SBPFv0 `CALL_IMM`.
+    /// The SBPFv0 to v2 `CALL_IMM`.
     fn dispatch_call<C: ContextObject>(
         vm: &mut EbpfVm<C>,
         key: u32,
@@ -177,6 +177,17 @@ impl AccessSize {
             ebpf::BPF_H => Self::H,
             ebpf::BPF_W => Self::W,
             ebpf::BPF_DW => Self::DW,
+            _ => unreachable!(),
+        }
+    }
+
+    /// The size of the access done by the SBPFv2 load or store with the opcode `op`.
+    pub(super) fn of_v2_opcode(op: u8) -> Self {
+        match op & (ebpf::BPF_1B | ebpf::BPF_2B | ebpf::BPF_4B | ebpf::BPF_8B) {
+            ebpf::BPF_1B => Self::B,
+            ebpf::BPF_2B => Self::H,
+            ebpf::BPF_4B => Self::W,
+            ebpf::BPF_8B => Self::DW,
             _ => unreachable!(),
         }
     }
