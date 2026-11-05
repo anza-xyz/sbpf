@@ -31,7 +31,7 @@ use solana_sbpf::{
         TCP_SACK_MATCH, TCP_SACK_NOMATCH,
     },
     verifier::RequisiteVerifier,
-    vm::{Config, ContextObject},
+    vm::{CallFrame, Config, ContextObject, ExecutionMode, MAX_INSTRUCTION_METER},
 };
 use std::{fs::File, io::Read, sync::Arc};
 
@@ -3209,6 +3209,58 @@ fn test_far_jumps() {
         TestContextObject::new(11),
         ProgramResult::Ok(0),
     );
+}
+
+#[test]
+fn test_err_instruction_meter_too_large() {
+    let config = Config::default();
+    let executable = assemble::<TestContextObject>(
+        "
+        mov64 r0, 42
+        exit",
+        Arc::new(BuiltinProgram::new_loader(config)),
+    )
+    .unwrap();
+    executable.verify::<RequisiteVerifier>().unwrap();
+    executable.jit_compile().unwrap();
+
+    // A budget above the cap is rejected before the first instruction, by both engines, so a
+    // packed meter can never wrap. `MAX_INSTRUCTION_METER` itself is exercised by every other
+    // test in this section, which runs below it.
+    for budget in [MAX_INSTRUCTION_METER + 1, u64::MAX] {
+        let mut results = Vec::new();
+        for mode in [ExecutionMode::Interpreted, ExecutionMode::Jit] {
+            let mut context_object = TestContextObject::new(budget);
+            // Real call frames: an empty slice would make the interpreter panic on its own
+            // assertion as soon as it is reached, which would hide what is under test.
+            let mut call_frames =
+                vec![CallFrame::default(); executable.get_config().max_call_depth];
+            create_vm!(
+                vm,
+                &executable,
+                &mut context_object,
+                stack,
+                heap,
+                vec![],
+                None
+            );
+            let (count, result) = vm.execute_program(&executable, &mut { mode }, &mut call_frames);
+            results.push((count, format!("{result:?}")));
+        }
+        assert_eq!(
+            results[0], results[1],
+            "the interpreter and the JIT disagreed at a budget of {budget}"
+        );
+        assert_eq!(
+            results[0].0, 0,
+            "a rejected call must not charge instructions, at a budget of {budget}"
+        );
+        assert!(
+            results[0].1.contains("InstructionMeterTooLarge"),
+            "expected a rejection at a budget of {budget}, got {}",
+            results[0].1
+        );
+    }
 }
 
 // Symbols and Relocation
