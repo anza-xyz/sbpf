@@ -14,11 +14,11 @@ use crate::{
     aligned_memory::AlignedMemory,
     ebpf::{self, HOST_ALIGN},
     elf::Executable,
-    error::EbpfError,
+    error::{EbpfError, ProgramResult},
     memory_region::{AccessViolationHandler, MemoryMapping, MemoryRegion},
     program::SBPFVersion,
     static_analysis::RegisterTraceEntry,
-    vm::{Config, ContextObject},
+    vm::{CallFrame, Config, ContextObject, ExecutionMode},
 };
 use std::ptr;
 
@@ -232,6 +232,60 @@ pub static TCP_SACK_NOMATCH: [u8; 66] = [
     0x9e, 0x27, //
 ];
 
+/// Data for [`test_interpreter_and_jit!`] to compare between modes.
+pub struct ExecutionOutcome {
+    /// The instruction count returned by [`EbpfVm::execute_program`].
+    pub instruction_count: u64,
+    /// The result returned by [`EbpfVm::execute_program`].
+    pub result: ProgramResult,
+    /// The last program counter (`r11`).
+    pub final_pc: u64,
+    /// [`EbpfVm::register_trace`]
+    pub register_trace: Vec<RegisterTraceEntry>,
+    /// [`EbpfVm::due_insn_count`] after the execution.
+    pub due_insn_count: u64,
+}
+
+/// Create a VM and execute the `executable`.
+///
+/// This is what the macros do by default. The `run` “closure” of the macros may replace it.
+pub fn run_program(
+    executable: &Executable<TestContextObject>,
+    context_object: &mut TestContextObject,
+    additional_regions: Vec<MemoryRegion>,
+    access_violation_handler: Option<AccessViolationHandler>,
+    mode: &mut ExecutionMode,
+) -> ExecutionOutcome {
+    let mut call_frames = vec![CallFrame::default(); executable.get_config().max_call_depth];
+    crate::create_vm!(
+        vm,
+        executable,
+        context_object,
+        stack,
+        heap,
+        additional_regions,
+        access_violation_handler
+    );
+    let (instruction_count, result) = vm.execute_program(executable, mode, &mut call_frames);
+    ExecutionOutcome {
+        instruction_count,
+        result,
+        final_pc: vm.registers[11],
+        register_trace: vm.register_trace.clone(),
+        due_insn_count: vm.due_insn_count,
+    }
+}
+
+/// [`run_program`] with the `input` region mapped.
+pub fn run_program_with_input(
+    executable: &Executable<TestContextObject>,
+    context_object: &mut TestContextObject,
+    input: MemoryRegion,
+    mode: &mut ExecutionMode,
+) -> ExecutionOutcome {
+    run_program(executable, context_object, vec![input], None, mode)
+}
+
 /// Creates a mock-up MemoryMapping
 pub fn create_memory_mapping<'a, C: ContextObject>(
     executable: &'a Executable<C>,
@@ -310,9 +364,30 @@ macro_rules! assert_error {
 }
 
 /// Run and compare the interpreter vs JIT (with an Executable)
+///
+/// By default each execution creates a VM with the `mem` mapped as the input, and executes the
+/// program in it, see [`run_program_with_input`].
+///
+/// The optional trailing `run => |executable, context_object, input, mode| body` replaces that.
+/// This is not an actual closure: the macro matches out the names and splices `body` in once per
+/// execution mode, so the body is free to use the macros and borrows from its surroundings. The
+/// names are bound to the executable, the context object, the input region (mapping the `mem` for
+/// the execution mode at hand) and the [`ExecutionMode`] to execute in. The body evaluates to what
+/// is to be compared between the modes, an [`ExecutionOutcome`].
 #[macro_export]
 macro_rules! test_interpreter_and_jit {
     (override_budget => $override_budget:expr, $executable:expr, $mem:expr, $context_object:expr $(,)?) => {{
+        test_interpreter_and_jit!(
+            override_budget => $override_budget,
+            $executable,
+            $mem,
+            $context_object,
+            run => |executable, context_object, input, mode| {
+                $crate::test_utils::run_program_with_input(executable, context_object, input, mode)
+            }
+        )
+    }};
+    (override_budget => $override_budget:expr, $executable:expr, $mem:expr, $context_object:expr, run => |$exe:ident, $ctx:ident, $input:pat_param, $mode:ident| $run:expr $(,)?) => {{
         let expected_instruction_count = $context_object.get_remaining();
         #[allow(unused_mut)]
         let mut context_object = $context_object;
@@ -324,36 +399,18 @@ macro_rules! test_interpreter_and_jit {
         $executable.verify::<RequisiteVerifier>().unwrap();
         let host_buffer = $crate::memory_region::HostMemoryObject::host($mem);
         let mut jit_input_mem = unsafe { Vec::from(host_buffer.ptr().as_ref().unwrap()) };
-        let (interp_input_start, jit_input_start) = (ebpf::MM_INPUT_START, ebpf::MM_INPUT_START);
-
-        let (instruction_count_interpreter, result_interpreter, interpreter_final_pc, _trace_interpreter, due_insn_count_interpreter) = {
-            let mem_region = MemoryRegion::new(host_buffer, ebpf::MM_INPUT_START);
-            let mut call_frames = vec![
-                $crate::vm::CallFrame::default();
-                $executable.get_config().max_call_depth
-            ];
-            create_vm!(
-                vm,
-                &$executable,
-                &mut context_object,
-                stack,
-                heap,
-                vec![mem_region],
-                None
-            );
-            vm.registers[1] = interp_input_start;
-            let (instruction_count_interpreter, result_interpreter) = vm.execute_program(
-                &$executable,
-                &mut $crate::vm::ExecutionMode::Interpreted,
-                &mut call_frames,
-            );
-            (
-                instruction_count_interpreter,
-                result_interpreter,
-                vm.registers[11],
-                vm.register_trace.clone(),
-                vm.due_insn_count,
-            )
+        let $crate::test_utils::ExecutionOutcome {
+            instruction_count: instruction_count_interpreter,
+            result: result_interpreter,
+            final_pc: interpreter_final_pc,
+            register_trace: _trace_interpreter,
+            due_insn_count: due_insn_count_interpreter,
+        } = {
+            let $exe = &$executable;
+            let $ctx = &mut context_object;
+            let $input = MemoryRegion::new(host_buffer, ebpf::MM_INPUT_START);
+            let $mode = &mut $crate::vm::ExecutionMode::Interpreted;
+            $run
         };
         #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
         {
@@ -365,27 +422,18 @@ macro_rules! test_interpreter_and_jit {
                 HostBuffer::Immutable(_) => HostBuffer::Immutable(&raw const jit_input_mem[..]),
                 HostBuffer::Mutable(_) => HostBuffer::Mutable(&raw mut jit_input_mem[..]),
             };
-            let mem_region = MemoryRegion::new(mem, ebpf::MM_INPUT_START);
-            create_vm!(
-                vm,
-                &$executable,
-                &mut context_object,
-                stack,
-                heap,
-                vec![mem_region],
-                None
-            );
             match compilation_result {
                 Err(_) => panic!("{:?}", compilation_result),
                 Ok(()) => {
-                    vm.registers[1] = jit_input_start;
-                    let (instruction_count_jit, result_jit) = vm.execute_program(
-                        &$executable,
-                        &mut $crate::vm::ExecutionMode::Jit,
-                        &mut []
-                    );
-
-                    let trace_jit = &vm.register_trace;
+                    let jit: $crate::test_utils::ExecutionOutcome = {
+                        let $exe = &$executable;
+                        let $ctx = &mut context_object;
+                        let $input = MemoryRegion::new(mem, ebpf::MM_INPUT_START);
+                        let $mode = &mut $crate::vm::ExecutionMode::Jit;
+                        $run
+                    };
+                    let (instruction_count_jit, result_jit) = (jit.instruction_count, jit.result);
+                    let trace_jit = &jit.register_trace;
                     let mut diverged = false;
                     if format!("{:?}", result_interpreter) != format!("{:?}", result_jit) {
                         println!(
@@ -401,17 +449,17 @@ macro_rules! test_interpreter_and_jit {
                         );
                         diverged = true;
                     }
-                    if vm.due_insn_count != due_insn_count_interpreter {
+                    if jit.due_insn_count != due_insn_count_interpreter {
                         println!(
                             "due_insn_count of interpreter ({}) and JIT ({}) diverged",
-                            due_insn_count_interpreter, vm.due_insn_count,
+                            due_insn_count_interpreter, jit.due_insn_count,
                         );
                         diverged = true;
                     }
-                    if interpreter_final_pc != vm.registers[11] {
+                    if interpreter_final_pc != jit.final_pc {
                         println!(
                             "Final PC of interpreter ({:?}) and JIT ({:?}) result diverged",
-                            interpreter_final_pc, vm.registers[11],
+                            interpreter_final_pc, jit.final_pc,
                         );
                         diverged = true;
                     }
@@ -450,12 +498,24 @@ macro_rules! test_interpreter_and_jit {
         result_interpreter
     }};
     ($executable:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
+        test_interpreter_and_jit!(
+            $executable,
+            $mem,
+            $context_object,
+            $expected_result,
+            run => |executable, context_object, input, mode| {
+                $crate::test_utils::run_program_with_input(executable, context_object, input, mode)
+            }
+        )
+    };
+    ($executable:expr, $mem:expr, $context_object:expr, $expected_result:expr, run => $($run:tt)+) => {
         let expected_result = $expected_result;
         let result = test_interpreter_and_jit!(
             override_budget => false,
             $executable,
             $mem,
             $context_object,
+            run => $($run)+
         );
         assert_eq!(
             format!("{:?}", result), format!("{:?}", expected_result),
@@ -467,61 +527,95 @@ macro_rules! test_interpreter_and_jit {
                 $executable,
                 $mem,
                 $context_object,
+                run => $($run)+
             );
         }
     };
 }
 
 /// Run and compare the interpreter vs JIT (with an assembly program)
+///
+/// The optional trailing `run => |..| body` is explained in [`test_interpreter_and_jit!`].
 #[macro_export]
 macro_rules! test_interpreter_and_jit_asm {
-    ($source:expr, $config:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
+    ($source:expr, $config:expr, $mem:expr, $context_object:expr, $expected_result:expr, run => $($run:tt)+) => {
         #[allow(unused_mut)]
         {
             let loader = Arc::new(BuiltinProgram::new_loader($config));
             let mut executable = assemble($source, loader).unwrap();
-            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
+            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result, run => $($run)+);
         }
     };
+    ($source:expr, $mem:expr, $context_object:expr, $expected_result:expr, run => $($run:tt)+) => {
+        test_interpreter_and_jit_asm!(
+            $source,
+            Config::default(),
+            $mem,
+            $context_object,
+            $expected_result,
+            run => $($run)+
+        );
+    };
+    ($source:expr, $config:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
+        test_interpreter_and_jit_asm!(
+            $source,
+            $config,
+            $mem,
+            $context_object,
+            $expected_result,
+            run => |executable, context_object, input, mode| { $crate::test_utils::run_program_with_input(executable, context_object, input, mode) }
+        );
+    };
     ($source:expr, $mem:expr, $context_object:expr, $expected_result:expr $(,)?) => {
-        #[allow(unused_mut)]
-        {
-            test_interpreter_and_jit_asm!(
-                $source,
-                Config::default(),
-                $mem,
-                $context_object,
-                $expected_result
-            );
-        }
+        test_interpreter_and_jit_asm!(
+            $source,
+            Config::default(),
+            $mem,
+            $context_object,
+            $expected_result
+        );
     };
 }
 
 /// Run and compare the interpreter vs JIT (with syscalls and an assembly program)
+///
+/// The optional trailing `run => |..| body` is explained in [`test_interpreter_and_jit!`].
 #[macro_export]
 macro_rules! test_syscall_asm {
     (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
         let _ = <$syscall as $crate::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
     };
-    ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+    ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),*$(,)?), $context_object:expr, $expected_result:expr, run => $($run:tt)+) => {
         let mut config = Config::default();
         for sbpf_version in [SBPFVersion::V0, SBPFVersion::V3] {
             config.enabled_sbpf_versions = sbpf_version..=sbpf_version;
             let mut loader = BuiltinProgram::new_loader(config.clone());
             $(test_syscall_asm!(register, loader, $syscall_name => $syscall);)*
             let mut executable = assemble($source, Arc::new(loader)).unwrap();
-            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
+            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result, run => $($run)+);
         }
+    };
+    ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),*$(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+        test_syscall_asm!(
+            $source,
+            $mem,
+            ($($syscall_name => $syscall),*),
+            $context_object,
+            $expected_result,
+            run => |executable, context_object, input, mode| { $crate::test_utils::run_program_with_input(executable, context_object, input, mode) }
+        );
     };
 }
 
 /// Run and compare the interpreter vs JIT (with and ELF program)
+///
+/// The optional trailing `run => |..| body` is explained in [`test_interpreter_and_jit!`].
 #[macro_export]
 macro_rules! test_interpreter_and_jit_elf {
     (register, $loader:expr, $syscall_name:expr => $syscall:ty) => {
         <$syscall as $crate::program::BuiltinFunctionDefinition<_>>::register(&mut $loader, $syscall_name).unwrap();
     };
-    ($source:expr, $config:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+    ($source:expr, $config:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),* $(,)?), $context_object:expr, $expected_result:expr, run => $($run:tt)+) => {
         let mut file = File::open($source).unwrap();
         let mut elf = Vec::new();
         file.read_to_end(&mut elf).unwrap();
@@ -530,8 +624,14 @@ macro_rules! test_interpreter_and_jit_elf {
             let mut loader = BuiltinProgram::new_loader($config);
             $(test_interpreter_and_jit_elf!(register, loader, $syscall_name => $syscall);)*
             let mut executable = Executable::<TestContextObject>::from_elf(&elf, Arc::new(loader)).unwrap();
-            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result);
+            test_interpreter_and_jit!(executable, $mem, $context_object, $expected_result, run => $($run)+);
         }
+    };
+    ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr, run => $($run:tt)+) => {
+        test_interpreter_and_jit_elf!($source, Config::default(), $mem, ($($syscall_name => $syscall_function),*), $context_object, $expected_result, run => $($run)+);
+    };
+    ($source:expr, $config:expr, $mem:expr, ($($syscall_name:expr => $syscall:ty),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
+        test_interpreter_and_jit_elf!($source, $config, $mem, ($($syscall_name => $syscall),*), $context_object, $expected_result, run => |executable, context_object, input, mode| { $crate::test_utils::run_program_with_input(executable, context_object, input, mode) });
     };
     ($source:expr, $mem:expr, ($($syscall_name:expr => $syscall_function:expr),* $(,)?), $context_object:expr, $expected_result:expr $(,)?) => {
         test_interpreter_and_jit_elf!($source, Config::default(), $mem, ($($syscall_name => $syscall_function),*), $context_object, $expected_result);

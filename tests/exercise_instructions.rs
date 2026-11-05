@@ -16,7 +16,7 @@ extern crate thiserror;
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use solana_sbpf::{
     assembler::assemble,
-    create_vm, ebpf,
+    ebpf,
     memory_region::MemoryRegion,
     program::{BuiltinProgram, SBPFVersion},
     static_analysis::Analysis,
