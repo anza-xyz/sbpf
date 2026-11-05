@@ -4908,3 +4908,43 @@ fn test_max_call_depth_zero() {
         assert_eq!(vm.registers[11], 0);
     }
 }
+
+#[test]
+fn test_access_violation_handler_consumes_instruction_meter() {
+    use solana_sbpf::test_utils::run_program;
+    use std::{cell::RefCell, rc::Rc};
+
+    const HANDLER_COST: u64 = 10;
+    let input = [0u8; 8];
+    // The input region is read-only. The first store to it invokes the handler, which consumes from
+    // the instruction meter and redirects the region to a writable copy.
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        mov64 r6, r1
+        stb [r6], 7
+        ldxb r0, [r6]
+        stb [r6+1], 8
+        ldxb r1, [r6+1]
+        add64 r0, r1
+        exit",
+        &raw const input[..],
+        TestContextObject::new(8 + HANDLER_COST),
+        ProgramResult::Ok(15),
+        run => |executable, context_object, mut input_region, mode| {
+            let copy = Rc::new(RefCell::new(input.to_vec()));
+            input_region.access_violation_handler_payload = Some(0);
+            run_program(
+                executable,
+                context_object,
+                vec![input_region],
+                Some(Box::new(move |context_object, region, _, _, _, _| {
+                    context_object.consume(HANDLER_COST);
+                    // SAFETY: `copy` is kept alive by the handler for as long as the mapping is.
+                    unsafe { region.redirect(&raw mut copy.borrow_mut()[..]) };
+                })),
+                mode,
+            )
+        },
+    );
+}
