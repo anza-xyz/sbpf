@@ -60,6 +60,11 @@ pub(in crate::codegen) fn enter<C: ContextObject>(
     let (max_call_depth, stack_frame_size) = (config.max_call_depth, config.stack_frame_size);
     let gaps = version.stack_frame_gaps() && config.enable_stack_frame_gaps;
     let frames_per_call = (gaps as u64).wrapping_add(1);
+    let stack_frame_bump = if version.manual_stack_frame_bump() {
+        0
+    } else {
+        (stack_frame_size as u64).wrapping_mul(frames_per_call)
+    };
     let mut frame = Frame {
         vm: std::ptr::from_mut(vm).cast(),
         exit: std::ptr::null(),
@@ -75,7 +80,7 @@ pub(in crate::codegen) fn enter<C: ContextObject>(
         call_dispatcher: supporting_code::call_dispatcher::<C>(version),
         function_registry: std::ptr::from_ref(executable.get_function_registry()).cast(),
         calls_remaining: max_call_depth as u64,
-        stack_frame_bump: (stack_frame_size as u64).wrapping_mul(frames_per_call),
+        stack_frame_bump,
     };
     let exit_code: u64;
     let last_pc_address: u64;

@@ -149,8 +149,8 @@ impl Generator for InterpreterGenerator {
 
 static INTERPRETERS: [LazyLock<Interpreter>; 5] = [
     LazyLock::new(|| generate_interpreter(SBPFVersion::V0)),
-    LazyLock::new(|| panic!("parrot for v1 unlikely to be implemented")),
-    LazyLock::new(|| panic!("parrot for v2 unlikely to be implemented")),
+    LazyLock::new(|| generate_interpreter(SBPFVersion::V1)),
+    LazyLock::new(|| generate_interpreter(SBPFVersion::V2)),
     LazyLock::new(|| generate_interpreter(SBPFVersion::V3)),
     LazyLock::new(|| generate_interpreter(SBPFVersion::V4)),
 ];

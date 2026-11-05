@@ -48,9 +48,9 @@ const RMETER: u8 = RDX;
 /// Keep in sync with the `.alias`es in `x64asm!`, where `R0`..`R10` name the BPF registers.
 const GPREG_MAP: [u8; Reg::COUNT] = [
     RSI, RDI, R8, R9, R10, R11, R12, R13, R14, R15,
-    // r10 is read-only and could be special-cased to free up a host register, but instructions
-    // using it must not get much slower or larger, as they would become an obvious target for
-    // resource exhaustion.
+    // r10 is read-only (unless the version has the programs bump the stack frame themselves) and
+    // could be special-cased to free up a host register, but instructions using it must not get
+    // much slower or larger, as they would become an obvious target for resource exhaustion.
     RBX,
 ];
 
