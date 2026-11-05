@@ -774,6 +774,60 @@ fn test_pqr_v2() {
             -1i32 as u32 as u64,
         ),
         (ebpf::SREM64_IMM, -13i64 as u64, -4i64 as u64, -1i64 as u64),
+        (
+            ebpf::LMUL32_IMM,
+            0x1_0000_0003,
+            -4i32 as u32 as u64,
+            0xffff_fff4,
+        ),
+        (ebpf::LMUL32_IMM, 0xffff_ffff, u32::MAX as u64, 1),
+        (ebpf::LMUL32_IMM, 0x4000_0000, 4, 0),
+        (
+            ebpf::LMUL64_IMM,
+            0x1_0000_0000,
+            -1i64 as u64,
+            0xffff_ffff_0000_0000,
+        ),
+        (ebpf::LMUL64_IMM, 1 << 62, 4, 0),
+        (
+            ebpf::UHMUL64_IMM,
+            1 << 63,
+            i32::MIN as u32 as u64,
+            0x4000_0000,
+        ),
+        (ebpf::SHMUL64_IMM, u64::MAX, -1i64 as u64, 0),
+        (ebpf::SHMUL64_IMM, i64::MIN as u64, -1i64 as u64, 0),
+        (ebpf::SHMUL64_IMM, i64::MIN as u64, 2, u64::MAX),
+        (
+            ebpf::SHMUL64_IMM,
+            i64::MAX as u64,
+            i32::MIN as i64 as u64,
+            0xffff_ffff_c000_0000,
+        ),
+        (ebpf::SHMUL64_IMM, u64::MAX, i32::MAX as u64, u64::MAX),
+        (ebpf::SHMUL64_IMM, 1 << 62, 8, 2),
+        (ebpf::UDIV32_IMM, 0x1_ffff_fffe, u32::MAX as u64, 0),
+        (ebpf::UDIV32_IMM, 0x8000_0000, 2, 0x4000_0000),
+        (ebpf::UREM32_IMM, 0xffff_fffe, -3i32 as u32 as u64, 1),
+        (ebpf::UREM32_IMM, 0x1_0000_000a, 7, 3),
+        (ebpf::UREM64_IMM, u64::MAX, -2i32 as u32 as u64, 3),
+        (
+            ebpf::SDIV32_IMM,
+            0x7fff_ffff,
+            -1i32 as u32 as u64,
+            0x8000_0001,
+        ),
+        (ebpf::SDIV32_IMM, 0x8000_0000, 1, 0x8000_0000),
+        (ebpf::SDIV64_IMM, i64::MIN as u64, 1, i64::MIN as u64),
+        (
+            ebpf::SDIV64_IMM,
+            0x8000_0000,
+            -1i64 as u64,
+            0xffff_ffff_8000_0000,
+        ),
+        (ebpf::SREM32_IMM, 0x8000_0000, 3, 0xffff_fffe),
+        (ebpf::SREM64_IMM, i64::MIN as u64, 3, 0xffff_ffff_ffff_fffe),
+        (ebpf::SREM64_IMM, 0x8000_0000, -1i64 as u64, 0),
     ] {
         LittleEndian::write_u32(&mut prog[12..], dst as u32);
         LittleEndian::write_u32(&mut prog[20..], (dst >> 32) as u32);
@@ -897,7 +951,7 @@ fn test_err_pqr_divide_overflow() {
 
 #[test]
 fn test_memory_instructions() {
-    for sbpf_version in [SBPFVersion::V0, SBPFVersion::V4] {
+    for &sbpf_version in SBPFVersion::ALL {
         let config = Config {
             enabled_sbpf_versions: sbpf_version..=sbpf_version,
             ..Config::default()
@@ -1133,10 +1187,21 @@ fn test_hor64() {
         hor64 r0, 0x10203040
         hor64 r0, 0x01020304
         exit",
-        config,
+        config.clone(),
         NO_INPUT,
         TestContextObject::new(4),
         ProgramResult::Ok(0x1122334400000000),
+    );
+    test_interpreter_and_jit_asm!(
+        "
+        add64 r10, 0
+        mov32 r0, 0x12345678
+        hor64 r0, -1
+        exit",
+        config,
+        NO_INPUT,
+        TestContextObject::new(4),
+        ProgramResult::Ok(0xffffffff12345678),
     );
 }
 
@@ -2323,23 +2388,30 @@ fn test_syscall_parameter_on_stack() {
 
 #[test]
 fn test_callx() {
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        mov64 r0, 0x0
-        mov64 r8, 0x1
-        lsh64 r8, 0x20
-        or64 r8, 0x38
-        callx r8
-        exit
-        function_foo:
-        add64 r10, 0
-        mov64 r0, 0x2A
-        exit",
-        NO_INPUT,
-        TestContextObject::new(10),
-        ProgramResult::Ok(42),
-    );
+    for &sbpf_version in SBPFVersion::ALL {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+        test_interpreter_and_jit_asm!(
+            "
+            add64 r10, 0
+            mov64 r0, 0x0
+            mov64 r8, 0x1
+            lsh64 r8, 0x20
+            or64 r8, 0x38
+            callx r8
+            exit
+            function_foo:
+            add64 r10, 0
+            mov64 r0, 0x2A
+            exit",
+            config,
+            NO_INPUT,
+            TestContextObject::new(10),
+            ProgramResult::Ok(42),
+        );
+    }
 }
 
 #[test]
