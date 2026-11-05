@@ -2003,114 +2003,116 @@ fn test_err_stack_out_of_bound() {
 }
 
 #[test]
-fn test_dynamic_stack_frames_sbpfv1() {
-    // In SBPFv1 the stack starts at the top and does not grow automatically
-    let config = Config {
-        enabled_sbpf_versions: SBPFVersion::V1..=SBPFVersion::V1,
-        ..Config::default()
-    };
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        call function_foo
-        exit
-        function_foo:
-        add64 r10, 0
-        mov r0, r10
-        exit",
-        config.clone(),
-        NO_INPUT,
-        TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
-    );
+fn test_dynamic_stack_frames() {
+    // In SBPFv1 and v2 the stack is managed by bpf itself.
+    for sbpf_version in [SBPFVersion::V1, SBPFVersion::V2] {
+        let config = Config {
+            enabled_sbpf_versions: sbpf_version..=sbpf_version,
+            ..Config::default()
+        };
+        test_interpreter_and_jit_asm!(
+            "
+            add64 r10, 0
+            call function_foo
+            exit
+            function_foo:
+            add64 r10, 0
+            mov r0, r10
+            exit",
+            config.clone(),
+            NO_INPUT,
+            TestContextObject::new(6),
+            ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
+        );
 
-    // See the comment in CallFrames::resize_stack() for the reason why it's
-    // safe to let the stack pointer overflow
-    test_interpreter_and_jit_asm!(
-        "
-        add r10, -0x7FFFFF00
-        call function_stage1
-        exit
-        function_stage1:
-        add r10, -0x7FFFFF00
-        call function_stage2
-        exit
-        function_stage2:
-        add r10, -0x7FFFFF00
-        call function_stage3
-        exit
-        function_stage3:
-        add r10, -0x7FFFFF00
-        call function_stage4
-        exit
-        function_stage4:
-        add r10, -0x1440
-        call function_final
-        exit
-        function_final:
-        add r10, 0
-        stb [r10], 0
-        exit",
-        config.clone(),
-        NO_INPUT,
-        TestContextObject::new(12),
-        ProgramResult::Err(EbpfError::AccessViolation(
-            AccessType::Store,
-            0x3F000 - 64,
-            1,
-            "unallocated"
-        )),
-    );
+        // See the comment in CallFrames::resize_stack() for the reason why it's
+        // safe to let the stack pointer overflow
+        test_interpreter_and_jit_asm!(
+            "
+            add r10, -0x7FFFFF00
+            call function_stage1
+            exit
+            function_stage1:
+            add r10, -0x7FFFFF00
+            call function_stage2
+            exit
+            function_stage2:
+            add r10, -0x7FFFFF00
+            call function_stage3
+            exit
+            function_stage3:
+            add r10, -0x7FFFFF00
+            call function_stage4
+            exit
+            function_stage4:
+            add r10, -0x1440
+            call function_final
+            exit
+            function_final:
+            add r10, 0
+            stb [r10], 0
+            exit",
+            config.clone(),
+            NO_INPUT,
+            TestContextObject::new(12),
+            ProgramResult::Err(EbpfError::AccessViolation(
+                AccessType::Store,
+                0x3F000 - 64,
+                1,
+                "unallocated"
+            )),
+        );
 
-    // Check that changes to r10 are immediately visible
-    test_interpreter_and_jit_asm!(
-        "
-        add r10, -64
-        stxdw [r10-8], r10
-        call function_foo
-        ldxdw r0, [r10-8]
-        exit
-        function_foo:
-        add r10, 0
-        exit",
-        config.clone(),
-        NO_INPUT,
-        TestContextObject::new(7),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
-    );
+        // Check that changes to r10 are immediately visible
+        test_interpreter_and_jit_asm!(
+            "
+            add r10, -64
+            stxdw [r10-8], r10
+            call function_foo
+            ldxdw r0, [r10-8]
+            exit
+            function_foo:
+            add r10, 0
+            exit",
+            config.clone(),
+            NO_INPUT,
+            TestContextObject::new(7),
+            ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
+        );
 
-    // Check that changes to r10 continue to be visible in a callee
-    test_interpreter_and_jit_asm!(
-        "
-        add r10, -64
-        call function_foo
-        exit
-        function_foo:
-        add r10, 0
-        mov r0, r10
-        exit",
-        config.clone(),
-        NO_INPUT,
-        TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
-    );
+        // Check that changes to r10 continue to be visible in a callee
+        test_interpreter_and_jit_asm!(
+            "
+            add r10, -64
+            call function_foo
+            exit
+            function_foo:
+            add r10, 0
+            mov r0, r10
+            exit",
+            config.clone(),
+            NO_INPUT,
+            TestContextObject::new(6),
+            ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64 - 64),
+        );
 
-    // And check that changes to r10 are undone after returning
-    test_interpreter_and_jit_asm!(
-        "
-        add64 r10, 0
-        call function_foo
-        mov r0, r10
-        exit
-        function_foo:
-        add r10, -64
-        exit
-        ",
-        config.clone(),
-        NO_INPUT,
-        TestContextObject::new(6),
-        ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
-    );
+        // And check that changes to r10 are undone after returning
+        test_interpreter_and_jit_asm!(
+            "
+            add64 r10, 0
+            call function_foo
+            mov r0, r10
+            exit
+            function_foo:
+            add r10, -64
+            exit
+            ",
+            config.clone(),
+            NO_INPUT,
+            TestContextObject::new(6),
+            ProgramResult::Ok(ebpf::MM_STACK_START + config.stack_size() as u64),
+        );
+    }
 }
 
 #[test]
