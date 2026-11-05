@@ -18,6 +18,7 @@
 //! <https://www.kernel.org/doc/Documentation/networking/filter.txt>, or for a shorter version of
 //! the list of the operation codes: <https://github.com/iovisor/bpf-docs/blob/master/eBPF.md>
 
+use crate::program::SBPFVersion;
 use byteorder::{ByteOrder, LittleEndian};
 use hash32::{Hasher, Murmur3Hasher};
 use std::{fmt, hash::Hash};
@@ -534,9 +535,9 @@ pub const BPF_ALU_OP_MASK: u8 = 0xf0;
 /// Mask to extract the access size from a load or store opcode.
 pub const BPF_SIZE_MASK: u8 = 0x18;
 
-/// Size of the instruction with the opcode `op`, in bytes.
-pub const fn opcode_size(op: u8) -> usize {
-    if op == LD_DW_IMM {
+/// Size of the instruction with the opcode `op` in the SBPF `version`, in bytes.
+pub const fn opcode_size(op: u8, version: SBPFVersion) -> usize {
+    if op == LD_DW_IMM && !version.disable_lddw() {
         2 * INSN_SIZE
     } else {
         INSN_SIZE
