@@ -283,18 +283,55 @@ fn build_owned_ro_section<'a>(
     ro_section
 }
 
+/// Storage for the read-only section, including text.
+///
+/// Owned sections store their data directly, while borrowed sections
+/// retain the ELF buffer backing them.
+#[derive(Debug, PartialEq)]
+enum RoStorage {
+    /// Stores an owned copy of the text and rodata.
+    Owned { vaddr: usize, data: Vec<u8> },
+    /// Stores the ELF buffer containing the borrowed text and rodata.
+    Borrowed {
+        vaddr: usize,
+        elf: AlignedMemory<{ HOST_ALIGN }>,
+        range: Range<usize>,
+    },
+}
+
+impl RoStorage {
+    /// Takes ownership of `elf` only if `section` borrows from it
+    fn new(section: Section, elf: AlignedMemory<{ HOST_ALIGN }>) -> Self {
+        match section {
+            Section::Owned(vaddr, data) => Self::Owned { vaddr, data },
+            Section::Borrowed(vaddr, range) => Self::Borrowed { vaddr, elf, range },
+        }
+    }
+
+    fn vaddr(&self) -> usize {
+        match self {
+            Self::Owned { vaddr, .. } | Self::Borrowed { vaddr, .. } => *vaddr,
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Owned { data, .. } => data.as_slice(),
+            Self::Borrowed { elf, range, .. } => &elf.as_slice()[range.clone()],
+        }
+    }
+}
+
 /// Elf loader/relocator
 #[derive(Debug)]
 pub struct Executable<C: ContextObject> {
-    /// Loaded and executable elf
-    elf_bytes: AlignedMemory<{ HOST_ALIGN }>,
     /// Required SBPF capabilities
     sbpf_version: SBPFVersion,
-    /// Read-only section
-    ro_section: Section,
+    /// Read-only section and the ELF buffer it may borrow from
+    ro_storage: RoStorage,
     /// Text section virtual address
     text_section_vaddr: u64,
-    /// Text section range in `elf_bytes`
+    /// Text section range in the ELF file
     text_section_range: Range<usize>,
     /// Address of the entry point
     entry_pc: usize,
@@ -308,9 +345,8 @@ pub struct Executable<C: ContextObject> {
 
 impl<C: PartialEq + ContextObject> PartialEq for Executable<C> {
     fn eq(&self, other: &Self) -> bool {
-        self.elf_bytes == other.elf_bytes
-            && self.sbpf_version == other.sbpf_version
-            && self.ro_section == other.ro_section
+        self.sbpf_version == other.sbpf_version
+            && self.ro_storage == other.ro_storage
             && self.text_section_vaddr == other.text_section_vaddr
             && self.text_section_range == other.text_section_range
             && self.entry_pc == other.entry_pc
@@ -344,14 +380,14 @@ impl<C: ContextObject> Executable<C> {
     #[allow(clippy::arithmetic_side_effects)]
     pub fn get_text_bytes(&self) -> (u64, &[u8]) {
         let text_len = self.text_section_range.len();
-        let text_bytes = match &self.ro_section {
-            // Use the owned data (not elf_bytes) to ensure the text section
-            // is consistent with the ro_section if the sections overlap.
-            Section::Owned(offset, data) => {
-                let text_offset = self.text_section_vaddr as usize - offset;
+        let text_bytes = match &self.ro_storage {
+            // Use the owned data to ensure the text section is consistent with
+            // the ro_section if the sections overlap.
+            RoStorage::Owned { vaddr, data } => {
+                let text_offset = self.text_section_vaddr as usize - vaddr;
                 &data[text_offset..text_offset + text_len]
             }
-            Section::Borrowed(_, _) => &self.elf_bytes.as_slice()[self.text_section_range.clone()],
+            RoStorage::Borrowed { elf, .. } => &elf.as_slice()[self.text_section_range.clone()],
         };
 
         (self.text_section_vaddr, text_bytes)
@@ -359,17 +395,12 @@ impl<C: ContextObject> Executable<C> {
 
     /// Get the concatenated read-only sections (including the text section)
     pub fn get_ro_section(&self) -> &[u8] {
-        match &self.ro_section {
-            Section::Owned(_offset, data) => data.as_slice(),
-            Section::Borrowed(_offset, byte_range) => {
-                &self.elf_bytes.as_slice()[byte_range.clone()]
-            }
-        }
+        self.ro_storage.bytes()
     }
 
     /// Get a memory region that can be used to access the merged readonly section
     pub fn get_ro_region(&self) -> MemoryRegion {
-        get_ro_region(&self.ro_section, self.elf_bytes.as_slice())
+        ro_region(self.ro_storage.vaddr(), self.ro_storage.bytes())
     }
 
     /// Get the entry point offset into the text section
@@ -455,16 +486,16 @@ impl<C: ContextObject> Executable<C> {
             0
         };
         Ok(Self {
-            elf_bytes,
             sbpf_version,
-            ro_section: Section::Borrowed(
-                if sbpf_version.enable_lower_rodata_vaddr() {
+            ro_storage: RoStorage::Borrowed {
+                vaddr: if sbpf_version.enable_lower_rodata_vaddr() {
                     ebpf::MM_RODATA_START
                 } else {
                     ebpf::MM_BYTECODE_START
                 } as usize,
-                0..text_bytes.len(),
-            ),
+                elf: elf_bytes,
+                range: 0..text_bytes.len(),
+            },
             text_section_vaddr: ebpf::MM_BYTECODE_START,
             text_section_range: 0..text_bytes.len(),
             entry_pc,
@@ -617,9 +648,8 @@ impl<C: ContextObject> Executable<C> {
         };
 
         Ok(Self {
-            elf_bytes: aligned_memory,
             sbpf_version: SBPFVersion::Reserved, // Is set in Self::load()
-            ro_section,
+            ro_storage: RoStorage::new(ro_section, aligned_memory),
             text_section_vaddr,
             text_section_range,
             entry_pc,
@@ -790,9 +820,9 @@ impl<C: ContextObject> Executable<C> {
         }
 
         Ok(Self {
-            elf_bytes,
             sbpf_version: SBPFVersion::Reserved, // Is set in Self::load()
-            ro_section,
+            // Drops `elf_bytes` if the ro section is owned
+            ro_storage: RoStorage::new(ro_section, elf_bytes),
             text_section_vaddr,
             text_section_range: text_section.file_range().unwrap_or_default(),
             entry_pc,
@@ -808,12 +838,10 @@ impl<C: ContextObject> Executable<C> {
     pub fn mem_size(&self) -> usize {
         let mut total = mem::size_of::<Self>();
         total = total
-            // elf bytes
-            .saturating_add(self.elf_bytes.mem_size())
-            // ro section
-            .saturating_add(match &self.ro_section {
-                Section::Owned(_, data) => data.capacity(),
-                Section::Borrowed(_, _) => 0,
+            // ro section, or the elf bytes it borrows from
+            .saturating_add(match &self.ro_storage {
+                RoStorage::Owned { data, .. } => data.capacity(),
+                RoStorage::Borrowed { elf, .. } => elf.mem_size(),
             })
             // bpf functions
             .saturating_add(self.function_registry.mem_size());
@@ -1324,20 +1352,77 @@ pub fn get_sbpf_version(elf_bytes: &[u8]) -> Result<SBPFVersion, ElfParserError>
 
 /// Creates a [MemoryRegion] for the given [Section]
 pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
-    let (offset, ro_data) = match ro_section {
-        Section::Owned(offset, data) => (*offset, data.as_slice()),
-        Section::Borrowed(offset, byte_range) => (*offset, &elf[byte_range.clone()]),
-    };
+    match ro_section {
+        Section::Owned(offset, data) => ro_region(*offset, data.as_slice()),
+        Section::Borrowed(offset, byte_range) => ro_region(*offset, &elf[byte_range.clone()]),
+    }
+}
 
-    // If offset > 0, the region will start at ebpf::MM_REGION_SIZE * 1 + the offset of
-    // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
-    // will be unmappable, see MemoryRegion::vm_to_host.
+/// Creates a memory region for the read-only section at the given virtual address.
+fn ro_region(offset: usize, ro_data: &[u8]) -> MemoryRegion {
+    // Leave the range before the read-only section unmappable when offset > 0.
+    // See MemoryRegion::vm_to_host.
     MemoryRegion::new(&raw const *ro_data, offset as u64)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::build_owned_ro_section;
+    use super::*;
+    use crate::{program::SBPFVersion, test_utils::TestContextObject};
+
+    fn load_v0(optimize_rodata: bool) -> Executable<TestContextObject> {
+        let config = Config {
+            optimize_rodata,
+            enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
+            ..Config::default()
+        };
+        let loader = Arc::new(BuiltinProgram::<TestContextObject>::new_loader(config));
+        Executable::load(
+            include_bytes!("../tests/elfs/relative_call_sbpfv0.so"),
+            loader,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn test_owned_ro_section_readable_without_elf_bytes() {
+        let exe = load_v0(false);
+        assert!(matches!(exe.ro_storage, RoStorage::Owned { .. }));
+
+        let ro = exe.get_ro_section();
+        let (vaddr, text) = exe.get_text_bytes();
+        assert!(!ro.is_empty() && !text.is_empty());
+        let text_offset = (vaddr - ebpf::MM_REGION_SIZE) as usize;
+        assert_eq!(&ro[text_offset..text_offset + text.len()], text);
+
+        let region = exe.get_ro_region();
+        assert_eq!(region.vm_addr_range().start, ebpf::MM_REGION_SIZE);
+        assert_eq!(region.len(), ro.len());
+
+        // Same text as the borrowed layout exposes.
+        let borrowed = load_v0(true);
+        assert!(matches!(borrowed.ro_storage, RoStorage::Borrowed { .. }));
+        assert_eq!(borrowed.get_text_bytes(), exe.get_text_bytes());
+    }
+
+    #[test]
+    fn test_owned_ro_section_does_not_retain_elf() {
+        let elf_len = include_bytes!("../tests/elfs/relative_call_sbpfv0.so").len();
+        let owned = load_v0(false);
+        let borrowed = load_v0(true);
+        let RoStorage::Owned { data, .. } = &owned.ro_storage else {
+            panic!("expected owned");
+        };
+        let RoStorage::Borrowed { elf, .. } = &borrowed.ro_storage else {
+            panic!("expected borrowed");
+        };
+        assert_eq!(elf.len(), elf_len);
+        // mem_size counts the owned bytes only, not an extra ELF copy.
+        assert_eq!(
+            owned.mem_size() + elf.mem_size(),
+            borrowed.mem_size() + data.capacity()
+        );
+    }
 
     struct TestCase {
         name: &'static str,
