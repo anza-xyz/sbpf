@@ -79,6 +79,21 @@ impl FreeList {
     }
 }
 
+impl Drop for FreeList {
+    fn drop(&mut self) {
+        for mut pages in self
+            .mem
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .drain(..)
+        {
+            // `Pages::drop` would return pooled pages to the pool instead of unmapping them.
+            pages.origin = Origin::Anonymous;
+            drop(pages);
+        }
+    }
+}
+
 /// Minimum allocation size for a bucket.
 const BUCKET_MIN: usize = 1024 * 128; // 128 KiB
 /// Maximum allocation size for a bucket.
@@ -135,7 +150,7 @@ impl BucketedFreeList {
         self.buckets[Self::bucket_idx(size)].alloc()
     }
 
-    /// Return the (not pooled) read-write `pages` to the pool.
+    /// Return the read-write `pages` to the pool.
     fn free(&self, pages: Pages) {
         self.buckets[Self::bucket_idx(pages.len)].free(pages)
     }
@@ -224,7 +239,7 @@ impl Drop for Pages {
             return ALLOCATOR.free(Pages {
                 raw: self.raw,
                 len: self.len,
-                origin: Origin::Anonymous,
+                origin: Origin::Pooled,
             });
         }
         // SAFETY:
