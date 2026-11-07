@@ -412,12 +412,18 @@ pub struct JitProgram {
     /// The executable machine code.
     text_section: Mapping<ReadExecute>,
     /// Whether the code was produced by parrot.
-    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
+    #[cfg_attr(
+        not(any(target_arch = "x86_64", target_arch = "aarch64")),
+        expect(dead_code)
+    )]
     pub(crate) parrot: bool,
     /// For the code produced by parrot, a random bias of the instruction pointer register.
     ///
     /// Keeps the offsets embedded in the machine code unpredictable.
-    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
+    #[cfg_attr(
+        not(any(target_arch = "x86_64", target_arch = "aarch64")),
+        expect(dead_code)
+    )]
     pub(crate) random_key: u32,
 }
 

@@ -412,16 +412,28 @@ macro_rules! test_interpreter_and_jit {
             let $mode = &mut $crate::vm::ExecutionMode::Interpreted;
             $run
         };
-        #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-        for parrot in [false, true] {
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        for parrot in cfg_select! {
+            all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64") => { [false, true] }
+            _ => { [true] }
+        } {
             let mode_name = if parrot { "parrot jit" } else { "jit" };
             context_object.remaining = original_budget;
             let mut jit_input_mem = original_input_mem.clone();
             let compilation_result = if parrot {
                 $executable.parrot_compile()
             } else {
-                $executable.jit_compile()
+                cfg_select! {
+                    all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64") => {
+                        $executable.jit_compile()
+                    }
+                    _ => { unreachable!() }
+                }
             };
+            // Parrot falls back to the old JIT for some SBPF versions, which may be unavailable.
+            if $executable.get_compiled_program().is_none() {
+                continue;
+            }
             use $crate::memory_region::HostBuffer;
             let mem = match host_buffer {
                 HostBuffer::Immutable(_) => HostBuffer::Immutable(&raw const jit_input_mem[..]),

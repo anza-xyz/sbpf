@@ -6,8 +6,8 @@
 
 extern crate solana_sbpf;
 
-#[cfg(target_arch = "x86_64")]
-mod x86_64 {
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod parrot {
     use criterion::{criterion_group, Criterion, Throughput};
     use solana_sbpf::{
         create_vm,
@@ -103,12 +103,16 @@ mod x86_64 {
         let templates = solana_sbpf::codegen::jit_templates(executable.get_sbpf_version());
         let mut group = c.benchmark_group(format!("compile/{name}"));
         group.throughput(Throughput::Bytes(executable.get_text_bytes().1.len() as u64));
-        #[cfg(all(feature = "jit", not(target_os = "windows")))]
-        if jit_supported {
-            group.bench_function("jit", |b| b.iter(|| executable.jit_compile().unwrap()));
+        cfg_select! {
+            all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64") => {
+                if jit_supported {
+                    group.bench_function("jit", |b| b.iter(|| executable.jit_compile().unwrap()));
+                }
+            }
+            _ => {
+                let _ = jit_supported;
+            }
         }
-        #[cfg(not(all(feature = "jit", not(target_os = "windows"))))]
-        let _ = jit_supported;
         group.bench_function("parrot", |b| {
             b.iter(|| templates.compile(executable).unwrap())
         });
@@ -190,6 +194,6 @@ mod x86_64 {
 }
 
 cfg_select! {
-    target_arch = "x86_64" => { criterion::criterion_main!(x86_64::benches); }
+    any(target_arch = "x86_64", target_arch = "aarch64") => { criterion::criterion_main!(parrot::benches); }
     _ => { fn main() {} }
 }
