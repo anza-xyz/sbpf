@@ -150,13 +150,20 @@ impl<R: Relocation + Copy> PatchFields<R> {
 pub(super) trait Generator {
     fn extend(&mut self, buffer: &[u8]);
     fn offset(&self) -> usize;
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
     fn push(&mut self, byte: u8) {
         self.extend(&[byte]);
     }
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
     fn push_i8(&mut self, value: i8) {
         self.extend(&[value as u8]);
     }
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
     fn push_i32(&mut self, value: i32) {
+        self.extend(&value.to_le_bytes());
+    }
+    #[cfg_attr(not(target_arch = "aarch64"), expect(dead_code))]
+    fn push_u32(&mut self, value: u32) {
         self.extend(&value.to_le_bytes());
     }
     fn global_reloc(

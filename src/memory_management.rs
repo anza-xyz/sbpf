@@ -395,6 +395,14 @@ impl<A> Mapping<A> {
             // until it is dropped. Dropping the last part makes all pages read-write before they
             // are reused.
             unsafe { protect_pages(self.ptr.as_ptr(), self.len, B::PERMISSIONS) };
+            if matches!(B::PERMISSIONS, PagePermissions::ReadExecute) {
+                // SAFETY:
+                //
+                // Contract from `invalidate_icache`: The bytes must be readable.
+                //
+                // Evidence: `self` owns the bytes, which have just been made readable.
+                unsafe { invalidate_icache(self.ptr.as_ptr(), self.len) };
+            }
         }
         Mapping {
             pages: self.pages,
@@ -667,6 +675,77 @@ unsafe fn protect_pages(raw: *mut u8, size_in_bytes: usize, permissions: PagePer
             ptr_old,
         );
     }
+}
+
+/// Make instruction fetches observe what has been written to the `len` bytes at `ptr`.
+///
+/// # Safety
+///
+/// - The bytes must be readable.
+unsafe fn invalidate_icache(ptr: *const u8, len: usize) {
+    cfg_select! {
+        not(target_arch = "aarch64") => {
+            // The instruction fetches observe the stores without help.
+            let _ = (ptr, len);
+        }
+        target_vendor = "apple" => {
+            unsafe extern "C" {
+                fn sys_icache_invalidate(start: *mut c_void, len: usize);
+            }
+            // SAFETY: Proof by authority: `sys_icache_invalidate` only requires the range to be
+            // mapped, which the bytes being readable implies.
+            unsafe { sys_icache_invalidate(ptr.cast_mut().cast(), len) }
+        }
+        any(target_os = "linux", target_os = "android") => {
+            unsafe extern "C" {
+                fn __clear_cache(begin: *mut libc::c_char, end: *mut libc::c_char);
+            }
+            let ptr = ptr.cast_mut().cast::<libc::c_char>();
+            // SAFETY: Proof by authority: `__clear_cache` only requires the range to be mapped,
+            // which the bytes being readable implies. `ptr + len` is one past the end of the
+            // bytes.
+            unsafe { __clear_cache(ptr, ptr.wrapping_add(len)) }
+        }
+        _ => {
+            // The architectural minimum size of a cache line.
+            const LINE: usize = 16;
+            // SAFETY: Forwarded from the caller.
+            unsafe { aarch64_invalidate_icache(ptr, len, LINE) }
+        }
+    }
+}
+
+/// [`invalidate_icache`] with the architectural cache maintenance instructions, by `line` bytes
+/// at a time.
+///
+/// # Safety
+///
+/// - The bytes must be readable.
+#[cfg(all(
+    target_arch = "aarch64",
+    not(any(target_vendor = "apple", target_os = "linux", target_os = "android"))
+))]
+unsafe fn aarch64_invalidate_icache(ptr: *const u8, len: usize, line: usize) {
+    use std::arch::asm;
+    let start = ptr as usize & !line.wrapping_sub(1);
+    let end = (ptr as usize).wrapping_add(len);
+    let mut address = start;
+    while address < end {
+        // SAFETY: Cleaning the cache line of readable memory does not change it.
+        unsafe { asm!("dc cvau, {}", in(reg) address, options(nostack, preserves_flags)) };
+        address = address.wrapping_add(line);
+    }
+    // SAFETY: Barriers have no effect on memory other than ordering accesses to it.
+    unsafe { asm!("dsb ish", options(nostack, preserves_flags)) };
+    let mut address = start;
+    while address < end {
+        // SAFETY: Invalidating the instruction cache line of readable memory does not change the
+        // memory.
+        unsafe { asm!("ic ivau, {}", in(reg) address, options(nostack, preserves_flags)) };
+        address = address.wrapping_add(line);
+    }
+    // SAFETY: As above.
+    unsafe { asm!("dsb ish", "isb", options(nostack, preserves_flags)) };
 }
 
 #[cfg(test)]

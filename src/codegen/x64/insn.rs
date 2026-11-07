@@ -2,9 +2,10 @@
 
 use super::*;
 use crate::codegen::generate::InterpreterGenerator;
+use crate::codegen::host::AccessSize;
 use crate::codegen::templates::AuxTemplate;
 use crate::codegen::SIG_INVALID_INSN;
-use supporting_code::{AccessSize, DivOp, Width};
+use supporting_code::{DivOp, Width};
 
 /// Set the flags for the comparison of the 64 bit operands.
 ///
