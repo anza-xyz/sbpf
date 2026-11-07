@@ -16,10 +16,8 @@ use std::convert::TryInto;
 pub(super) struct Instantiation<'a> {
     /// The mapping of offsets from BPF instructions to their machine code.
     pub(super) pc_section: &'a [u32],
-    /// The offset to [`AuxTemplate::SigInvalidInsn`].
-    pub(super) sig_invalid_insn: usize,
-    /// Likewise for [`AuxTemplate::SigMeterExceeded`].
-    pub(super) sig_meter_exceeded: usize,
+    /// The offsets of the entries of the latest island.
+    pub(super) island: arch::IslandEntries,
     /// The offset in the output this template is at.
     pub(super) position: usize,
     /// BPF instruction index.
@@ -59,10 +57,6 @@ pub(super) enum AuxTemplate {
     /// For `pc_section` entries that are not valid jump targets (e.g. the second halves of 16
     /// byte instructions.)
     InvalidCallTarget,
-    /// Where the templates of invalid instructions jump to.
-    SigInvalidInsn,
-    /// Where the templates continue when the instruction meter is exceeded.
-    SigMeterExceeded,
     /// Randomly inserted between other templates to diversify the output.
     Noop,
     /// Inserted ahead of an instruction to check the instruction meter.
@@ -70,34 +64,46 @@ pub(super) enum AuxTemplate {
 }
 
 impl AuxTemplate {
-    const COUNT: usize = 6;
+    const COUNT: usize = 4;
     pub(super) const ALL: [Self; Self::COUNT] = [
         Self::ExecutionOverrun,
         Self::InvalidCallTarget,
-        Self::SigInvalidInsn,
-        Self::SigMeterExceeded,
         Self::Noop,
         Self::MeterCheckpoint,
     ];
-    /// Emitted at the start of the output, in this order.
-    const SHARED: [Self; 3] = [
-        Self::InvalidCallTarget,
-        Self::SigInvalidInsn,
-        Self::SigMeterExceeded,
-    ];
+
     /// Index within `JitTemplates`.
     const fn index(self) -> usize {
         TemplateOpcode::COUNT.wrapping_add(self as usize)
     }
 }
 
-pub(super) const NUM_TEMPLATES: usize = TemplateOpcode::COUNT + AuxTemplate::COUNT;
+/// Index of the island within `JitTemplates`, after the opcodes and [`AuxTemplate`]s.
+///
+/// The island is the code that the templates jump to on the uncommon paths. There is one before the
+/// guest code on all targets, and further copies may be inserted as needed by the architecture
+/// (such as the aarch64 backend.) Unlike the [`AuxTemplate`]s its generation also yields the
+/// offsets of its entries, see [`JitTemplates::island_entries`].
+const ISLAND: usize = TemplateOpcode::COUNT + AuxTemplate::COUNT;
+
+pub(super) const NUM_TEMPLATES: usize = ISLAND + 1;
 
 /// Machine code templates the JIT output is assembled from.
 pub struct JitTemplates<const SIZE: usize> {
     pub(super) layouts: Box<[TemplateLayout; NUM_TEMPLATES]>,
     pub(super) code: Box<[[u8; SIZE]; NUM_TEMPLATES]>,
     pub(super) relocations: Box<[[TemplateRelocation; MAX_RELOCATIONS]; NUM_TEMPLATES]>,
+    pub(super) island_entries: arch::IslandEntries,
+}
+
+/// The result of [`JitTemplates::analyze`].
+struct Layout {
+    /// The `pc_section`, with `PADDING_DUE` flags in it.
+    pc_section: Vec<u32>,
+    /// The length of the machine code.
+    len: usize,
+    /// The number of no-ops at the beginning.
+    start_padding: usize,
 }
 
 /// A bitflag set in `pc_section` by `JitTemplates::analyze` for the instructions that must be
@@ -107,7 +113,10 @@ const CHECKPOINT_DUE: u32 = 1 << 31;
 /// Likewise for a no-op ahead of the instruction.
 const NOOP_DUE: u32 = 1 << 30;
 
-pub(super) const PADDING_DUE: u32 = CHECKPOINT_DUE | NOOP_DUE;
+/// Likewise for an island ahead of the instruction.
+const ISLAND_DUE: u32 = 1 << 29;
+
+pub(super) const PADDING_DUE: u32 = CHECKPOINT_DUE | NOOP_DUE | ISLAND_DUE;
 
 /// Longest run of no-ops `JitTemplates::compile` may insert at the beginning.
 const MAX_START_PADDING_LENGTH: usize = 256;
@@ -142,17 +151,13 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
                 .into_boxed_slice()
                 .try_into()
                 .unwrap(),
+            island_entries: [0; arch::IslandEntry::COUNT],
         }
     }
 
-    /// The offsets of the [`AuxTemplate::SHARED`] templates.
-    fn shared_offsets(&self) -> [usize; AuxTemplate::SHARED.len()] {
-        let mut end = 0usize;
-        AuxTemplate::SHARED.map(|template| {
-            let start = end;
-            end = end.wrapping_add(self.aux_layout(template).len());
-            start
-        })
+    /// The offsets of the entries of an island at `start`.
+    fn island_at(&self, start: usize) -> arch::IslandEntries {
+        self.island_entries.map(|entry| start.wrapping_add(entry))
     }
 
     fn builder(&mut self, index: usize) -> TemplateBuilder<'_, SIZE> {
@@ -171,11 +176,12 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         self.builder(template.index())
     }
 
+    pub(super) fn island_builder(&mut self) -> TemplateBuilder<'_, SIZE> {
+        self.builder(ISLAND)
+    }
+
     /// First pass analysis of the program to be compiled.
-    ///
-    /// Returns the `pc_section` (with `PADDING_DUE` flags in it), the length of the machine code
-    /// and the number of no-ops at the beginning.
-    fn analyze<C: ContextObject>(&self, executable: &Executable<C>) -> (Vec<u32>, usize, usize) {
+    fn analyze<C: ContextObject>(&self, executable: &Executable<C>) -> Layout {
         let bpf = executable.get_text_bytes().1;
         let config = executable.get_config();
         let noop_instruction_rate = config.noop_instruction_rate;
@@ -192,11 +198,10 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             .gen_range(0..MAX_START_PADDING_LENGTH)
             .wrapping_mul((noop_threshold != 0) as usize);
 
-        let mut pc_sec = Vec::with_capacity(program.len());
-        let mut position = 0usize;
-        for template in AuxTemplate::SHARED {
-            position = position.wrapping_add(self.aux_layout(template).len());
-        }
+        let mut pc_section = Vec::with_capacity(program.len());
+        let island = self.aux_layout(AuxTemplate::InvalidCallTarget).len();
+        let mut position = island.wrapping_add(self.layouts[ISLAND].len());
+        let mut next_island = island.saturating_add(arch::ISLAND_INTERVAL);
         position = position
             .wrapping_add(start_padding.wrapping_mul(self.aux_layout(AuxTemplate::Noop).len()));
         // Introduce checkpoints at certain points in the code; the instruction meter is otherwise
@@ -207,6 +212,13 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         while let Some(insn) = program_iter.next() {
             let insn = u64::from_le_bytes(*insn);
             let layout = self.insn_layout(TemplateOpcode::of(insn));
+            let island = if position >= next_island {
+                position = position.wrapping_add(self.layouts[ISLAND].len());
+                next_island = position.saturating_add(arch::ISLAND_INTERVAL);
+                ISLAND_DUE
+            } else {
+                0
+            };
             let noop = if rng.next_u32() < noop_threshold {
                 position = position.wrapping_add(self.aux_layout(AuxTemplate::Noop).len());
                 NOOP_DUE
@@ -226,16 +238,20 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
                 CHECKPOINT_DUE
             };
             // Once the final `position` is known we double check that these bits are okay to use.
-            pc_sec.push(position as u32 | noop | checkpoint);
+            pc_section.push(position as u32 | island | noop | checkpoint);
             position = position.wrapping_add(layout.len());
             for _ in 0..layout.extra_bpf_insns {
                 program_iter.next();
-                pc_sec.push(Self::INVALID_CALL_TARGET);
+                pc_section.push(Self::INVALID_CALL_TARGET);
             }
         }
         position = position.wrapping_add(self.aux_layout(AuxTemplate::ExecutionOverrun).len());
-        assert!(position < NOOP_DUE as usize, "JIT output too large");
-        (pc_sec, position, start_padding)
+        assert!(position < ISLAND_DUE as usize, "JIT output too large");
+        Layout {
+            pc_section,
+            len: position,
+            start_padding,
+        }
     }
 
     /// Compile the text section of `executable` into machine code.
@@ -247,7 +263,11 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         &self,
         executable: &Executable<C>,
     ) -> Result<JitProgram, EbpfError> {
-        let (mut pc_sec, output_len, start_padding) = self.analyze(executable);
+        let Layout {
+            pc_section: mut pc_sec,
+            len: output_len,
+            start_padding,
+        } = self.analyze(executable);
         let bpf = executable.get_text_bytes().1;
         assert!(
             bpf.len() <= MAX_RANDOM_KEY as usize,
@@ -263,20 +283,16 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         let mut program = UnsealedJitProgram::in_mapping(mapping, pc_sec.len(), code_capacity);
 
         let text = program.text_section_mut();
-        let [invalid_call_target, sig_invalid_insn, sig_meter_exceeded] = self.shared_offsets();
-        debug_assert_eq!(invalid_call_target, Self::INVALID_CALL_TARGET as usize);
         let mut at = Instantiation {
             pc_section: &pc_sec,
-            sig_invalid_insn,
-            sig_meter_exceeded,
+            island: [0; arch::IslandEntry::COUNT],
             position: 0,
             pc: 0,
             off: 0,
             random_key,
         };
-        for template in AuxTemplate::SHARED {
-            self.emit_aux(text, &mut at, template);
-        }
+        self.emit_aux(text, &mut at, AuxTemplate::InvalidCallTarget);
+        self.emit_island(text, &mut at);
         for _ in 0..start_padding {
             self.emit_aux(text, &mut at, AuxTemplate::Noop);
         }
@@ -292,6 +308,9 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             at.pc = pc;
             at.off = (insn >> 16) as i16;
             if entry & PADDING_DUE != 0 {
+                if entry & ISLAND_DUE != 0 {
+                    self.emit_island(text, &mut at);
+                }
                 if entry & NOOP_DUE != 0 {
                     self.emit_aux(text, &mut at, AuxTemplate::Noop);
                 }
@@ -320,6 +339,12 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
 
     fn aux_layout(&self, template: AuxTemplate) -> TemplateLayout {
         self.layouts[template.index()]
+    }
+
+    /// Write an island to `text`, making it the latest one in `at`.
+    fn emit_island(&self, text: &mut [u8], at: &mut Instantiation) {
+        at.island = self.island_at(at.position);
+        self.emit(text, at, ISLAND);
     }
 
     /// Write the `template` to `text`, see `emit`.

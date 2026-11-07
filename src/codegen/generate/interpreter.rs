@@ -29,6 +29,8 @@ pub(in crate::codegen) struct Interpreter {
 pub(in crate::codegen) struct InterpreterGenerator {
     buffer: Mapping,
     relocs: LabelRelocs<arch::Relocation>,
+    /// The offsets of the entries of the latest island.
+    island: Option<arch::IslandEntries>,
     offset: usize,
     version: SBPFVersion,
     opcode: TemplateOpcode,
@@ -57,6 +59,7 @@ impl InterpreterGenerator {
             version,
             buffer,
             relocs: LabelRelocs::new(),
+            island: None,
             offset: 0,
             opcode: TemplateOpcode(0),
             terminal: false,
@@ -89,7 +92,12 @@ impl Generator for InterpreterGenerator {
         ref_offset: u8,
         kind: u8,
     ) {
-        let target = arch::interpreter_global(name);
+        let entry = arch::IslandEntry::of_global(name)
+            .unwrap_or_else(|| panic!("global reference to an unknown symbol {}", name));
+        let island = self
+            .island
+            .expect("the island precedes the code that refers to it");
+        let target = island[entry as usize];
         let patch =
             PatchFields::<arch::Relocation>::new(target_offset, field_offset, ref_offset, kind)
                 .at(self.offset);
@@ -99,10 +107,9 @@ impl Generator for InterpreterGenerator {
         );
         let base = self.buffer.as_ptr() as usize;
         let field = &mut self.buffer[patch.range(0)];
-        let target = target.wrapping_sub(base);
         patch
             .patch(field, base, target)
-            .expect("global label out of reach of the interpreter");
+            .expect("island out of reach of the interpreter");
     }
 
     fn template_reloc(&mut self, _: TemplateRelocationKind, _: isize, _: u8, _: u8, _: u8) {
@@ -169,6 +176,12 @@ fn generate_interpreter(version: SBPFVersion) -> Interpreter {
         let step_start = InterpreterGenerator::step_offset(opcode);
         generator.opcode = opcode;
         generator.offset = step_start;
+        generator.terminal = false;
+        if opcode.op() == 0 {
+            let start = generator.offset;
+            generator.island =
+                Some(arch::island(&mut generator).map(|entry| start.wrapping_add(entry)));
+        }
         arch::bpf_insn(&mut generator);
         generator.terminal = false;
         arch::interpreter_dispatch(&mut generator);

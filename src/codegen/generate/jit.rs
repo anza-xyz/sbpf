@@ -157,6 +157,10 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
         arch::aux_template(&mut generator, template);
         generator.finalize();
     }
+    let mut generator = JITGenerator::new(version, templates.island_builder(), None);
+    let island_entries = arch::island(&mut generator);
+    generator.finalize();
+    templates.island_entries = island_entries;
     templates
 }
 
