@@ -118,12 +118,14 @@ pub(super) enum IslandEntry {
     SigMeterExceeded,
     /// Terminate for a division by zero.
     SigDivideByZero,
+    /// Terminate for a signed division that overflows.
+    SigDivideOverflow,
     /// Where the taken branches continue if their target is out of their reach.
     FarJump,
 }
 
 impl IslandEntry {
-    pub(super) const COUNT: usize = 4;
+    pub(super) const COUNT: usize = 5;
 
     /// The entry that the global label `name` refers to.
     pub(super) fn of_global(name: &str) -> Option<Self> {
@@ -131,6 +133,7 @@ impl IslandEntry {
             "sig_invalid_insn" => Some(Self::SigInvalidInsn),
             "sig_meter_exceeded" => Some(Self::SigMeterExceeded),
             "sig_divide_by_zero" => Some(Self::SigDivideByZero),
+            "sig_divide_overflow" => Some(Self::SigDivideOverflow),
             "far_jump" => Some(Self::FarJump),
             _ => None,
         }

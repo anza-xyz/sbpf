@@ -430,10 +430,6 @@ macro_rules! test_interpreter_and_jit {
                     _ => { unreachable!() }
                 }
             };
-            // Parrot falls back to the old JIT for some SBPF versions, which may be unavailable.
-            if $executable.get_compiled_program().is_none() {
-                continue;
-            }
             use $crate::memory_region::HostBuffer;
             let mem = match host_buffer {
                 HostBuffer::Immutable(_) => HostBuffer::Immutable(&raw const jit_input_mem[..]),

@@ -10,7 +10,8 @@ use crate::codegen::host::{self, AccessSize, HostCallStatus};
 use crate::codegen::templates::JitTemplates;
 use crate::codegen::{
     SIG_CALL_DEPTH_EXCEEDED, SIG_CALL_OUTSIDE_TEXT_SEGMENT, SIG_DIVIDE_BY_ZERO,
-    SIG_EXCEEDED_MAX_INSTRUCTIONS, SIG_EXECUTION_OVERRUN, SIG_INVALID_INSN, SIG_PROGRAM_RESULT,
+    SIG_DIVIDE_OVERFLOW, SIG_EXCEEDED_MAX_INSTRUCTIONS, SIG_EXECUTION_OVERRUN, SIG_INVALID_INSN,
+    SIG_PROGRAM_RESULT,
 };
 use crate::memory_management::{Mapping, ReadExecute};
 use dynasmrt::{DynasmApi, DynasmLabelApi, VecAssembler};
@@ -53,10 +54,11 @@ pub(super) enum Support {
 }
 
 /// The signals of [`Support::Signal`], in the order of their slots.
-const SIGNALS: [i8; 4] = [
+const SIGNALS: [i8; 5] = [
     SIG_EXCEEDED_MAX_INSTRUCTIONS,
     SIG_INVALID_INSN,
     SIG_DIVIDE_BY_ZERO,
+    SIG_DIVIDE_OVERFLOW,
     SIG_EXECUTION_OVERRUN,
 ];
 
@@ -288,7 +290,9 @@ fn internal_call(out: &mut Asm, callee: Callee) {
 
         // `RTEMP` for converting the meter back once the callee returns.
         ; stp x30, RTEMP, [sp, -64]!
-        ; str RINSN, [sp, 16]
+        // `r10` is only bumped by the call itself unless the version has the programs bump it,
+        // which they may do in the callee, so it is restored from where it was saved.
+        ; stp RINSN, R10, [sp, 16]
         ; stp R6, R7, [sp, 32]
         ; stp R8, R9, [sp, 48]
         ; ldr RFIELD, [RFRAME, frame_offset!(text_section)]
@@ -315,11 +319,9 @@ fn internal_call(out: &mut Asm, callee: Callee) {
         ; ldr RFIELD, [RFRAME, frame_offset!(stack_frame_bump)]
         ; add R10, R10, RFIELD
         ;; call_bpf_function(out)
-        ; ldr RFIELD, [RFRAME, frame_offset!(stack_frame_bump)]
-        ; sub R10, R10, RFIELD
         ; ldp R8, R9, [sp, 48]
         ; ldp R6, R7, [sp, 32]
-        ; ldr RINSN, [sp, 16]
+        ; ldp RINSN, R10, [sp, 16]
         ; ldp x30, RTEMP, [sp], 64
         // `EXIT` left the remaining budget in `RMETER`, convert back to the instruction limit.
         ; add RMETER, RMETER, RTEMP
