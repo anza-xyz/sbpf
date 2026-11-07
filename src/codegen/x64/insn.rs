@@ -444,19 +444,45 @@ pub(in crate::codegen) fn aux_template<G: Generator + ?Sized>(out: &mut G, templ
             x64asm!(out; mov RTEMP, rbp => Frame[BYTE -1].next_insn);
             #[cfg(feature = "tracer")]
             invoke_support(out, SupportingCode::get().trace);
-            // Continues into `InvalidInsn`.
+            terminate_invalid_insn_with_meter_check(out);
         }
-        AuxTemplate::SigInvalidInsn => {
-            bpf_validate_meter(out);
-            terminate(out, SIG_INVALID_INSN);
-        }
-        AuxTemplate::SigMeterExceeded => terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS),
         AuxTemplate::Noop => x64asm!(out; nop),
         AuxTemplate::MeterCheckpoint => {
             load_next_insn_addr(out);
             bpf_validate_meter(out);
         }
     }
+}
+
+/// Terminate due to encountering an invalid instruction.
+///
+/// However if the execution was already exceeded at this point, terminate with that instead. The
+/// returned value is an offset to the code that terminates for this reason.
+fn terminate_invalid_insn_with_meter_check<G: Generator + ?Sized>(out: &mut G) -> usize {
+    let exceeded = out.new_dynamic_label();
+    x64asm!(out
+        ; cmp RTEMP, RMETER
+        ; ja BYTE =>exceeded
+        ;; terminate(out, SIG_INVALID_INSN)
+        ; =>exceeded
+    );
+    let offset = out.offset();
+    terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS);
+    offset
+}
+
+/// Generate an island, returning the offsets of its entries from its start.
+pub(in crate::codegen) fn island<G: Generator + ?Sized>(out: &mut G) -> IslandEntries {
+    let start = out.offset();
+    let end = out.new_dynamic_label();
+    x64asm!(out; jmp BYTE =>end);
+    let sig_invalid_insn = out.offset();
+    let sig_meter_exceeded = terminate_invalid_insn_with_meter_check(out);
+    out.dynamic_label(end);
+    let mut entries = [0; IslandEntry::COUNT];
+    entries[IslandEntry::SigInvalidInsn as usize] = sig_invalid_insn.wrapping_sub(start);
+    entries[IslandEntry::SigMeterExceeded as usize] = sig_meter_exceeded.wrapping_sub(start);
+    entries
 }
 
 /// [`Generator::bpf_taken_branch`] for JIT templates.
