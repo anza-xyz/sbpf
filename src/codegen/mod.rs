@@ -14,9 +14,17 @@
 mod generate;
 mod host;
 mod templates;
-mod x64;
 
-use x64 as arch;
+cfg_select! {
+    target_arch = "x86_64" => {
+        mod x64;
+        use x64 as arch;
+    }
+    target_arch = "aarch64" => {
+        mod aarch64;
+        use aarch64 as arch;
+    }
+}
 
 pub use generate::jit_templates;
 pub use templates::JitTemplates;
@@ -120,7 +128,9 @@ impl<C: ContextObject> Executable<C> {
         let version = self.get_sbpf_version();
         if matches!(version, SBPFVersion::V1 | SBPFVersion::V2) {
             return cfg_select! {
-                all(feature = "jit", not(target_os = "windows")) => self.jit_compile(),
+                all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64") => {
+                    self.jit_compile()
+                }
                 _ => Ok(()),
             };
         }

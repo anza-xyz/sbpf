@@ -1,6 +1,10 @@
 #![allow(clippy::literal_string_with_formatting_args)]
 #![allow(clippy::arithmetic_side_effects)]
-#![cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+#![cfg(all(
+    feature = "jit",
+    not(target_os = "windows"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 
 // Copyright 2020 Solana Maintainers <maintainers@solana.com>
 //

@@ -28,7 +28,7 @@ extern crate thiserror;
 pub mod aligned_memory;
 mod asm_parser;
 pub mod assembler;
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 pub mod codegen;
 #[cfg(feature = "debugger")]
 pub mod debugger;

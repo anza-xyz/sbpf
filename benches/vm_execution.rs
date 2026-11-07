@@ -61,7 +61,7 @@ fn bench_backends(
         executable.jit_compile().unwrap();
         bench("jit", ExecutionMode::Jit, &mut []);
     }
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     if !matches!(
         executable.get_sbpf_version(),
         SBPFVersion::V1 | SBPFVersion::V2
