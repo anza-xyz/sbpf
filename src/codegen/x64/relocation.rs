@@ -1,6 +1,6 @@
 //! Relocations within the JIT templates.
 
-use super::Relocation;
+use super::{IslandEntry, Relocation};
 use crate::codegen::generate::PatchFields;
 use crate::codegen::templates::{Instantiation, JitTemplates, PADDING_DUE};
 use crate::ebpf;
@@ -25,10 +25,8 @@ pub(in crate::codegen) enum TemplateRelocationKind {
     /// machine code is what this relocation overwrites based on the BPF instruction being
     /// templated.
     TakenBranch,
-    /// For `jmp ->sig_meter_exceeded`.
-    SigMeterExceeded,
-    /// For `jmp ->sig_invalid_insn`.
-    SigInvalidInsn,
+    /// For jumps to the entry of the latest island.
+    Island(IslandEntry),
 }
 
 /// A relocation that can only be resolved once the template is instantiated for a specific eBPF
@@ -46,9 +44,10 @@ impl TemplateRelocationKind {
     pub(in crate::codegen) fn of_global(name: &str) -> Self {
         match name {
             "template_taken_branch" => Self::TakenBranch,
-            "sig_meter_exceeded" => Self::SigMeterExceeded,
-            "sig_invalid_insn" => Self::SigInvalidInsn,
-            _ => panic!("global reference to an unknown symbol {}", name),
+            _ => match IslandEntry::of_global(name) {
+                Some(entry) => Self::Island(entry),
+                None => panic!("global reference to an unknown symbol {}", name),
+            },
         }
     }
 }
@@ -69,9 +68,7 @@ impl TemplateRelocation {
     ) -> Self {
         let location = code.len();
         let relative = match kind {
-            TemplateRelocationKind::TakenBranch
-            | TemplateRelocationKind::SigMeterExceeded
-            | TemplateRelocationKind::SigInvalidInsn => true,
+            TemplateRelocationKind::TakenBranch | TemplateRelocationKind::Island(_) => true,
             TemplateRelocationKind::InsnOffset => false,
         };
         assert!(
@@ -132,11 +129,8 @@ impl TemplateRelocation {
                     .unwrap_or(JitTemplates::<SIZE>::INVALID_CALL_TARGET);
                 i64::from(target & !PADDING_DUE).wrapping_sub(at.position as i64)
             }
-            TemplateRelocationKind::SigMeterExceeded => {
-                (at.sig_meter_exceeded as i64).wrapping_sub(at.position as i64)
-            }
-            TemplateRelocationKind::SigInvalidInsn => {
-                (at.sig_invalid_insn as i64).wrapping_sub(at.position as i64)
+            TemplateRelocationKind::Island(entry) => {
+                (at.island[entry as usize] as i64).wrapping_sub(at.position as i64)
             }
         };
         add_to_field(template, out, usize::from(self.field), target);

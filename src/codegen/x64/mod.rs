@@ -127,13 +127,44 @@ pub(super) mod supporting_code;
 pub(super) use entry::enter;
 use entry::Frame;
 pub(super) use insn::{
-    aux_template, bpf_insn, interpreter_dispatch, interpreter_taken_branch, jit_taken_branch,
+    aux_template, bpf_insn, interpreter_dispatch, interpreter_taken_branch, island,
+    jit_taken_branch,
 };
 pub(super) use relocation::{
     TemplateRelocation, TemplateRelocationKind, MAX_JIT_TEMPLATE_SIZE, MAX_RELOCATIONS,
 };
-pub(super) use supporting_code::interpreter_global;
 use supporting_code::SupportingCode;
+
+/// The JIT output gets an island at most this many bytes apart.
+pub(super) const ISLAND_INTERVAL: usize = 1 << 30;
+
+/// The entries of an island.
+///
+/// The templates refer to the entries of the latest island by the global labels of
+/// [`Self::of_global`].
+#[derive(Clone, Copy, Debug)]
+pub(super) enum IslandEntry {
+    /// Terminate for an invalid instruction.
+    SigInvalidInsn,
+    /// Terminate as the instruction meter is exceeded.
+    SigMeterExceeded,
+}
+
+impl IslandEntry {
+    pub(super) const COUNT: usize = 2;
+
+    /// The entry that the global label `name` refers to.
+    pub(super) fn of_global(name: &str) -> Option<Self> {
+        match name {
+            "sig_invalid_insn" => Some(Self::SigInvalidInsn),
+            "sig_meter_exceeded" => Some(Self::SigMeterExceeded),
+            _ => None,
+        }
+    }
+}
+
+/// The offsets of the entries from the start of an island.
+pub(super) type IslandEntries = [usize; IslandEntry::COUNT];
 
 /// The interpreter steps are 128 bytes.
 pub(super) const INTERPRETER_STEP_SIZE_LOG2: u8 = 7;

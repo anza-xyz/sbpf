@@ -35,10 +35,6 @@ pub(in crate::codegen) struct SupportingCode {
     pub(super) v0_callx: u32,
     /// The entrypoint to set up the machine state VM execution expects.
     pub(super) entry_point: u32,
-    /// Terminate the execution after CUs have been exhausted.
-    pub(super) meter_exceeded: u32,
-    /// Terminate the execution with the invalid instruction code.
-    pub(super) invalid_insn: u32,
     pub(super) divide: DivideHelpers,
     pub(super) memory: MemoryHelpers,
     /// Keeps the code mapped.
@@ -67,7 +63,7 @@ impl SupportingCode {
         let mut mapping = Mapping::sub2g(Self::LEN);
         let base = u32::try_from(mapping.as_ptr() as usize).unwrap();
         let mut out = Asm::new(usize::try_from(base).unwrap());
-        let (meter_exceeded, invalid_insn) = Self::signals(&mut out, base);
+        Self::signals(&mut out);
         let call_imm = Self::call_imm(&mut out, base);
         let v0_call_imm = Self::v0_call_imm(&mut out, base);
         let (v0_callx, callx) = Self::callx(&mut out, base);
@@ -94,8 +90,6 @@ impl SupportingCode {
             trace,
             memory,
             entry_point,
-            meter_exceeded,
-            invalid_insn,
             divide,
             _code: mapping.protect(),
         }
@@ -111,27 +105,13 @@ pub(super) fn address(out: &mut Asm, base: u32, align_for_call: bool) -> u32 {
     base.checked_add(offset).unwrap()
 }
 
-pub(in crate::codegen) fn interpreter_global(name: &str) -> usize {
-    let supports = SupportingCode::get();
-    let target = match name {
-        "sig_meter_exceeded" => supports.meter_exceeded,
-        "sig_invalid_insn" => supports.invalid_insn,
-        _ => panic!("global reference to an unknown symbol {}", name),
-    };
-    target as usize
-}
-
 impl SupportingCode {
-    fn signals(out: &mut Asm, base: u32) -> (u32, u32) {
-        let meter_exceeded = address(out, base, false);
+    /// Where the supporting functions continue when the instruction meter is exceeded.
+    fn signals(out: &mut Asm) {
         x64asm!(out
             ; ->sig_meter_exceeded:
             ;; terminate(out, SIG_EXCEEDED_MAX_INSTRUCTIONS)
         );
-        let invalid_insn = address(out, base, false);
-        validate_meter(out);
-        terminate(out, SIG_INVALID_INSN);
-        (meter_exceeded, invalid_insn)
     }
 }
 
