@@ -4,13 +4,12 @@
 
 use super::*;
 use crate::codegen::generate::InterpreterGenerator;
+use crate::codegen::host::{self, HostCallStatus};
 use crate::codegen::{
     SIG_CALL_DEPTH_EXCEEDED, SIG_CALL_OUTSIDE_TEXT_SEGMENT, SIG_DIVIDE_BY_ZERO, SIG_INVALID_INSN,
     SIG_PROGRAM_RESULT,
 };
 use crate::memory_management::{Mapping, ReadExecute};
-use crate::program::SBPFVersion;
-use crate::vm::EbpfVm;
 use dynasmrt::x64::X64Relocation;
 use dynasmrt::{DynamicLabel, DynasmApi, DynasmLabelApi, VecAssembler};
 use std::sync::LazyLock;
@@ -45,7 +44,7 @@ mod divide;
 mod memory;
 
 pub(super) use divide::{DivOp, DivideHelpers, Width};
-pub(super) use memory::{AccessSize, MemoryFunctions, MemoryHelpers};
+pub(super) use memory::MemoryHelpers;
 
 pub(super) type Asm = VecAssembler<X64Relocation>;
 
@@ -349,83 +348,6 @@ impl SupportingCode {
     }
 }
 
-/// The address of the helper to store into [`Frame::call_dispatcher`].
-pub(super) fn call_dispatcher<C: crate::vm::ContextObject>(version: SBPFVersion) -> *const u8 {
-    if version.static_syscalls() {
-        dispatch_syscall::<C> as *const u8
-    } else {
-        dispatch_call::<C> as *const u8
-    }
-}
-
-/// The SBPFv0 `CALL_IMM`.
-extern "sysv64" fn dispatch_call<C: crate::vm::ContextObject>(
-    vm: &mut crate::vm::EbpfVm<C>,
-    key: u32,
-    remaining: u64,
-    internal_functions: &crate::program::FunctionRegistry<usize>,
-) -> HostCallResult {
-    match vm.loader.get_function_registry().lookup_by_key(key) {
-        Some((_, (function, _))) => invoke_syscall(vm, function, remaining),
-        None => match internal_functions.lookup_by_key(key) {
-            Some((_, target_pc)) => HostCallResult {
-                rax: target_pc as u64,
-                dl: HostCallStatus::CallInternal,
-            },
-            None => unsupported_syscall(vm, remaining),
-        },
-    }
-}
-
-extern "sysv64" fn dispatch_syscall<C: crate::vm::ContextObject>(
-    vm: &mut crate::vm::EbpfVm<C>,
-    key: u32,
-    remaining: u64,
-) -> HostCallResult {
-    // TODO: avoid the hashmap lookup on every syscall. Programs only ever run against a handful of
-    // syscall sets, which could get dedicated interpreter/JIT variants with the functions resolved
-    // ahead of time.
-    match vm.loader.get_function_registry().lookup_by_key(key) {
-        Some((_, (function, _))) => invoke_syscall(vm, function, remaining),
-        None => unsupported_syscall(vm, remaining),
-    }
-}
-
-fn unsupported_syscall<C: crate::vm::ContextObject>(
-    vm: &mut crate::vm::EbpfVm<C>,
-    remaining: u64,
-) -> HostCallResult {
-    vm.program_result =
-        crate::error::ProgramResult::Err(crate::error::EbpfError::UnsupportedInstruction);
-    HostCallResult {
-        rax: remaining,
-        dl: HostCallStatus::Failed,
-    }
-}
-
-fn invoke_syscall<C: crate::vm::ContextObject>(
-    vm: &mut crate::vm::EbpfVm<C>,
-    function: crate::program::BuiltinFunction<C>,
-    remaining: u64,
-) -> HostCallResult {
-    use crate::error::ProgramResult;
-    // `invoke_function` consumes `due_insn_count` from the budget and updates
-    // `previous_instruction_meter` with what is left of it.
-    vm.due_insn_count = vm.previous_instruction_meter.saturating_sub(remaining);
-    vm.invoke_function(function);
-    let status = match vm.program_result {
-        ProgramResult::Ok(result) => {
-            vm.registers[0] = result;
-            HostCallStatus::Ok
-        }
-        ProgramResult::Err(_) => HostCallStatus::Failed,
-    };
-    HostCallResult {
-        rax: vm.previous_instruction_meter,
-        dl: status,
-    }
-}
-
 #[cfg(feature = "tracer")]
 impl SupportingCode {
     fn trace(out: &mut Asm, base: u32) -> u32 {
@@ -436,14 +358,14 @@ impl SupportingCode {
                 store_bpf_register(out, reg);
             }
         }
-        let pc_slot = register_slot(Reg(GPREG_MAP.len() as u8));
+        let pc_slot = i32::try_from(host::PC_SLOT).unwrap();
         x64asm!(out
             ; sub RTEMP, rbp => Frame[BYTE -1].text_section
             ; shr RTEMP, 3
             ; dec RTEMP
             ; mov [rax + pc_slot], RTEMP
             ; mov rdi, rax
-            ; mov rax, QWORD push_register_trace as *const u8 as i64
+            ; mov rax, QWORD host::push_register_trace as *const u8 as i64
             ;; debug_assert_sysv64_call_stack_alignment(out)
             ; call rax
             ;; reload_after_sysv64_call(out)
@@ -451,13 +373,6 @@ impl SupportingCode {
         );
         start
     }
-}
-
-#[cfg(feature = "tracer")]
-extern "sysv64" fn push_register_trace(
-    vm: &mut crate::vm::EbpfVm<crate::static_analysis::DummyContextObject>,
-) {
-    vm.register_trace.push(vm.registers);
 }
 
 const fn reg_mask(regs: &[u8]) -> u16 {
@@ -469,9 +384,6 @@ const fn reg_mask(regs: &[u8]) -> u16 {
     }
     mask
 }
-
-/// For addressing `EbpfVm` fields as `reg => Vm.field`.
-type Vm = EbpfVm<'static, crate::static_analysis::DummyContextObject>;
 
 /// General purpose registers not preserved across `sysv64` calls.
 const SYSV64_CLOBBERED: u16 = reg_mask(&[RAX, RCX, RDX, RSI, RDI, R8, R9, R10, R11]);
@@ -485,9 +397,7 @@ const SPILL_PUSHED_RMETER: i8 = 0;
 
 /// Offset of the slot for `reg` in [`EbpfVm::registers`].
 fn register_slot(reg: Reg) -> i32 {
-    (std::mem::offset_of!(Vm, registers) as i32)
-        .checked_add(i32::from(reg.0).checked_mul(8).unwrap())
-        .unwrap()
+    i32::try_from(host::register_slot(reg)).unwrap()
 }
 
 /// Push the registers that a `sysv64` host function call would clobber.
@@ -593,66 +503,11 @@ fn debug_assert_bpf_call_stack_alignment(out: &mut Asm) {
     let _ = out;
 }
 
-/// Returned by the (sysv64) host functions, in the registers the fields are named after.
-#[repr(C)]
-struct HostCallResult {
-    rax: u64,
-    dl: HostCallStatus,
-}
-
-#[repr(u8)]
-enum HostCallStatus {
-    Ok = 0,
-    /// The error has been stored into `vm.program_result`.
-    Failed = 1,
-    /// The SBPFv0 `CALL_IMM` is an internal call to the pc in `rax`, see `dispatch_call`.
-    CallInternal = 2,
-}
-
-impl HostCallResult {
-    /// Failure with the error (if any) already in place.
-    fn failed() -> Self {
-        Self {
-            rax: 0,
-            dl: HostCallStatus::Failed,
-        }
-    }
-
-    /// The outcome that `vm.program_result` has been set to.
-    fn of_program_result<C: crate::vm::ContextObject>(vm: &mut crate::vm::EbpfVm<C>) -> Self {
-        match vm.program_result {
-            crate::error::ProgramResult::Ok(rax) => Self {
-                rax,
-                dl: HostCallStatus::Ok,
-            },
-            crate::error::ProgramResult::Err(_) => Self::failed(),
-        }
-    }
-
-    fn new(
-        result: crate::error::ProgramResult,
-        program_result: &mut crate::error::ProgramResult,
-    ) -> Self {
-        match result {
-            crate::error::ProgramResult::Ok(value) => Self {
-                rax: value,
-                dl: HostCallStatus::Ok,
-            },
-            err => {
-                *program_result = err;
-                Self {
-                    rax: 0,
-                    dl: HostCallStatus::Failed,
-                }
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codegen::generate::{interpreter_step, jit_templates, TemplateOpcode};
+    use crate::program::SBPFVersion;
 
     fn contains_address(code: &[u8], address: u32) -> bool {
         // `mov eax, imm32`, see `invoke_support`.

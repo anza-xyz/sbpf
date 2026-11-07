@@ -1,7 +1,8 @@
 //! Starting the execution of the guest BPF code.
 
-use super::supporting_code::{self, address, load_bpf_register, Asm, SupportingCode};
+use super::supporting_code::{address, load_bpf_register, Asm, SupportingCode};
 use crate::codegen::generate::{self, Reg, TemplateOpcode};
+use crate::codegen::host;
 use crate::codegen::{finish_execution, initial_meter};
 use crate::ebpf;
 use crate::elf::Executable;
@@ -68,8 +69,8 @@ pub(in crate::codegen) fn enter<C: ContextObject>(
         text_section_host_to_vm: bpf_vm_addr.wrapping_sub(bpf.as_ptr() as u64),
         jit_pc_section,
         code,
-        call_dispatcher: supporting_code::call_dispatcher::<C>(version),
-        memory_functions: supporting_code::MemoryFunctions::<C>::get(),
+        call_dispatcher: host::call_dispatcher::<C>(version),
+        memory_functions: host::MemoryFunctions::<C>::get(),
         function_registry: std::ptr::from_ref(executable.get_function_registry()).cast(),
         calls_remaining: max_call_depth as u64,
         stack_frame_bump: (stack_frame_size as u64).wrapping_mul(frames_per_call),
@@ -178,9 +179,9 @@ pub(super) struct Frame {
     pub(super) jit_pc_section: *const u32,
     /// Code being executed. For JIT the generated machine code, for interpreter the steps base.
     pub(super) code: *const u8,
-    /// See [`supporting_code::call_dispatcher`].
+    /// See [`host::call_dispatcher`].
     pub(super) call_dispatcher: *const u8,
-    /// See [`supporting_code::MemoryFunctions`].
+    /// See [`host::MemoryFunctions`].
     pub(super) memory_functions: *const u8,
     /// The `FunctionRegistry<usize>` of the executable.
     pub(super) function_registry: *const u8,

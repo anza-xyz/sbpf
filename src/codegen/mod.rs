@@ -12,6 +12,7 @@
 //! TODO: write full README.md for this.
 
 mod generate;
+mod host;
 mod templates;
 mod x64;
 

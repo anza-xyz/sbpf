@@ -3,6 +3,7 @@
 use super::generate::{Generator, Reg};
 use super::{SIG_EXCEEDED_MAX_INSTRUCTIONS, SIG_EXECUTION_OVERRUN};
 use crate::ebpf;
+use crate::memory_management::Mapping;
 use std::convert::TryFrom;
 
 /// The relocations of `dynasm` for x86_64.
@@ -165,6 +166,22 @@ impl IslandEntry {
 
 /// The offsets of the entries from the start of an island.
 pub(super) type IslandEntries = [usize; IslandEntry::COUNT];
+
+/// Declare a function or a function pointer type with the ABI of the host functions that the
+/// generated code calls.
+macro_rules! host_abi {
+    (fn ($($args:tt)*) -> $ret:ty) => { extern "sysv64" fn($($args)*) -> $ret };
+    ($(#[$attr:meta])* $vis:vis fn $($rest:tt)*) => {
+        $(#[$attr])* $vis extern "sysv64" fn $($rest)*
+    };
+}
+pub(super) use host_abi;
+
+/// Map `len` bytes for the interpreter steps, which address themselves with 32-bit absolute
+/// addresses.
+pub(super) fn map_interpreter(len: usize) -> Mapping {
+    Mapping::sub2g(len)
+}
 
 /// The interpreter steps are 128 bytes.
 pub(super) const INTERPRETER_STEP_SIZE_LOG2: u8 = 7;

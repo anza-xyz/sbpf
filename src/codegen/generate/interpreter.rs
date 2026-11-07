@@ -49,6 +49,7 @@ impl InterpreterGenerator {
         opcode.index() << Self::STEP_SIZE_LOG2
     }
 
+    #[cfg_attr(not(target_arch = "x86_64"), expect(dead_code))]
     pub(in crate::codegen) fn base(&self) -> *const u8 {
         self.buffer.as_ptr()
     }
@@ -168,7 +169,7 @@ pub(in crate::codegen) fn interpreter(version: SBPFVersion) -> &'static Interpre
 }
 
 fn generate_interpreter(version: SBPFVersion) -> Interpreter {
-    let buffer = Mapping::sub2g(InterpreterGenerator::STEP_TABLE_SIZE);
+    let buffer = arch::map_interpreter(InterpreterGenerator::STEP_TABLE_SIZE);
     let mut generator = InterpreterGenerator::new(version, buffer);
     // The space after the code of a step traps if it is ever executed.
     generator.buffer.fill(arch::TRAP_FILL);
