@@ -5,7 +5,8 @@ use crate::codegen::generate::InterpreterGenerator;
 use crate::codegen::host::AccessSize;
 use crate::codegen::templates::AuxTemplate;
 use crate::codegen::{
-    SIG_DIVIDE_BY_ZERO, SIG_EXCEEDED_MAX_INSTRUCTIONS, SIG_EXECUTION_OVERRUN, SIG_INVALID_INSN,
+    SIG_DIVIDE_BY_ZERO, SIG_DIVIDE_OVERFLOW, SIG_EXCEEDED_MAX_INSTRUCTIONS, SIG_EXECUTION_OVERRUN,
+    SIG_INVALID_INSN,
 };
 
 /// Load `addend` plus the offset from `RINSN` to the current BPF instruction into `W(reg)`.
@@ -135,53 +136,158 @@ fn invalid_insn<G: Generator + ?Sized>(out: &mut G) {
     jump_to_support(out, Support::Signal(SIG_INVALID_INSN));
 }
 
-/// `DIV*_REG` and `MOD*_REG`.
-fn divide_by_reg<G: Generator + ?Sized>(out: &mut G, dst: Reg, src: Reg) {
-    let op = out.opcode().op();
-    let is_div = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
-    load_next_insn_addr(out);
-    let (dst, src) = (u8::from(dst), u8::from(src));
-    match ((op & ebpf::BPF_CLS_MASK) == ebpf::BPF_ALU64_STORE, is_div) {
-        (true, true) => a64asm!(out
-            ; cbz X(src), ->sig_divide_by_zero
-            ; udiv X(dst), X(dst), X(src)
+/// Sign-extend the 32-bit result in `dst`, unless the version has the programs do that explicitly.
+fn sign_extend_result<G: Generator + ?Sized>(out: &mut G, dst: u8) {
+    if !out.version().explicit_sign_extension_of_results() {
+        a64asm!(out; sxtw X(dst), W(dst));
+    }
+}
+
+/// The width of the operands of an operation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Width {
+    W32,
+    W64,
+}
+
+/// The divisor of a division.
+#[derive(Clone, Copy)]
+enum Divisor {
+    Reg(Reg),
+    /// The immediate, sign-extended if it is a 64-bit division and `bool` is set. The verifier
+    /// rejects zero immediates, so there's no need to check those.
+    Imm(bool),
+}
+
+/// The unsigned division (`is_div`) or remainder of `dst` by `divisor`.
+fn unsigned_divide<G: Generator + ?Sized>(
+    out: &mut G,
+    dst: Reg,
+    divisor: Divisor,
+    width: Width,
+    is_div: bool,
+) {
+    let dst = u8::from(dst);
+    let divisor = match divisor {
+        Divisor::Reg(src) => {
+            let src = u8::from(src);
+            load_next_insn_addr(out);
+            match width {
+                Width::W64 => a64asm!(out; cbz X(src), ->sig_divide_by_zero),
+                Width::W32 => a64asm!(out; cbz W(src), ->sig_divide_by_zero),
+            }
+            src
+        }
+        Divisor::Imm(sign_extend) => {
+            load_imm(out, RFIELD, sign_extend && width == Width::W64);
+            RFIELD
+        }
+    };
+    match (width, is_div) {
+        (Width::W64, true) => a64asm!(out; udiv X(dst), X(dst), X(divisor)),
+        (Width::W64, false) => a64asm!(out
+            ; udiv x0, X(dst), X(divisor)
+            ; msub X(dst), x0, X(divisor), X(dst)
         ),
-        (true, false) => a64asm!(out
-            ; cbz X(src), ->sig_divide_by_zero
-            ; udiv RFIELD, X(dst), X(src)
-            ; msub X(dst), RFIELD, X(src), X(dst)
-        ),
-        (false, true) => a64asm!(out
-            ; cbz W(src), ->sig_divide_by_zero
-            ; udiv W(dst), W(dst), W(src)
-        ),
-        (false, false) => a64asm!(out
-            ; cbz W(src), ->sig_divide_by_zero
-            ; udiv WFIELD, W(dst), W(src)
-            ; msub W(dst), WFIELD, W(src), W(dst)
+        (Width::W32, true) => a64asm!(out; udiv W(dst), W(dst), W(divisor)),
+        (Width::W32, false) => a64asm!(out
+            ; udiv w0, W(dst), W(divisor)
+            ; msub W(dst), w0, W(divisor), W(dst)
         ),
     }
 }
 
-/// `DIV*_IMM` and `MOD*_IMM`. The verifier rejects zero immediates, so there's no need to check
-/// those.
-fn divide_by_imm<G: Generator + ?Sized>(out: &mut G, dst: Reg) {
-    let op = out.opcode().op();
-    let is_div = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
-    let is_64 = (op & ebpf::BPF_CLS_MASK) == ebpf::BPF_ALU64_STORE;
-    load_imm(out, RFIELD, is_64);
+/// The signed division (`is_div`) or remainder of `dst` by `divisor`, which terminates the
+/// execution for a division by zero, or the overflow of the most negative value divided by -1.
+fn signed_divide<G: Generator + ?Sized>(
+    out: &mut G,
+    dst: Reg,
+    divisor: Divisor,
+    width: Width,
+    is_div: bool,
+) {
     let dst = u8::from(dst);
-    match (is_64, is_div) {
-        (true, true) => a64asm!(out; udiv X(dst), X(dst), RFIELD),
-        (true, false) => a64asm!(out
-            ; udiv x0, X(dst), RFIELD
-            ; msub X(dst), x0, RFIELD, X(dst)
+    let fits = out.new_dynamic_label();
+    load_next_insn_addr(out);
+    let divisor = match divisor {
+        Divisor::Reg(src) => {
+            let src = u8::from(src);
+            match width {
+                Width::W64 => a64asm!(out; cbz X(src), ->sig_divide_by_zero),
+                Width::W32 => a64asm!(out; cbz W(src), ->sig_divide_by_zero),
+            }
+            src
+        }
+        Divisor::Imm(_) => {
+            a64asm!(out; ldursw RFIELD, [RTEMP, -4]);
+            RFIELD
+        }
+    };
+    // Negating the dividend overflows exactly when it is the most negative value.
+    match width {
+        Width::W64 => a64asm!(out
+            ; cmn XSP(divisor), 1
+            ; b.ne =>fits
+            ; negs x0, X(dst)
+            ; b.vs ->sig_divide_overflow
+            ; =>fits
         ),
-        (false, true) => a64asm!(out; udiv W(dst), W(dst), WFIELD),
-        (false, false) => a64asm!(out
-            ; udiv w0, W(dst), WFIELD
-            ; msub W(dst), w0, WFIELD, W(dst)
+        Width::W32 => a64asm!(out
+            ; cmn WSP(divisor), 1
+            ; b.ne =>fits
+            ; negs w0, W(dst)
+            ; b.vs ->sig_divide_overflow
+            ; =>fits
         ),
+    }
+    match (width, is_div) {
+        (Width::W64, true) => a64asm!(out; sdiv X(dst), X(dst), X(divisor)),
+        (Width::W64, false) => a64asm!(out
+            ; sdiv x0, X(dst), X(divisor)
+            ; msub X(dst), x0, X(divisor), X(dst)
+        ),
+        (Width::W32, true) => a64asm!(out; sdiv W(dst), W(dst), W(divisor)),
+        (Width::W32, false) => a64asm!(out
+            ; sdiv w0, W(dst), W(divisor)
+            ; msub W(dst), w0, W(divisor), W(dst)
+        ),
+    }
+}
+
+/// How a load or store gets its operands.
+#[derive(Clone, Copy)]
+enum Access {
+    Load,
+    StoreImm,
+    StoreReg,
+}
+
+/// The load or store of `size` bytes, with `dst` and `src` as for the instruction.
+fn memory_access<G: Generator + ?Sized>(
+    out: &mut G,
+    access: Access,
+    size: AccessSize,
+    dst: u8,
+    src: u8,
+) {
+    load_next_insn_addr(out);
+    match access {
+        Access::Load => {
+            a64asm!(out; mov x1, X(src));
+            invoke_support(out, Support::Load(size));
+            a64asm!(out; mov X(dst), x0);
+        }
+        Access::StoreImm => {
+            a64asm!(out; mov x1, X(dst));
+            invoke_support(out, Support::StoreImm(size));
+        }
+        Access::StoreReg => {
+            a64asm!(out
+                ; mov x1, X(dst)
+                ; mov x2, X(src)
+            );
+            invoke_support(out, Support::StoreReg(size));
+        }
     }
 }
 
@@ -194,14 +300,16 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
     }
     let opcode = out.opcode();
     let op = opcode.op();
+    let version = out.version();
     let (Some(dst), Some(src)) = (opcode.dst(), opcode.src()) else {
         return invalid_insn(out);
     };
     let (d, s) = (u8::from(dst), u8::from(src));
+    let pqr = version.enable_pqr();
 
     match op {
-        ebpf::NEG32 => a64asm!(out; neg W(d), W(d)),
-        ebpf::NEG64 => a64asm!(out; neg X(d), X(d)),
+        ebpf::NEG32 if !version.disable_neg() => a64asm!(out; neg W(d), W(d)),
+        ebpf::NEG64 if !version.disable_neg() => a64asm!(out; neg X(d), X(d)),
         ebpf::OR32_IMM | ebpf::OR32_REG => {
             let s = alu_src32(out, src);
             a64asm!(out; orr W(d), W(d), W(s))
@@ -216,13 +324,9 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
                 a64asm!(out; orr X(d), X(d), X(s))
             }
         }
-        ebpf::HOR64_IMM => {
-            if out.version().disable_lddw() {
-                load_imm(out, RFIELD, false);
-                a64asm!(out; orr X(d), X(d), RFIELD, lsl 32)
-            } else {
-                invalid_insn(out)
-            }
+        ebpf::HOR64_IMM if version.disable_lddw() => {
+            load_imm(out, RFIELD, false);
+            a64asm!(out; orr X(d), X(d), RFIELD, lsl 32)
         }
         ebpf::AND32_IMM | ebpf::AND32_REG => {
             let s = alu_src32(out, src);
@@ -249,7 +353,13 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
         ebpf::XOR64_REG => a64asm!(out; eor X(d), X(d), X(s)),
         ebpf::MOV32_IMM => load_imm(out, d, false),
         ebpf::MOV64_IMM => load_imm(out, d, true),
-        ebpf::MOV32_REG => a64asm!(out; mov W(d), W(s)),
+        ebpf::MOV32_REG => {
+            if version.explicit_sign_extension_of_results() {
+                a64asm!(out; sxtw X(d), W(s))
+            } else {
+                a64asm!(out; mov W(d), W(s))
+            }
+        }
         // OPTIMIZATION: no-op move
         ebpf::MOV64_REG => {
             if dst != src {
@@ -259,45 +369,131 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
 
         ebpf::ADD64_REG => a64asm!(out; add X(d), X(d), X(s)),
         ebpf::SUB64_REG => a64asm!(out; sub X(d), X(d), X(s)),
-        ebpf::MUL64_REG => a64asm!(out; mul X(d), X(d), X(s)),
+        ebpf::MUL64_REG if !pqr => a64asm!(out; mul X(d), X(d), X(s)),
         ebpf::ADD64_IMM => {
             load_imm(out, RFIELD, true);
             a64asm!(out; add X(d), X(d), RFIELD)
         }
         ebpf::SUB64_IMM => {
             load_imm(out, RFIELD, true);
-            a64asm!(out; sub X(d), X(d), RFIELD)
+            if version.swap_sub_reg_imm_operands() {
+                a64asm!(out; sub X(d), RFIELD, X(d))
+            } else {
+                a64asm!(out; sub X(d), X(d), RFIELD)
+            }
         }
-        ebpf::MUL64_IMM => {
+        ebpf::MUL64_IMM if !pqr => {
             load_imm(out, RFIELD, true);
             a64asm!(out; mul X(d), X(d), RFIELD)
         }
         ebpf::ADD32_IMM | ebpf::ADD32_REG => {
             let s = alu_src32(out, src);
-            a64asm!(out
-                ; add W(d), W(d), W(s)
-                ; sxtw X(d), W(d)
-            )
+            a64asm!(out; add W(d), W(d), W(s));
+            sign_extend_result(out, d);
+        }
+        ebpf::SUB32_IMM if version.swap_sub_reg_imm_operands() => {
+            load_imm(out, RFIELD, false);
+            a64asm!(out; sub W(d), WFIELD, W(d));
+            sign_extend_result(out, d);
         }
         ebpf::SUB32_IMM | ebpf::SUB32_REG => {
             let s = alu_src32(out, src);
-            a64asm!(out
-                ; sub W(d), W(d), W(s)
-                ; sxtw X(d), W(d)
-            )
+            a64asm!(out; sub W(d), W(d), W(s));
+            sign_extend_result(out, d);
         }
-        ebpf::MUL32_IMM | ebpf::MUL32_REG => {
+        ebpf::MUL32_IMM | ebpf::MUL32_REG if !pqr => {
             let s = alu_src32(out, src);
-            a64asm!(out
-                ; mul W(d), W(d), W(s)
-                ; sxtw X(d), W(d)
-            )
+            a64asm!(out; mul W(d), W(d), W(s));
+            sign_extend_result(out, d);
         }
-        ebpf::DIV32_REG | ebpf::MOD32_REG | ebpf::DIV64_REG | ebpf::MOD64_REG => {
-            divide_by_reg(out, dst, src)
+        ebpf::DIV32_REG | ebpf::MOD32_REG | ebpf::DIV64_REG | ebpf::MOD64_REG if !pqr => {
+            let width = match op & ebpf::BPF_CLS_MASK {
+                ebpf::BPF_ALU64_STORE => Width::W64,
+                _ => Width::W32,
+            };
+            let is_div = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
+            unsigned_divide(out, dst, Divisor::Reg(src), width, is_div)
         }
-        ebpf::DIV32_IMM | ebpf::MOD32_IMM | ebpf::DIV64_IMM | ebpf::MOD64_IMM => {
-            divide_by_imm(out, dst)
+        ebpf::DIV32_IMM | ebpf::MOD32_IMM | ebpf::DIV64_IMM | ebpf::MOD64_IMM if !pqr => {
+            let width = match op & ebpf::BPF_CLS_MASK {
+                ebpf::BPF_ALU64_STORE => Width::W64,
+                _ => Width::W32,
+            };
+            let is_div = (op & ebpf::BPF_ALU_OP_MASK) == ebpf::BPF_DIV;
+            unsigned_divide(out, dst, Divisor::Imm(true), width, is_div)
+        }
+        ebpf::LMUL32_IMM | ebpf::LMUL32_REG if pqr => {
+            let s = alu_src32(out, src);
+            a64asm!(out; mul W(d), W(d), W(s))
+        }
+        ebpf::LMUL64_IMM if pqr => {
+            load_imm(out, RFIELD, true);
+            a64asm!(out; mul X(d), X(d), RFIELD)
+        }
+        ebpf::LMUL64_REG if pqr => a64asm!(out; mul X(d), X(d), X(s)),
+        ebpf::UHMUL64_IMM if pqr => {
+            load_imm(out, RFIELD, false);
+            a64asm!(out; umulh X(d), X(d), RFIELD)
+        }
+        ebpf::UHMUL64_REG if pqr => a64asm!(out; umulh X(d), X(d), X(s)),
+        ebpf::SHMUL64_IMM if pqr => {
+            load_imm(out, RFIELD, true);
+            a64asm!(out; smulh X(d), X(d), RFIELD)
+        }
+        ebpf::SHMUL64_REG if pqr => a64asm!(out; smulh X(d), X(d), X(s)),
+        ebpf::UDIV32_REG
+        | ebpf::UREM32_REG
+        | ebpf::UDIV64_REG
+        | ebpf::UREM64_REG
+        | ebpf::UDIV32_IMM
+        | ebpf::UREM32_IMM
+        | ebpf::UDIV64_IMM
+        | ebpf::UREM64_IMM
+            if pqr =>
+        {
+            let width = match op {
+                ebpf::UDIV64_REG | ebpf::UREM64_REG | ebpf::UDIV64_IMM | ebpf::UREM64_IMM => {
+                    Width::W64
+                }
+                _ => Width::W32,
+            };
+            let is_div = matches!(
+                op,
+                ebpf::UDIV32_REG | ebpf::UDIV64_REG | ebpf::UDIV32_IMM | ebpf::UDIV64_IMM
+            );
+            let divisor = if (op & ebpf::BPF_X) == ebpf::BPF_X {
+                Divisor::Reg(src)
+            } else {
+                Divisor::Imm(false)
+            };
+            unsigned_divide(out, dst, divisor, width, is_div)
+        }
+        ebpf::SDIV32_REG
+        | ebpf::SREM32_REG
+        | ebpf::SDIV64_REG
+        | ebpf::SREM64_REG
+        | ebpf::SDIV32_IMM
+        | ebpf::SREM32_IMM
+        | ebpf::SDIV64_IMM
+        | ebpf::SREM64_IMM
+            if pqr =>
+        {
+            let width = match op {
+                ebpf::SDIV64_REG | ebpf::SREM64_REG | ebpf::SDIV64_IMM | ebpf::SREM64_IMM => {
+                    Width::W64
+                }
+                _ => Width::W32,
+            };
+            let is_div = matches!(
+                op,
+                ebpf::SDIV32_REG | ebpf::SDIV64_REG | ebpf::SDIV32_IMM | ebpf::SDIV64_IMM
+            );
+            let divisor = if (op & ebpf::BPF_X) == ebpf::BPF_X {
+                Divisor::Reg(src)
+            } else {
+                Divisor::Imm(true)
+            };
+            signed_divide(out, dst, divisor, width, is_div)
         }
         ebpf::LSH64_REG => a64asm!(out; lsl X(d), X(d), X(s)),
         ebpf::LSH32_REG => a64asm!(out; lsl W(d), W(d), W(s)),
@@ -339,7 +535,7 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
                 ; lsr X(d), X(d), RFIELD
             )
         }
-        ebpf::LE => {
+        ebpf::LE if !version.disable_le() => {
             // Shifting by the negated width, as for `BE`.
             load_imm(out, RFIELD, false);
             a64asm!(out
@@ -370,12 +566,10 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
         | ebpf::JSGT32_IMM
         | ebpf::JSGE32_IMM
         | ebpf::JSLT32_IMM
-        | ebpf::JSLE32_IMM => {
-            if out.version().enable_jmp32() {
-                conditional_branch(out, dst, src, compare_32)
-            } else {
-                invalid_insn(out)
-            }
+        | ebpf::JSLE32_IMM
+            if version.enable_jmp32() =>
+        {
+            conditional_branch(out, dst, src, compare_32)
         }
         ebpf::JLE64_IMM
         | ebpf::JEQ64_IMM
@@ -408,7 +602,7 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
         ebpf::CALL_IMM => {
             load_next_insn_addr(out);
             out.meter_checked();
-            match (out.version().static_syscalls(), src.0) {
+            match (version.static_syscalls(), src.0) {
                 (false, _) => invoke_support(out, Support::V0CallImm),
                 (true, 1) => invoke_support(out, Support::CallImm),
                 (true, 0) => invoke_support(out, Support::Syscall),
@@ -418,7 +612,10 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
         ebpf::CALL_REG => {
             load_next_insn_addr(out);
             out.meter_checked();
-            if out.version().callx_uses_dst_reg() {
+            if version.callx_uses_src_reg() {
+                a64asm!(out; mov x0, X(s));
+                invoke_support(out, Support::Callx);
+            } else if version.callx_uses_dst_reg() {
                 a64asm!(out; mov x0, X(d));
                 invoke_support(out, Support::Callx);
             } else {
@@ -437,7 +634,7 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
             );
         }
 
-        ebpf::LD_DW_IMM => {
+        ebpf::LD_DW_IMM if !version.disable_lddw() => {
             // The second half is another instruction with the more significant half of the
             // immediate.
             //
@@ -465,28 +662,37 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
         | ebpf::ST_B_REG
         | ebpf::ST_H_REG
         | ebpf::ST_W_REG
-        | ebpf::ST_DW_REG => {
-            let size = AccessSize::of(op);
-            load_next_insn_addr(out);
-            match op & ebpf::BPF_CLS_MASK {
-                ebpf::BPF_LDX => {
-                    a64asm!(out; mov x1, X(s));
-                    invoke_support(out, Support::Load(size));
-                    a64asm!(out; mov X(d), x0);
-                }
-                ebpf::BPF_ST => {
-                    a64asm!(out; mov x1, X(d));
-                    invoke_support(out, Support::StoreImm(size));
-                }
-                ebpf::BPF_STX => {
-                    a64asm!(out
-                        ; mov x1, X(d)
-                        ; mov x2, X(s)
-                    );
-                    invoke_support(out, Support::StoreReg(size));
-                }
+        | ebpf::ST_DW_REG
+            if !version.move_memory_instruction_classes() =>
+        {
+            let access = match op & ebpf::BPF_CLS_MASK {
+                ebpf::BPF_LDX => Access::Load,
+                ebpf::BPF_ST => Access::StoreImm,
+                ebpf::BPF_STX => Access::StoreReg,
                 _ => unreachable!(),
-            }
+            };
+            memory_access(out, access, AccessSize::of(op), d, s)
+        }
+        ebpf::LD_1B_REG
+        | ebpf::LD_2B_REG
+        | ebpf::LD_4B_REG
+        | ebpf::LD_8B_REG
+        | ebpf::ST_1B_IMM
+        | ebpf::ST_2B_IMM
+        | ebpf::ST_4B_IMM
+        | ebpf::ST_8B_IMM
+        | ebpf::ST_1B_REG
+        | ebpf::ST_2B_REG
+        | ebpf::ST_4B_REG
+        | ebpf::ST_8B_REG
+            if version.move_memory_instruction_classes() =>
+        {
+            let access = match (op & ebpf::BPF_CLS_MASK, op & ebpf::BPF_X) {
+                (ebpf::BPF_ALU32_LOAD, _) => Access::Load,
+                (_, ebpf::BPF_K) => Access::StoreImm,
+                (_, _) => Access::StoreReg,
+            };
+            memory_access(out, access, AccessSize::of_v2_opcode(op), d, s)
         }
 
         _ => invalid_insn(out),
@@ -533,6 +739,10 @@ pub(in crate::codegen) fn island<G: Generator + ?Sized>(out: &mut G) -> IslandEn
         (
             IslandEntry::SigDivideByZero,
             Support::Signal(SIG_DIVIDE_BY_ZERO),
+        ),
+        (
+            IslandEntry::SigDivideOverflow,
+            Support::Signal(SIG_DIVIDE_OVERFLOW),
         ),
         (IslandEntry::FarJump, Support::FarJump),
     ] {
@@ -583,7 +793,7 @@ fn adjust_meter_for_taken_branch<G: Generator + ?Sized>(out: &mut G, next_insn_i
 /// Dispatches to the step of the next instruction.
 pub(in crate::codegen) fn interpreter_dispatch(out: &mut InterpreterGenerator) {
     // `RINSN` points at the last 8 bytes of the instruction just executed.
-    let size = u32::try_from(ebpf::opcode_size(out.opcode().op())).unwrap();
+    let size = u32::try_from(ebpf::opcode_size(out.opcode().op(), out.version())).unwrap();
     let to_last = size.checked_sub(8).unwrap();
     let next_insn = if size == 8 {
         RINSN

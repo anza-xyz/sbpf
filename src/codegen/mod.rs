@@ -32,7 +32,7 @@ pub use templates::JitTemplates;
 use crate::ebpf;
 use crate::elf::Executable;
 use crate::error::{EbpfError, ProgramResult};
-use crate::program::{JitProgram, SBPFVersion};
+use crate::program::JitProgram;
 use crate::vm::MAX_INSTRUCTION_METER;
 use crate::vm::{ContextObject, EbpfVm};
 use std::num::NonZeroU64;
@@ -51,6 +51,8 @@ const SIG_CALL_OUTSIDE_TEXT_SEGMENT: i8 = -6;
 
 /// `vm.program_result` has already been set.
 const SIG_PROGRAM_RESULT: i8 = -7;
+/// The signed division overflowed.
+const SIG_DIVIDE_OVERFLOW: i8 = -8;
 
 /// The initial value of `meter` for executing `bpf` starting at `vm.registers[11]` with
 /// `vm.previous_instruction_meter` as the budget.
@@ -95,6 +97,7 @@ fn finish_execution<C: ContextObject>(
         SIG_INVALID_INSN => vm.program_result = ProgramResult::Err(UnsupportedInstruction),
         SIG_CALL_DEPTH_EXCEEDED => vm.program_result = ProgramResult::Err(CallDepthExceeded),
         SIG_DIVIDE_BY_ZERO => vm.program_result = ProgramResult::Err(DivideByZero),
+        SIG_DIVIDE_OVERFLOW => vm.program_result = ProgramResult::Err(DivideOverflow),
         SIG_EXECUTION_OVERRUN => vm.program_result = ProgramResult::Err(ExecutionOverrun),
         SIG_CALL_OUTSIDE_TEXT_SEGMENT => {
             vm.program_result = ProgramResult::Err(CallOutsideTextSegment)
@@ -122,18 +125,9 @@ impl<C: ContextObject> Executable<C> {
     /// Compile the executable with the parrot JIT.
     ///
     /// The result is stored (and can be retrieved, executed and taken) exactly like the output of
-    /// [`Self::jit_compile`]. sBPF versions that parrot does not support are compiled with
-    /// `jit_compile` instead, if it is available.
+    /// [`Self::jit_compile`].
     pub fn parrot_compile(&self) -> Result<(), EbpfError> {
         let version = self.get_sbpf_version();
-        if matches!(version, SBPFVersion::V1 | SBPFVersion::V2) {
-            return cfg_select! {
-                all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64") => {
-                    self.jit_compile()
-                }
-                _ => Ok(()),
-            };
-        }
         let compiled = std::sync::Arc::new(jit_templates(version).compile(self)?);
         let mut guard = self
             .compiled_program

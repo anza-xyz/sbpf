@@ -62,10 +62,7 @@ fn bench_backends(
         bench("jit", ExecutionMode::Jit, &mut []);
     }
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-    if !matches!(
-        executable.get_sbpf_version(),
-        SBPFVersion::V1 | SBPFVersion::V2
-    ) {
+    {
         bench(
             "parrot_interpreter",
             ExecutionMode::ParrotInterpreted,

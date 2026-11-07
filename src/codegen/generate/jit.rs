@@ -43,7 +43,8 @@ impl<'a> JITGenerator<'a> {
         opcode: TemplateOpcode,
     ) -> Self {
         let template = templates.insn_builder(opcode);
-        template.layout.extra_bpf_insns = ((crate::ebpf::opcode_size(opcode.op()) / 8) as u8)
+        template.layout.extra_bpf_insns = ((crate::ebpf::opcode_size(opcode.op(), version) / 8)
+            as u8)
             .checked_sub(1)
             .unwrap();
         Self::new(version, template, Some(opcode))
@@ -133,8 +134,8 @@ impl Generator for JITGenerator<'_> {
 // array.
 static JIT_TEMPLATES: [LazyLock<JitTemplates<MAX_JIT_TEMPLATE_SIZE>>; 5] = [
     LazyLock::new(|| generate_jit_templates(SBPFVersion::V0)),
-    LazyLock::new(|| panic!("parrot for v1 unlikely to be implemented")),
-    LazyLock::new(|| panic!("parrot for v2 unlikely to be implemented")),
+    LazyLock::new(|| generate_jit_templates(SBPFVersion::V1)),
+    LazyLock::new(|| generate_jit_templates(SBPFVersion::V2)),
     LazyLock::new(|| generate_jit_templates(SBPFVersion::V3)),
     LazyLock::new(|| generate_jit_templates(SBPFVersion::V4)),
 ];
@@ -171,7 +172,7 @@ mod tests {
     /// want this number to also be the lowest possible as well.
     #[test]
     fn templates_fit_max_relocations() {
-        for version in [SBPFVersion::V0, SBPFVersion::V3, SBPFVersion::V4] {
+        for &version in SBPFVersion::ALL {
             let templates = jit_templates(version);
             assert!(templates
                 .layouts

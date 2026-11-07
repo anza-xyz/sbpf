@@ -110,7 +110,7 @@ pub enum ExecutionMode {
     PreferJit,
     /// Execute the program with the parrot interpreter.
     ///
-    /// Falls back to `Interpreted` if parrot does not support the architecture or the SBPF version.
+    /// Falls back to `Interpreted` if parrot does not support the architecture.
     ParrotInterpreted,
 }
 
@@ -485,15 +485,15 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 }
 
                 ExecutionMode::ParrotInterpreted => {
-                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-                    if !matches!(
-                        executable.get_sbpf_version(),
-                        SBPFVersion::V1 | SBPFVersion::V2
-                    ) {
-                        crate::codegen::interpret(executable, self);
-                        break 'execute;
+                    cfg_select! {
+                        any(target_arch = "x86_64", target_arch = "aarch64") => {
+                            crate::codegen::interpret(executable, self);
+                            break 'execute;
+                        }
+                        _ => {
+                            *mode = ExecutionMode::Interpreted;
+                        }
                     }
-                    *mode = ExecutionMode::Interpreted;
                 }
             }
         }
