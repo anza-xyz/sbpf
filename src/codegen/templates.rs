@@ -18,6 +18,8 @@ pub(super) struct Instantiation<'a> {
     pub(super) pc_section: &'a [u32],
     /// The offsets of the entries of the latest island.
     pub(super) island: arch::IslandEntries,
+    /// The offsets of the entries of the latest copy of the [`arch::SupportingCode`].
+    pub(super) supports: arch::SupportEntries,
     /// The offset in the output this template is at.
     pub(super) position: usize,
     /// BPF instruction index.
@@ -116,7 +118,10 @@ const NOOP_DUE: u32 = 1 << 30;
 /// Likewise for an island ahead of the instruction.
 const ISLAND_DUE: u32 = 1 << 29;
 
-pub(super) const PADDING_DUE: u32 = CHECKPOINT_DUE | NOOP_DUE | ISLAND_DUE;
+/// Likewise for a copy of the [`arch::SupportingCode`] ahead of the instruction.
+const SUPPORTS_DUE: u32 = 1 << 28;
+
+pub(super) const PADDING_DUE: u32 = CHECKPOINT_DUE | NOOP_DUE | ISLAND_DUE | SUPPORTS_DUE;
 
 /// Longest run of no-ops `JitTemplates::compile` may insert at the beginning.
 const MAX_START_PADDING_LENGTH: usize = 256;
@@ -200,8 +205,10 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
 
         let mut pc_section = Vec::with_capacity(program.len());
         let island = self.aux_layout(AuxTemplate::InvalidCallTarget).len();
-        let mut position = island.wrapping_add(self.layouts[ISLAND].len());
         let mut next_island = island.saturating_add(arch::ISLAND_INTERVAL);
+        let supports = self.first_supports();
+        let mut position = supports_end(supports);
+        let mut next_supports = supports.saturating_add(arch::SUPPORTS_INTERVAL);
         position = position
             .wrapping_add(start_padding.wrapping_mul(self.aux_layout(AuxTemplate::Noop).len()));
         // Introduce checkpoints at certain points in the code; the instruction meter is otherwise
@@ -216,6 +223,14 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
                 position = position.wrapping_add(self.layouts[ISLAND].len());
                 next_island = position.saturating_add(arch::ISLAND_INTERVAL);
                 ISLAND_DUE
+            } else {
+                0
+            };
+            let supports = if position >= next_supports {
+                let supports = supports_start(position);
+                next_supports = supports.saturating_add(arch::SUPPORTS_INTERVAL);
+                position = supports_end(supports);
+                SUPPORTS_DUE
             } else {
                 0
             };
@@ -238,7 +253,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
                 CHECKPOINT_DUE
             };
             // Once the final `position` is known we double check that these bits are okay to use.
-            pc_section.push(position as u32 | island | noop | checkpoint);
+            pc_section.push(position as u32 | island | supports | noop | checkpoint);
             position = position.wrapping_add(layout.len());
             for _ in 0..layout.extra_bpf_insns {
                 program_iter.next();
@@ -246,7 +261,7 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             }
         }
         position = position.wrapping_add(self.aux_layout(AuxTemplate::ExecutionOverrun).len());
-        assert!(position < ISLAND_DUE as usize, "JIT output too large");
+        assert!(position < SUPPORTS_DUE as usize, "JIT output too large");
         Layout {
             pc_section,
             len: position,
@@ -286,6 +301,9 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         let mut at = Instantiation {
             pc_section: &pc_sec,
             island: [0; arch::IslandEntry::COUNT],
+            // The templates ahead of the first copy (`InvalidCallTarget` with the `tracer`) call
+            // forward to it.
+            supports: arch::SupportingCode::get().at(self.first_supports()),
             position: 0,
             pc: 0,
             off: 0,
@@ -293,6 +311,8 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         };
         self.emit_aux(text, &mut at, AuxTemplate::InvalidCallTarget);
         self.emit_island(text, &mut at);
+        Self::emit_supports(text, &mut at);
+        debug_assert_eq!(at.position, supports_end(self.first_supports()));
         for _ in 0..start_padding {
             self.emit_aux(text, &mut at, AuxTemplate::Noop);
         }
@@ -310,6 +330,9 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
             if entry & PADDING_DUE != 0 {
                 if entry & ISLAND_DUE != 0 {
                     self.emit_island(text, &mut at);
+                }
+                if entry & SUPPORTS_DUE != 0 {
+                    Self::emit_supports(text, &mut at);
                 }
                 if entry & NOOP_DUE != 0 {
                     self.emit_aux(text, &mut at, AuxTemplate::Noop);
@@ -339,6 +362,25 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
 
     fn aux_layout(&self, template: AuxTemplate) -> TemplateLayout {
         self.layouts[template.index()]
+    }
+
+    /// The offset of the first copy of the supporting code in the output, after the first island.
+    pub(super) fn first_supports(&self) -> usize {
+        let island = self.aux_layout(AuxTemplate::InvalidCallTarget).len();
+        supports_start(island.wrapping_add(self.layouts[ISLAND].len()))
+    }
+
+    /// Write a copy of the supporting code to `text`, making it the latest one in `at`.
+    ///
+    /// The alignment padding before it is filled with traps.
+    fn emit_supports(text: &mut [u8], at: &mut Instantiation) {
+        let supports = arch::SupportingCode::get();
+        let start = supports_start(at.position);
+        let end = supports_end(start);
+        text[at.position..start].fill(arch::TRAP_FILL);
+        text[start..end].copy_from_slice(&supports.code);
+        at.supports = supports.at(start);
+        at.position = end;
     }
 
     /// Write an island to `text`, making it the latest one in `at`.
@@ -381,6 +423,16 @@ impl<const SIZE: usize> JitTemplates<SIZE> {
         }
         at.position = start.wrapping_add(len);
     }
+}
+
+/// Where a copy of the supporting code goes if the output so far is `position` bytes long.
+fn supports_start(position: usize) -> usize {
+    position.next_multiple_of(arch::SUPPORTS_ALIGNMENT)
+}
+
+/// The end of a copy of the supporting code at `start`.
+fn supports_end(start: usize) -> usize {
+    start.wrapping_add(arch::SupportingCode::get().code.len())
 }
 
 pub(super) struct TemplateBuilder<'a, const SIZE: usize> {

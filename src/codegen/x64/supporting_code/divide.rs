@@ -16,202 +16,171 @@ pub(in crate::codegen) enum Width {
     W64,
 }
 
-/// The helpers for various division operations.
-pub(in crate::codegen) struct DivideHelpers {
-    /// One version for each operation, width, destination and source register combo.
-    unsigned: [[[[u32; Reg::COUNT]; Reg::COUNT]; 2]; 2],
-    /// One version for each operation, width, destination and source register combo.
-    signed: [[[[u32; Reg::COUNT]; Reg::COUNT]; 2]; 2],
-    /// One version for each operation, width and destination register combo.
-    signed_imm: [[[u32; Reg::COUNT]; 2]; 2],
+/// Generate the [`SupportEntry`]s of the divisions.
+pub(super) fn generate(out: &mut Asm, entries: &mut SupportEntries) {
+    for op in [DivOp::Div, DivOp::Mod] {
+        for width in [Width::W32, Width::W64] {
+            entries[SupportEntry::divide(op, width) as usize] = entry(out);
+            div_mod(out, op, width);
+            entries[SupportEntry::signed_divide(op, width) as usize] = entry(out);
+            signed_div_rem(out, op, width, false);
+            entries[SupportEntry::signed_divide_imm(op, width) as usize] = entry(out);
+            signed_div_rem(out, op, width, true);
+        }
+    }
 }
 
-impl DivideHelpers {
-    pub(in crate::codegen) fn get(&self, op: DivOp, width: Width, dst: Reg, src: Reg) -> u32 {
-        self.unsigned[op as usize][width as usize][usize::from(dst.0)][usize::from(src.0)]
+/// `RTEMP = dividend / divisor` or `RTEMP = dividend % divisor`, with both operands given.
+///
+/// Divisions by zero terminate the execution.
+fn div_mod(out: &mut Asm, op: DivOp, width: Width) {
+    let (dividend, divisor) = (frame_operand(0), frame_operand(1));
+    let zero = out.new_dynamic_label();
+    save_rinsn(out);
+    match width {
+        Width::W64 => x64asm!(out
+            ; cmp QWORD [BYTE divisor + rbp], BYTE 0
+            ; je =>zero
+            ; mov rax, [BYTE dividend + rbp]
+        ),
+        Width::W32 => x64asm!(out
+            ; cmp DWORD [BYTE divisor + rbp], BYTE 0
+            ; je =>zero
+            ; mov eax, [BYTE dividend + rbp]
+        ),
     }
-
-    /// The signed division or remainder of `dst` by `src`.
-    ///
-    /// Terminates the execution if `src` is zero or the result overflows.
-    pub(in crate::codegen) fn get_signed(
-        &self,
-        op: DivOp,
-        width: Width,
-        dst: Reg,
-        src: Reg,
-    ) -> u32 {
-        self.signed[op as usize][width as usize][usize::from(dst.0)][usize::from(src.0)]
+    // `RMETER` is the only thing left to spill.
+    x64asm!(out
+        ; push rdx
+        ; xor edx, edx
+    );
+    // The 32-bit forms zero-extend their results to the whole register.
+    match width {
+        Width::W64 => x64asm!(out; div QWORD [BYTE divisor + rbp]),
+        Width::W32 => x64asm!(out; div DWORD [BYTE divisor + rbp]),
     }
-
-    /// The signed division or remainder of `dst` by the immediate of the instruction preceding the
-    /// address in `RTEMP`.
-    ///
-    /// Terminates the execution if the result overflows. The immediate is not checked for zero, as
-    /// the verifier rejects that.
-    pub(in crate::codegen) fn get_signed_imm(&self, op: DivOp, width: Width, dst: Reg) -> u32 {
-        self.signed_imm[op as usize][width as usize][usize::from(dst.0)]
+    match (width, op) {
+        (_, DivOp::Div) => x64asm!(out; mov RTEMP, rax),
+        (Width::W64, DivOp::Mod) => x64asm!(out; mov RTEMP, rdx),
+        (Width::W32, DivOp::Mod) => x64asm!(out; mov WTEMP, edx),
     }
+    x64asm!(out
+        ; pop rdx
+        ;; restore_rinsn_and_return(out)
+        ; =>zero
+        ;; validate_meter(out)
+        ;; terminate(out, SIG_DIVIDE_BY_ZERO)
+    );
+}
 
-    pub(super) fn generate(out: &mut Asm, base: u32) -> Self {
-        let mut unsigned = [[[[0; Reg::COUNT]; Reg::COUNT]; 2]; 2];
-        let mut signed = [[[[0; Reg::COUNT]; Reg::COUNT]; 2]; 2];
-        let mut signed_imm = [[[0; Reg::COUNT]; 2]; 2];
-        for op in [DivOp::Div, DivOp::Mod] {
-            for width in [Width::W32, Width::W64] {
-                let (o, w) = (op as usize, width as usize);
-                for dst in Reg::ALL {
-                    let d = usize::from(dst.0);
-                    for src in Reg::ALL {
-                        let s = usize::from(src.0);
-                        unsigned[o][w][d][s] = address(out, base, true);
-                        Self::div_mod(out, op, width, dst, src);
-                        signed[o][w][d][s] = address(out, base, true);
-                        Self::signed_div_rem(out, op, width, dst, Some(src));
-                    }
-                    signed_imm[o][w][d] = address(out, base, true);
-                    Self::signed_div_rem(out, op, width, dst, None);
-                }
-            }
-        }
-        Self {
-            unsigned,
-            signed,
-            signed_imm,
-        }
+/// `RTEMP = dividend s/ divisor` or `RTEMP = dividend s% divisor`, with the dividend given.
+///
+/// The divisor is the immediate of the instruction preceding the address in `RTEMP` if `imm`, and
+/// the operand after the dividend otherwise.
+///
+/// Divisions by zero and `_::MIN / -1` terminate the execution.
+fn signed_div_rem(out: &mut Asm, op: DivOp, width: Width, imm: bool) {
+    let dividend = frame_operand(0);
+    let [zero, overflow, divide] = std::array::from_fn(|_| out.new_dynamic_label());
+    save_rinsn(out);
+    match width {
+        Width::W64 => x64asm!(out; mov rax, [BYTE dividend + rbp]),
+        Width::W32 => x64asm!(out; mov eax, [BYTE dividend + rbp]),
     }
-
-    fn div_mod(out: &mut Asm, op: DivOp, width: Width, dst: Reg, src: Reg) {
-        let zero = out.new_dynamic_label();
-        match width {
-            Width::W64 => x64asm!(out; test Rq(src), Rq(src)),
-            Width::W32 => x64asm!(out; test Rd(src), Rd(src)),
-        }
-        // `RINSN` is saved by `invoke_support`. `RMETER` is the only thing we have to spill here.
+    // The displacement of the divisor, unless it is in `RTEMP`.
+    let divisor = if imm {
+        // `RTEMP` is needed to terminate the execution.
         x64asm!(out
-            ; jz =>zero
-            ; push rdx
-            ; xor edx, edx
+            ; push RTEMP
+            ; movsxd RTEMP, DWORD [BYTE -4 + RTEMP]
         );
-        match (width, op) {
-            (Width::W64, DivOp::Div) => x64asm!(out
-                ; mov rax, Rq(dst)
-                ; div Rq(src)
-                ; mov Rq(dst), rax
+        match width {
+            Width::W64 => x64asm!(out; cmp RTEMP, BYTE -1),
+            Width::W32 => x64asm!(out; cmp WTEMP, BYTE -1),
+        }
+        None
+    } else {
+        let divisor = frame_operand(1);
+        match width {
+            Width::W64 => x64asm!(out
+                ; cmp QWORD [BYTE divisor + rbp], BYTE 0
+                ; je =>zero
+                ; cmp QWORD [BYTE divisor + rbp], BYTE -1
             ),
-            (Width::W64, DivOp::Mod) => x64asm!(out
-                ; mov rax, Rq(dst)
-                ; div Rq(src)
-                ; mov Rq(dst), rdx
-            ),
-            (Width::W32, DivOp::Div) => x64asm!(out
-                ; mov eax, Rd(dst)
-                ; div Rd(src)
-                ; mov Rd(dst), eax
-            ),
-            (Width::W32, DivOp::Mod) => x64asm!(out
-                ; mov eax, Rd(dst)
-                ; div Rd(src)
-                ; mov Rd(dst), edx
+            Width::W32 => x64asm!(out
+                ; cmp DWORD [BYTE divisor + rbp], BYTE 0
+                ; je =>zero
+                ; cmp DWORD [BYTE divisor + rbp], BYTE -1
             ),
         }
+        Some(divisor)
+    };
+    // Only `_::MIN` overflows when negated, which the second `neg` undoes otherwise.
+    x64asm!(out; jne =>divide);
+    match width {
+        Width::W64 => x64asm!(out
+            ; neg rax
+            ; jo =>overflow
+            ; neg rax
+        ),
+        Width::W32 => x64asm!(out
+            ; neg eax
+            ; jo =>overflow
+            ; neg eax
+        ),
+    }
+    // `RMETER` is the only thing left to spill.
+    x64asm!(out
+        ; =>divide
+        ; push rdx
+    );
+    // The 32-bit forms zero-extend their results to the whole register.
+    match (width, divisor) {
+        (Width::W64, None) => x64asm!(out
+            ; cqo
+            ; idiv RTEMP
+        ),
+        (Width::W64, Some(divisor)) => x64asm!(out
+            ; cqo
+            ; idiv QWORD [BYTE divisor + rbp]
+        ),
+        (Width::W32, None) => x64asm!(out
+            ; cdq
+            ; idiv WTEMP
+        ),
+        (Width::W32, Some(divisor)) => x64asm!(out
+            ; cdq
+            ; idiv DWORD [BYTE divisor + rbp]
+        ),
+    }
+    // The result in `rax`, as `RTEMP` might still have to be popped.
+    match (width, op) {
+        (_, DivOp::Div) => {}
+        (Width::W64, DivOp::Mod) => x64asm!(out; mov rax, rdx),
+        (Width::W32, DivOp::Mod) => x64asm!(out; mov eax, edx),
+    }
+    x64asm!(out; pop rdx);
+    if imm {
         x64asm!(out
-            ; pop rdx
-            ; ret
+            // Dropping the saved `RTEMP`, which the result replaces.
+            ; pop RTEMP
+            ; mov RTEMP, rax
+            ;; restore_rinsn_and_return(out)
+            ; =>overflow
+            ; pop RTEMP
+            ;; validate_meter(out)
+            ;; terminate(out, SIG_DIVIDE_OVERFLOW)
+        );
+    } else {
+        x64asm!(out
+            ; mov RTEMP, rax
+            ;; restore_rinsn_and_return(out)
+            ; =>overflow
+            ;; validate_meter(out)
+            ;; terminate(out, SIG_DIVIDE_OVERFLOW)
             ; =>zero
             ;; validate_meter(out)
             ;; terminate(out, SIG_DIVIDE_BY_ZERO)
         );
-    }
-
-    /// `dst s/= src` or `dst s%= src`.
-    ///
-    /// `src = None` requires `RTEMP` to hold address to the .
-    ///
-    /// Divisions by zero and `_::MIN / -1` terminate the execution.
-    fn signed_div_rem(out: &mut Asm, op: DivOp, width: Width, dst: Reg, src: Option<Reg>) {
-        let [zero, overflow, divide] = std::array::from_fn(|_| out.new_dynamic_label());
-        if src.is_none() {
-            x64asm!(out
-                ; push RTEMP
-                ; movsxd RTEMP, DWORD [BYTE -4 + RTEMP]
-            );
-        }
-        match (src, width) {
-            (Some(src), Width::W64) => x64asm!(out
-                ; test Rq(src), Rq(src)
-                ; jz =>zero
-                ; cmp Rq(src), -1
-                ; jne =>divide
-                ; mov rax, Rq(dst)
-                ; neg rax
-                ; jo =>overflow
-            ),
-            (Some(src), Width::W32) => x64asm!(out
-                ; test Rd(src), Rd(src)
-                ; jz =>zero
-                ; cmp Rd(src), -1
-                ; jne =>divide
-                ; mov eax, Rd(dst)
-                ; neg eax
-                ; jo =>overflow
-            ),
-            (None, Width::W64) => x64asm!(out
-                ; cmp RTEMP, -1
-                ; jne =>divide
-                ; mov rax, Rq(dst)
-                ; neg rax
-                ; jo =>overflow
-            ),
-            (None, Width::W32) => x64asm!(out
-                ; cmp WTEMP, -1
-                ; jne =>divide
-                ; mov eax, Rd(dst)
-                ; neg eax
-                ; jo =>overflow
-            ),
-        }
-        // `rax` is saved by `invoke_support`, so only `rdx` needs to be saved for `idiv`.
-        x64asm!(out
-            ; =>divide
-            ; push rdx
-        );
-        let divisor = src.map_or(RTEMP, u8::from);
-        match width {
-            Width::W64 => x64asm!(out
-                ; mov rax, Rq(dst)
-                ; cqo
-                ; idiv Rq(divisor)
-            ),
-            Width::W32 => x64asm!(out
-                ; mov eax, Rd(dst)
-                ; cdq
-                ; idiv Rd(divisor)
-            ),
-        }
-        match (width, op) {
-            (Width::W64, DivOp::Div) => x64asm!(out; mov Rq(dst), rax),
-            (Width::W64, DivOp::Mod) => x64asm!(out; mov Rq(dst), rdx),
-            (Width::W32, DivOp::Div) => x64asm!(out; mov Rd(dst), eax),
-            (Width::W32, DivOp::Mod) => x64asm!(out; mov Rd(dst), edx),
-        }
-        x64asm!(out
-            ; pop rdx
-            ;; if src.is_none() { x64asm!(out; pop RTEMP) }
-            ; ret
-        );
-        x64asm!(out
-            ; =>overflow
-            ;; if src.is_none() { x64asm!(out; pop RTEMP) }
-            ;; validate_meter(out)
-            ;; terminate(out, SIG_DIVIDE_OVERFLOW)
-        );
-        if src.is_some() {
-            x64asm!(out
-                ; =>zero
-                ;; validate_meter(out)
-                ;; terminate(out, SIG_DIVIDE_BY_ZERO)
-            );
-        }
     }
 }

@@ -1,6 +1,6 @@
 //! Relocations within the JIT templates.
 
-use super::{IslandEntry, Relocation};
+use super::{IslandEntry, Relocation, SupportEntry};
 use crate::codegen::generate::PatchFields;
 use crate::codegen::templates::{Instantiation, JitTemplates, PADDING_DUE};
 use crate::ebpf;
@@ -9,7 +9,7 @@ use std::convert::TryFrom;
 
 /// Every template reserves this many relocations, so keep it at the maximum that any template
 /// needs (`templates_fit_max_relocations` checks both directions).
-pub(in crate::codegen) const MAX_RELOCATIONS: usize = if cfg!(feature = "tracer") { 5 } else { 4 };
+pub(in crate::codegen) const MAX_RELOCATIONS: usize = if cfg!(feature = "tracer") { 6 } else { 4 };
 
 pub(in crate::codegen) const MAX_JIT_TEMPLATE_SIZE: usize =
     if cfg!(feature = "tracer") { 64 } else { 48 };
@@ -27,6 +27,8 @@ pub(in crate::codegen) enum TemplateRelocationKind {
     TakenBranch,
     /// For jumps to the entry of the latest island.
     Island(IslandEntry),
+    /// For calls to the entry of the latest copy of the supporting code.
+    Support(SupportEntry),
 }
 
 /// A relocation that can only be resolved once the template is instantiated for a specific eBPF
@@ -53,6 +55,11 @@ impl TemplateRelocationKind {
 }
 
 impl TemplateRelocation {
+    #[cfg(test)]
+    pub(in crate::codegen) fn kind(&self) -> TemplateRelocationKind {
+        self.kind
+    }
+
     /// Placeholder for unused entries.
     pub(in crate::codegen) const UNUSED: Self = Self {
         field: 0,
@@ -68,7 +75,9 @@ impl TemplateRelocation {
     ) -> Self {
         let location = code.len();
         let relative = match kind {
-            TemplateRelocationKind::TakenBranch | TemplateRelocationKind::Island(_) => true,
+            TemplateRelocationKind::TakenBranch
+            | TemplateRelocationKind::Island(_)
+            | TemplateRelocationKind::Support(_) => true,
             TemplateRelocationKind::InsnOffset => false,
         };
         assert!(
@@ -131,6 +140,9 @@ impl TemplateRelocation {
             }
             TemplateRelocationKind::Island(entry) => {
                 (at.island[entry as usize] as i64).wrapping_sub(at.position as i64)
+            }
+            TemplateRelocationKind::Support(entry) => {
+                (at.supports[entry as usize] as i64).wrapping_sub(at.position as i64)
             }
         };
         add_to_field(template, out, usize::from(self.field), target);

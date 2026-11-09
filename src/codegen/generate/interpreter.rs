@@ -1,7 +1,7 @@
 //! Generation of the interpreter.
 
 use super::{Generator, LabelRelocs, PatchFields, TemplateOpcode};
-use crate::codegen::arch::{self, TemplateRelocationKind};
+use crate::codegen::arch::{self, SupportEntry, SupportingCode, TemplateRelocationKind};
 use crate::memory_management::{Mapping, ReadExecute};
 use crate::program::SBPFVersion;
 use dynasmrt::relocations::{Relocation, RelocationKind};
@@ -18,7 +18,15 @@ pub(in crate::codegen) fn interpreter_step(
 }
 
 pub(in crate::codegen) struct Interpreter {
+    /// The steps, followed by the copy of the supporting code they call.
     pub(in crate::codegen) steps: Mapping<ReadExecute>,
+}
+
+impl Interpreter {
+    /// The copy of the supporting code.
+    pub(in crate::codegen) fn supports(&self) -> *const u8 {
+        self.steps[InterpreterGenerator::SUPPORTS..].as_ptr()
+    }
 }
 
 /// Generates the interpreter.
@@ -31,6 +39,8 @@ pub(in crate::codegen) struct InterpreterGenerator {
     relocs: LabelRelocs<arch::Relocation>,
     /// The offsets of the entries of the latest island.
     island: Option<arch::IslandEntries>,
+    /// The offsets of the entries of the supporting code.
+    supports: arch::SupportEntries,
     offset: usize,
     version: SBPFVersion,
     opcode: TemplateOpcode,
@@ -43,6 +53,8 @@ pub(in crate::codegen) struct InterpreterGenerator {
 impl InterpreterGenerator {
     pub(in crate::codegen) const STEP_SIZE_LOG2: u8 = arch::INTERPRETER_STEP_SIZE_LOG2;
     pub(in crate::codegen) const STEP_TABLE_SIZE: usize = 0x1_0000 * (1 << Self::STEP_SIZE_LOG2);
+    /// The offset of the supporting code, right after the steps.
+    const SUPPORTS: usize = Self::STEP_TABLE_SIZE;
 
     /// Offset into the `buffer` for this opcode.
     fn step_offset(opcode: TemplateOpcode) -> usize {
@@ -53,17 +65,49 @@ impl InterpreterGenerator {
         self.buffer.as_ptr()
     }
 
-    fn new(version: SBPFVersion, buffer: Mapping) -> Self {
-        assert_eq!(buffer.len(), Self::STEP_TABLE_SIZE);
+    fn new(version: SBPFVersion, mut buffer: Mapping) -> Self {
+        let supports = SupportingCode::get();
+        assert_eq!(
+            buffer.len(),
+            Self::SUPPORTS.checked_add(supports.code.len()).unwrap()
+        );
+        const { assert!(Self::SUPPORTS.is_multiple_of(arch::SUPPORTS_ALIGNMENT)) };
+        buffer[Self::SUPPORTS..].copy_from_slice(&supports.code);
         Self {
             version,
             buffer,
             relocs: LabelRelocs::new(),
             island: None,
+            supports: supports.at(Self::SUPPORTS),
             offset: 0,
             opcode: TemplateOpcode(0),
             terminal: false,
         }
+    }
+}
+
+impl InterpreterGenerator {
+    /// Resolve a relative relocation reported at the current offset to the `target` offset.
+    fn relative_reloc(
+        &mut self,
+        target: usize,
+        target_offset: isize,
+        field_offset: u8,
+        ref_offset: u8,
+        kind: u8,
+    ) {
+        let patch =
+            PatchFields::<arch::Relocation>::new(target_offset, field_offset, ref_offset, kind)
+                .at(self.offset);
+        assert!(
+            matches!(patch.relocation.kind(), RelocationKind::Relative),
+            "unsupported relocation"
+        );
+        let base = self.buffer.as_ptr() as usize;
+        let field = &mut self.buffer[patch.range(0)];
+        patch
+            .patch(field, base, target)
+            .expect("relocation target out of reach of the interpreter");
     }
 }
 
@@ -98,18 +142,19 @@ impl Generator for InterpreterGenerator {
             .island
             .expect("the island precedes the code that refers to it");
         let target = island[entry as usize];
-        let patch =
-            PatchFields::<arch::Relocation>::new(target_offset, field_offset, ref_offset, kind)
-                .at(self.offset);
-        assert!(
-            matches!(patch.relocation.kind(), RelocationKind::Relative),
-            "unsupported relocation"
-        );
-        let base = self.buffer.as_ptr() as usize;
-        let field = &mut self.buffer[patch.range(0)];
-        patch
-            .patch(field, base, target)
-            .expect("island out of reach of the interpreter");
+        self.relative_reloc(target, target_offset, field_offset, ref_offset, kind);
+    }
+
+    fn support_reloc(
+        &mut self,
+        support: SupportEntry,
+        target_offset: isize,
+        field_offset: u8,
+        ref_offset: u8,
+        encoding: u8,
+    ) {
+        let target = self.supports[support as usize];
+        self.relative_reloc(target, target_offset, field_offset, ref_offset, encoding);
     }
 
     fn template_reloc(&mut self, _: TemplateRelocationKind, _: isize, _: u8, _: u8, _: u8) {
@@ -168,10 +213,13 @@ pub(in crate::codegen) fn interpreter(version: SBPFVersion) -> &'static Interpre
 }
 
 fn generate_interpreter(version: SBPFVersion) -> Interpreter {
-    let buffer = Mapping::sub2g(InterpreterGenerator::STEP_TABLE_SIZE);
-    let mut generator = InterpreterGenerator::new(version, buffer);
+    let len = InterpreterGenerator::SUPPORTS
+        .checked_add(SupportingCode::get().code.len())
+        .unwrap();
+    let mut buffer = Mapping::sub2g(len);
     // The space after the code of a step traps if it is ever executed.
-    generator.buffer.fill(arch::TRAP_FILL);
+    buffer.fill(arch::TRAP_FILL);
+    let mut generator = InterpreterGenerator::new(version, buffer);
     for opcode in TemplateOpcode::all() {
         let step_start = InterpreterGenerator::step_offset(opcode);
         generator.opcode = opcode;

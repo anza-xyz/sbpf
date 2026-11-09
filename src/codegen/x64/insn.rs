@@ -162,7 +162,7 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
     #[cfg(feature = "tracer")]
     {
         load_next_insn_addr(out);
-        invoke_support(out, SupportingCode::get().trace);
+        invoke_support(out, SupportEntry::Trace, &[], None);
     }
     let opcode = out.opcode();
     let op = opcode.op();
@@ -291,9 +291,8 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
                 ebpf::BPF_ALU64_STORE => Width::W64,
                 _ => Width::W32,
             };
-            let helper = SupportingCode::get().divide.get(div_op, width, dst, src);
             load_next_insn_addr(out);
-            invoke_support(out, helper);
+            invoke_support(out, SupportEntry::divide(div_op, width), &[dst, src], Some(dst));
         }
         #[rustfmt::skip]
         ebpf::UDIV32_REG |
@@ -308,9 +307,8 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
                 ebpf::UDIV64_REG | ebpf::UREM64_REG => Width::W64,
                 _ => Width::W32,
             };
-            let helper = SupportingCode::get().divide.get(div_op, width, dst, src);
             load_next_insn_addr(out);
-            invoke_support(out, helper);
+            invoke_support(out, SupportEntry::divide(div_op, width), &[dst, src], Some(dst));
         }
         ebpf::DIV32_IMM if !version.enable_pqr() => {
             x64asm!(out; mov WTEMP, DWORD REL32_IMM);
@@ -452,14 +450,13 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
                 }
                 _ => Width::W32,
             };
-            let divide = &SupportingCode::get().divide;
-            let helper = if (op & ebpf::BPF_X) == ebpf::BPF_X {
-                divide.get_signed(div_op, width, dst, src)
+            let (support, operands) = if (op & ebpf::BPF_X) == ebpf::BPF_X {
+                (SupportEntry::signed_divide(div_op, width), &[dst, src][..])
             } else {
-                divide.get_signed_imm(div_op, width, dst)
+                (SupportEntry::signed_divide_imm(div_op, width), &[dst][..])
             };
             load_next_insn_addr(out);
-            invoke_support(out, helper);
+            invoke_support(out, support, operands, Some(dst));
         }
 
         ebpf::JEQ32_REG
@@ -520,9 +517,9 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
             load_next_insn_addr(out);
             out.meter_checked();
             match (version.static_syscalls(), src.0) {
-                (false, _) => invoke_support(out, SupportingCode::get().v0v1v2_call_imm),
-                (true, 1) => invoke_support(out, SupportingCode::get().call_imm),
-                (true, 0) => invoke_support(out, SupportingCode::get().syscall),
+                (false, _) => invoke_support(out, SupportEntry::V0V1V2CallImm, &[], None),
+                (true, 1) => invoke_support(out, SupportEntry::CallImm, &[], None),
+                (true, 0) => invoke_support(out, SupportEntry::Syscall, &[], None),
                 (true, _) => x64asm!(out; jmp ->sig_invalid_insn),
             }
         }
@@ -530,11 +527,11 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
             load_next_insn_addr(out);
             out.meter_checked();
             if version.callx_uses_src_reg() {
-                invoke_support(out, SupportingCode::get().callx[usize::from(src.0)]);
+                invoke_support(out, SupportEntry::Callx, &[src], None);
             } else if version.callx_uses_dst_reg() {
-                invoke_support(out, SupportingCode::get().callx[usize::from(dst.0)]);
+                invoke_support(out, SupportEntry::Callx, &[dst], None);
             } else {
-                invoke_support(out, SupportingCode::get().v0v1_callx);
+                invoke_support(out, SupportEntry::V0V1Callx, &[], None);
             }
         }
         ebpf::EXIT => {
@@ -580,15 +577,14 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
             if !version.move_memory_instruction_classes() =>
         {
             let size = AccessSize::of(op);
-            let memory = &SupportingCode::get().memory;
-            let helper = match op & ebpf::BPF_CLS_MASK {
-                ebpf::BPF_LDX => memory.load(size, dst, src),
-                ebpf::BPF_ST => memory.store_imm(size, dst),
-                ebpf::BPF_STX => memory.store_reg(size, dst, src),
+            let (support, operands, result) = match op & ebpf::BPF_CLS_MASK {
+                ebpf::BPF_LDX => (SupportEntry::load(size), &[src][..], Some(dst)),
+                ebpf::BPF_ST => (SupportEntry::store_imm(size), &[dst][..], None),
+                ebpf::BPF_STX => (SupportEntry::store_reg(size), &[src, dst][..], None),
                 _ => unreachable!(),
             };
             load_next_insn_addr(out);
-            invoke_support(out, helper);
+            invoke_support(out, support, operands, result);
         }
         ebpf::LD_1B_REG
         | ebpf::LD_2B_REG
@@ -605,14 +601,13 @@ pub(in crate::codegen) fn bpf_insn<G: Generator + ?Sized>(out: &mut G) {
             if version.move_memory_instruction_classes() =>
         {
             let size = AccessSize::of_v2_opcode(op);
-            let memory = &SupportingCode::get().memory;
-            let helper = match (op & ebpf::BPF_CLS_MASK, op & ebpf::BPF_X) {
-                (ebpf::BPF_ALU32_LOAD, _) => memory.load(size, dst, src),
-                (_, ebpf::BPF_K) => memory.store_imm(size, dst),
-                (_, _) => memory.store_reg(size, dst, src),
+            let (support, operands, result) = match (op & ebpf::BPF_CLS_MASK, op & ebpf::BPF_X) {
+                (ebpf::BPF_ALU32_LOAD, _) => (SupportEntry::load(size), &[src][..], Some(dst)),
+                (_, ebpf::BPF_K) => (SupportEntry::store_imm(size), &[dst][..], None),
+                (_, _) => (SupportEntry::store_reg(size), &[src, dst][..], None),
             };
             load_next_insn_addr(out);
-            invoke_support(out, helper);
+            invoke_support(out, support, operands, result);
         }
 
         _ => invalid_insn(out),
@@ -629,9 +624,9 @@ pub(in crate::codegen) fn aux_template<G: Generator + ?Sized>(out: &mut G, templ
         }
         AuxTemplate::InvalidCallTarget => {
             // The code paths that might end up here are expected to update `next_insn`.
-            x64asm!(out; mov RTEMP, rbp => Frame[BYTE -1].next_insn);
+            x64asm!(out; mov RTEMP, [BYTE frame!(next_insn) + rbp]);
             #[cfg(feature = "tracer")]
-            invoke_support(out, SupportingCode::get().trace);
+            invoke_support(out, SupportEntry::Trace, &[], None);
             terminate_invalid_insn_with_meter_check(out);
         }
         AuxTemplate::Noop => x64asm!(out; nop),
@@ -724,7 +719,7 @@ pub(in crate::codegen) fn interpreter_dispatch(out: &mut InterpreterGenerator) {
     x64asm!(out
         ; cmp Rq(next_insn), RMETER
         ; jae ->sig_meter_exceeded
-        ; cmp Rq(next_insn), rbp => Frame[BYTE -1].text_section_limit
+        ; cmp Rq(next_insn), [BYTE frame!(text_section_limit) + rbp]
         ; jae BYTE =>overrun
         ; movzx RTEMP, WORD [ BYTE to_last + RINSN ]
         ; shl RTEMP, InterpreterGenerator::STEP_SIZE_LOG2 as i8
@@ -745,16 +740,24 @@ fn load_next_insn_addr<G: Generator + ?Sized>(out: &mut G) {
     );
 }
 
-/// Call the support at `support_addr`.
-fn invoke_support<G: Generator + ?Sized>(out: &mut G, support_addr: u32) {
-    // Every other register holds something, so `RINSN` makes room for the target. The JIT code
-    // does not need to be within reach of a 32-bit displacement from the supports.
-    x64asm!(out
-        ; push RINSN
-        ; mov eax, DWORD support_addr as i32
-        ; call rax
-        ; pop RINSN
-    );
+/// Call the [`SupportEntry`] `support` with the `operands` in [`Frame::operands`], and move its
+/// result (if any) into `result`.
+fn invoke_support<G: Generator + ?Sized>(
+    out: &mut G,
+    support: SupportEntry,
+    operands: &[Reg],
+    result: Option<Reg>,
+) {
+    for (index, &reg) in operands.iter().enumerate() {
+        x64asm!(out; mov [BYTE frame_operand(index) + rbp], Rq(reg));
+    }
+    // `call rel32`, to the latest copy of the supporting code.
+    out.push(0xe8);
+    out.push_i32(0);
+    out.support_reloc(support, 0, 4, 0, RELATIVE_DWORD);
+    if let Some(reg) = result {
+        x64asm!(out; mov Rq(reg), RTEMP);
+    }
 }
 
 /// Terminate execution with the specified code.
@@ -774,7 +777,7 @@ pub(super) fn terminate<G: Generator + ?Sized>(out: &mut G, code: i8) {
     }
     x64asm!(out
         ; mov al, code
-        ; jmp QWORD rbp => Frame[BYTE -1].exit
+        ; jmp QWORD [BYTE frame!(exit) + rbp]
     );
 }
 

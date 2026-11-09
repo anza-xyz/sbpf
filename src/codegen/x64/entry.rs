@@ -1,6 +1,6 @@
 //! Starting the execution of the guest BPF code.
 
-use super::supporting_code::{self, address, load_bpf_register, Asm, SupportingCode};
+use super::supporting_code::{self, entry, load_bpf_register, Asm, SupportEntry, SupportingCode};
 use crate::codegen::generate::{self, Reg, TemplateOpcode};
 use crate::codegen::{finish_execution, initial_meter};
 use crate::ebpf;
@@ -26,7 +26,7 @@ pub(in crate::codegen) fn enter<C: ContextObject>(
     let version = executable.get_sbpf_version();
     let (bpf_vm_addr, bpf) = executable.get_text_bytes();
     let pc = vm.registers[11] as usize;
-    let (start_addr, insn, jit_pc_section, code) = match jit {
+    let (start_addr, insn, jit_pc_section, code, supports) = match jit {
         Some(program) => {
             let (pc_section, text_section) = (program.pc_section(), program.text_section());
             (
@@ -35,6 +35,9 @@ pub(in crate::codegen) fn enter<C: ContextObject>(
                     .wrapping_add(ebpf::INSN_SIZE.wrapping_add(program.random_key as usize)),
                 pc_section.as_ptr(),
                 text_section.as_ptr(),
+                text_section
+                    .as_ptr()
+                    .wrapping_add(generate::jit_templates(version).first_supports()),
             )
         }
         None => {
@@ -47,10 +50,12 @@ pub(in crate::codegen) fn enter<C: ContextObject>(
                     .wrapping_add(pc.wrapping_add(1).wrapping_mul(ebpf::INSN_SIZE)),
                 std::ptr::null(),
                 generate::interpreter(version).steps.as_ptr(),
+                generate::interpreter(version).supports(),
             )
         }
     };
-    let entry_point = SupportingCode::get().entry_point;
+    let entry_point =
+        supports.wrapping_add(SupportingCode::get().entries[SupportEntry::EntryPoint as usize]);
     let config = executable.get_config();
     let meter = initial_meter(bpf, vm);
     let (max_call_depth, stack_frame_size) = (config.max_call_depth, config.stack_frame_size);
@@ -73,6 +78,7 @@ pub(in crate::codegen) fn enter<C: ContextObject>(
         text_section_host_to_vm: bpf_vm_addr.wrapping_sub(bpf.as_ptr() as u64),
         jit_pc_section,
         code,
+        operands: [0; 2],
         call_dispatcher: supporting_code::call_dispatcher::<C>(version),
         memory_functions: supporting_code::MemoryFunctions::<C>::get(),
         function_registry: std::ptr::from_ref(executable.get_function_registry()).cast(),
@@ -159,64 +165,71 @@ pub(in crate::codegen) fn enter<C: ContextObject>(
 
 /// The state of an execution.
 ///
-/// [`SupportingCode::entry_point`] copies it right below its frame pointer.
+/// [`SupportEntry::EntryPoint`] copies it right below its frame pointer.
 ///
-/// These fields can be referred at any time in guest code with `rbp => Frame[BYTE -1].field`.
+/// These fields can be referred at any time in guest code with `[BYTE frame!(field) + rbp]`, if
+/// they are within reach of a byte displacement, which the fields the JIT templates use must be:
+/// those are at the end. The supporting code may use `rbp => Frame[-1].field` for the
+/// others.
 #[repr(C, align(16))]
 pub(super) struct Frame {
+    /// The `FunctionRegistry<usize>` of the executable.
+    pub(super) function_registry: *const u8,
+    /// Translates host addresses within `text_section` to VM addresses.
+    pub(super) text_section_host_to_vm: u64,
     /// The [`EbpfVm`].
     pub(super) vm: *mut u8,
-    /// Where `terminate` jumps to. Set up by [`SupportingCode::entry_point`].
-    pub(super) exit: *const u8,
-    /// The address of the instruction following the target of the call (or the call just executed)
-    /// in anticipation of possible invalid instruction exception.
-    pub(super) next_insn: *const u8,
+    /// See [`supporting_code::MemoryFunctions`].
+    pub(super) memory_functions: *const u8,
+    /// See [`supporting_code::call_dispatcher`].
+    pub(super) call_dispatcher: *const u8,
     pub(super) text_section: *const u8,
     /// Length of `text_section` in bytes.
     pub(super) text_section_len: u64,
-    /// The end of `text_section`.
-    pub(super) text_section_limit: *const u8,
-    /// Translates host addresses within `text_section` to VM addresses.
-    pub(super) text_section_host_to_vm: u64,
     /// For the JIT output: offset in `jit_text_section` of the machine code for each instruction
     /// of `text_section`. Null for the interpreter.
     pub(super) jit_pc_section: *const u32,
     /// Code being executed. For JIT the generated machine code, for interpreter the steps base.
     pub(super) code: *const u8,
-    /// See [`supporting_code::call_dispatcher`].
-    pub(super) call_dispatcher: *const u8,
-    /// See [`supporting_code::MemoryFunctions`].
-    pub(super) memory_functions: *const u8,
-    /// The `FunctionRegistry<usize>` of the executable.
-    pub(super) function_registry: *const u8,
     /// How many more internal calls there can be before `CallDepthExceeded`.
     pub(super) calls_remaining: u64,
     /// How much a call moves the frame pointer by.
     pub(super) stack_frame_bump: u64,
+
+    // The fields used by the JIT templates, see above.
+    /// The address of the instruction following the target of the call (or the call just executed)
+    /// in anticipation of possible invalid instruction exception.
+    pub(super) next_insn: *const u8,
+    /// The end of `text_section`.
+    pub(super) text_section_limit: *const u8,
+    /// Where `terminate` jumps to. Set up by [`SupportEntry::EntryPoint`].
+    pub(super) exit: *const u8,
+    /// The operands of the call of a support, see `invoke_support`.
+    pub(super) operands: [u64; 2],
 }
 
 /// The guest-side part of starting the execution of the guest code.
 ///
-/// The supporting function generated here (see [`SupportingCode`]) is called by [`enter`].
-pub(super) fn entry_point(out: &mut Asm, base: u32) -> u32 {
+/// The supporting function generated here (see [`SupportEntry::EntryPoint`]) is called by [`enter`].
+pub(super) fn entry_point(out: &mut Asm) -> usize {
     // Expects `rsi` to point at the `Frame`, `RINSN` and `RMETER` to be initialized to their
     // namesakes, and `rcx` to the machine code (jitted or interpreter step) for the first BPF
     // instruction to execute.
-    let start = address(out, base, true);
+    let start = entry(out);
     let after_dispatch = out.new_dynamic_label();
     let frame_size = std::mem::size_of::<Frame>();
     x64asm!(out
         ; push rbp
         ; mov rbp, rsp
-        ; sub rsp, BYTE i8::try_from(frame_size).unwrap()
+        ; sub rsp, i32::try_from(frame_size).unwrap()
         ; push rcx
-        ; lea rdi, rbp => Frame[BYTE -1]
+        ; lea rdi, rbp => Frame[-1]
         ; mov ecx, (frame_size / 8) as i32
         ; rep movsq // SYSV ABI: The direction flag is clear on function entry.
         // `exit` jumps to `after_dispatch` from whatever depth of internal calls it's at.
         ; lea rdi, [ => after_dispatch ]
-        ; mov rbp => Frame[BYTE -1].exit, rdi
-        ; mov rcx, rbp => Frame[BYTE -1].vm
+        ; mov [BYTE frame!(exit) + rbp], rdi
+        ; mov rcx, [BYTE frame!(vm) + rbp]
         ;; for reg in Reg::ALL { load_bpf_register(out, reg) }
         // Faster to pop+call than call a stack slot.
         ; pop rcx

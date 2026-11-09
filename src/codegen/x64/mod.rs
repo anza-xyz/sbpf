@@ -119,6 +119,33 @@ macro_rules! x64asm {
     }};
 }
 
+/// The displacement from `rbp` of the `field` of the [`Frame`] as `BYTE` one.
+///
+/// Not `rbp => Frame[BYTE -1].field`, as dynasm computes the displacement of that as an `i8`, which
+/// cannot hold the size of the `Frame` if it is 128 bytes or more. The fields beyond the reach of a
+/// byte displacement have to be accessed as `rbp => Frame[-1].field` (see [`Frame`].)
+macro_rules! frame {
+    ($field:ident) => {
+        $crate::codegen::x64::frame_displacement(std::mem::offset_of!(Frame, $field))
+    };
+}
+
+/// See [`frame!`].
+///
+/// # Panics
+///
+/// If the displacement does not fit in a byte, which guest code templates rely on.
+fn frame_displacement(field_offset: usize) -> i8 {
+    let displacement = field_offset.wrapping_sub(std::mem::size_of::<Frame>()) as isize;
+    i8::try_from(displacement).expect("the frame field is out of reach of a byte displacement")
+}
+
+/// The displacement from `rbp` of [`Frame::operands`] `index`, see [`frame!`].
+fn frame_operand(index: usize) -> i8 {
+    let offset = std::mem::offset_of!(Frame, operands);
+    frame_displacement(offset.checked_add(index.checked_mul(8).unwrap()).unwrap())
+}
+
 mod entry;
 mod insn;
 mod relocation;
@@ -133,10 +160,17 @@ pub(super) use insn::{
 pub(super) use relocation::{
     TemplateRelocation, TemplateRelocationKind, MAX_JIT_TEMPLATE_SIZE, MAX_RELOCATIONS,
 };
-use supporting_code::SupportingCode;
+pub(super) use supporting_code::{SupportEntries, SupportEntry, SupportingCode};
 
 /// The JIT output gets an island at most this many bytes apart.
 pub(super) const ISLAND_INTERVAL: usize = 1 << 30;
+
+/// The JIT output gets a copy of the [`SupportingCode`] at most this many bytes apart, so that the
+/// relative `call`s to it reach.
+pub(super) const SUPPORTS_INTERVAL: usize = 1 << 30;
+
+/// The alignment of the copies of the [`SupportingCode`].
+pub(super) const SUPPORTS_ALIGNMENT: usize = 16;
 
 /// The entries of an island.
 ///
@@ -174,3 +208,6 @@ pub(super) const TRAP_FILL: u8 = 0xcc;
 
 /// The encoding of an absolute 32-bit relocation, for `Generator::template_reloc`.
 const ABSOLUTE_DWORD: u8 = 0xc2;
+
+/// The encoding of a relative 32-bit relocation, for `Generator::support_reloc`.
+const RELATIVE_DWORD: u8 = 0x02;
