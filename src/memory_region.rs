@@ -822,48 +822,60 @@ impl MemoryMapping {
         vm_addr: u64,
         len: u64,
     ) -> StableResult<HostBuffer, EbpfError> {
-        debug_assert!(self.initialized);
+        match self.map_fast(access_type, vm_addr, len) {
+            Some(host_buffer) => StableResult::Ok(host_buffer),
+            None => StableResult::Err(self.map_error(access_type, vm_addr, len)),
+        }
+    }
+
+    /// The error for why previous [`MemoryMapping::map_fast`] call returned `None` with the
+    /// provided arguments.
+    #[cold]
+    fn map_error(&self, access_type: AccessType, vm_addr: u64, len: u64) -> EbpfError {
         let region = self.find_region(vm_addr).map(|(_index, region)| region);
-        match region {
+        self.generate_access_violation_for(region, access_type, vm_addr, len)
+    }
+
+    /// Same as [`MemoryMapping::map`], with simpler ABI.
+    #[inline(always)]
+    fn map_fast(&self, access_type: AccessType, vm_addr: u64, len: u64) -> Option<HostBuffer> {
+        debug_assert!(self.initialized);
+        match self.find_region(vm_addr).map(|(_index, region)| region) {
             Some(region)
                 if region.host_buffer().is_mutable() || access_type != AccessType::Store =>
             {
-                if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                    return StableResult::Ok(host_buffer);
-                }
+                region.vm_to_host_buffer(vm_addr, len)
             }
-            _ => (),
+            _ => None,
         }
-        StableResult::Err(self.generate_access_violation_for(region, access_type, vm_addr, len))
     }
 
-    /// Loads `size_of::<T>()` bytes at the given guest address without invoking the access_violation_handler.
+    /// Loads `size_of::<T>()` bytes at the given guest address without invoking the
+    /// access_violation_handler.
+    ///
+    /// Returns `None` if the access is not allowed. [`Self::load_second_attempt`] may still succeed
+    /// and will return an appropriate error for the guest.
     #[inline]
-    pub fn load_first_attempt<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> ProgramResult {
+    pub fn load_first_attempt<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> Option<u64> {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
-        debug_assert!(self.initialized);
-        match self.map(AccessType::Load, vm_addr, len) {
-            StableResult::Err(e) => ProgramResult::Err(e),
-            StableResult::Ok(buf) => unsafe {
-                ProgramResult::Ok(ptr::read_unaligned::<T>(buf.ptr().cast()).into())
-            },
-        }
+        let buf = self.map_fast(AccessType::Load, vm_addr, len)?;
+        Some(unsafe { ptr::read_unaligned::<T>(buf.ptr().cast()) }.into())
     }
 
     /// Stores `value` at the given guest address without invoking the access_violation_handler.
+    ///
+    /// Returns `true` if store succeeded. [`Self::store_second_attempt`] may still succeed even if
+    /// `false` is returned.
     #[inline]
-    pub fn store_first_attempt<T: Pod>(&mut self, value: T, vm_addr: u64) -> ProgramResult {
+    pub fn store_first_attempt<T: Pod>(&mut self, value: T, vm_addr: u64) -> bool {
         let len = mem::size_of::<T>() as u64;
         debug_assert!(len <= mem::size_of::<u64>() as u64);
-        debug_assert!(self.initialized);
-        match self.map(AccessType::Store, vm_addr, len) {
-            StableResult::Err(e) => ProgramResult::Err(e),
-            StableResult::Ok(buf) => unsafe {
-                ptr::write_unaligned::<T>(buf.ptr_mut().cast(), value);
-                StableResult::Ok(0)
-            },
-        }
+        let Some(buf) = self.map_fast(AccessType::Store, vm_addr, len) else {
+            return false;
+        };
+        unsafe { ptr::write_unaligned::<T>(buf.ptr_mut().cast(), value) };
+        true
     }
 
     /// Invokes access_violation_handler then loads `size_of::<T>()` bytes at the given guest address.
@@ -1097,16 +1109,8 @@ pub fn map_with_access_violation_handler<C: ContextObject>(
     len: u64,
 ) -> StableResult<HostBuffer, EbpfError> {
     let memory_mapping = unsafe { context_object.active_mapping_ptr().as_mut() };
-    debug_assert!(memory_mapping.initialized);
-    match memory_mapping.find_region(vm_addr) {
-        Some((_index, region))
-            if region.host_buffer().is_mutable() || access_type != AccessType::Store =>
-        {
-            if let Some(host_buffer) = region.vm_to_host_buffer(vm_addr, len) {
-                return StableResult::Ok(host_buffer);
-            }
-        }
-        _ => (),
+    if let Some(host_buffer) = memory_mapping.map_fast(access_type, vm_addr, len) {
+        return StableResult::Ok(host_buffer);
     }
     // The slow path is out of line, so that the code in there doesn't make the callers of the
     // fast path save and restore registers they otherwise do not need to. Note, that a single
@@ -1277,12 +1281,9 @@ mod test {
                 assert!(m.map(AccessType::Load, address, 2).is_ok());
                 assert_error!(m.map(AccessType::Load, address + 2, 2), "AccessViolation");
                 assert_eq!(m.load_first_attempt::<u16>(address).unwrap(), 0xFFFF);
-                assert_error!(m.load_first_attempt::<u16>(address + 2), "AccessViolation");
-                assert!(m.store_first_attempt::<u16>(0xFFFF, address).is_ok());
-                assert_error!(
-                    m.store_first_attempt::<u16>(0xFFFF, address + 2),
-                    "AccessViolation"
-                );
+                assert_eq!(m.load_first_attempt::<u16>(address + 2), None);
+                assert!(m.store_first_attempt::<u16>(0xFFFF, address));
+                assert!(!m.store_first_attempt::<u16>(0xFFFF, address + 2));
             }
         }
     }
@@ -1526,14 +1527,8 @@ mod test {
             m.load_first_attempt::<u16>(ebpf::MM_REGION_SIZE).unwrap(),
             0x2211
         );
-        assert_error!(
-            m.load_first_attempt::<u32>(ebpf::MM_REGION_SIZE),
-            "AccessViolation"
-        );
-        assert_error!(
-            m.load_first_attempt::<u32>(ebpf::MM_REGION_SIZE + 4),
-            "AccessViolation"
-        );
+        assert_eq!(m.load_first_attempt::<u32>(ebpf::MM_REGION_SIZE), None);
+        assert_eq!(m.load_first_attempt::<u32>(ebpf::MM_REGION_SIZE + 4), None);
     }
 
     #[test]
@@ -1556,17 +1551,13 @@ mod test {
             .unwrap()
         };
 
-        m.store_first_attempt(0x1122u16, ebpf::MM_REGION_SIZE)
-            .unwrap();
+        assert!(m.store_first_attempt(0x1122u16, ebpf::MM_REGION_SIZE));
         assert_eq!(
             m.load_first_attempt::<u16>(ebpf::MM_REGION_SIZE).unwrap(),
             0x1122
         );
 
-        assert_error!(
-            m.store_first_attempt(0x33445566u32, ebpf::MM_REGION_SIZE),
-            "AccessViolation"
-        );
+        assert!(!m.store_first_attempt(0x33445566u32, ebpf::MM_REGION_SIZE));
     }
 
     #[test]
@@ -1585,21 +1576,12 @@ mod test {
             )
             .unwrap()
         };
-        m.store_first_attempt(0x11u8, ebpf::MM_REGION_SIZE).unwrap();
-        assert_error!(
-            m.store_first_attempt(0x11u8, ebpf::MM_REGION_SIZE - 1),
-            "AccessViolation"
-        );
-        assert_error!(
-            m.store_first_attempt(0x11u8, ebpf::MM_REGION_SIZE + 1),
-            "AccessViolation"
-        );
+        assert!(m.store_first_attempt(0x11u8, ebpf::MM_REGION_SIZE));
+        assert!(!m.store_first_attempt(0x11u8, ebpf::MM_REGION_SIZE - 1));
+        assert!(!m.store_first_attempt(0x11u8, ebpf::MM_REGION_SIZE + 1));
         // this gets us line coverage for the case where we're completely
         // outside the address space (the case above is just on the edge)
-        assert_error!(
-            m.store_first_attempt(0x11u8, ebpf::MM_REGION_SIZE + 2),
-            "AccessViolation"
-        );
+        assert!(!m.store_first_attempt(0x11u8, ebpf::MM_REGION_SIZE + 2));
 
         let mut mem1 = [0xFF; 4];
         let mut mem2 = [0xDD; 4];
@@ -1614,10 +1596,7 @@ mod test {
             )
             .unwrap()
         };
-        assert_error!(
-            m.store_first_attempt(0x1122334455667788u64, ebpf::MM_REGION_SIZE),
-            "AccessViolation"
-        );
+        assert!(!m.store_first_attempt(0x1122334455667788u64, ebpf::MM_REGION_SIZE));
     }
 
     #[test]
@@ -1640,18 +1619,9 @@ mod test {
             m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE).unwrap(),
             0xff
         );
-        assert_error!(
-            m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE - 1),
-            "AccessViolation"
-        );
-        assert_error!(
-            m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE + 1),
-            "AccessViolation"
-        );
-        assert_error!(
-            m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE + 2),
-            "AccessViolation"
-        );
+        assert_eq!(m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE - 1), None);
+        assert_eq!(m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE + 1), None);
+        assert_eq!(m.load_first_attempt::<u8>(ebpf::MM_REGION_SIZE + 2), None);
 
         let mem1 = [0xFF; 4];
         let mem2 = [0xDD; 4];
@@ -1666,10 +1636,7 @@ mod test {
             )
             .unwrap()
         };
-        assert_error!(
-            m.load_first_attempt::<u64>(ebpf::MM_REGION_SIZE),
-            "AccessViolation"
-        );
+        assert_eq!(m.load_first_attempt::<u64>(ebpf::MM_REGION_SIZE), None);
     }
 
     #[test]
@@ -1681,7 +1648,7 @@ mod test {
         };
         let mut mem1 = [0xff, 0xff];
         let mem2 = [0xff, 0xff];
-        let mut m = unsafe {
+        let m = unsafe {
             MemoryMapping::new(
                 vec![
                     MemoryRegion::new(&raw mut mem1, ebpf::MM_REGION_SIZE),
@@ -1692,8 +1659,7 @@ mod test {
             )
             .unwrap()
         };
-        m.store_first_attempt(0x11223344, ebpf::MM_REGION_SIZE)
-            .unwrap();
+        m.map(AccessType::Store, ebpf::MM_REGION_SIZE, 4).unwrap();
     }
 
     #[test]
@@ -2219,7 +2185,7 @@ mod test {
         let config = Config::default();
         let original = [11, 22];
 
-        let mut m = unsafe {
+        let m = unsafe {
             MemoryMapping::new_with_access_violation_handler(
                 vec![MemoryRegion::new(&raw const original, ebpf::MM_REGION_SIZE)],
                 &config,
@@ -2229,7 +2195,7 @@ mod test {
             .unwrap()
         };
 
-        m.store_first_attempt(33u8, ebpf::MM_REGION_SIZE).unwrap();
+        m.map(AccessType::Store, ebpf::MM_REGION_SIZE, 1).unwrap();
     }
 
     #[test]
@@ -2237,7 +2203,7 @@ mod test {
         let config = Config::default();
         let original = [11, 22];
         let region = 0x10_0000_0000;
-        let mut m = unsafe {
+        let m = unsafe {
             MemoryMapping::new(
                 vec![MemoryRegion::new(&raw const original, region)],
                 &config,
@@ -2245,12 +2211,12 @@ mod test {
             )
             .unwrap()
         };
-        let store_err_inbound = m.store_first_attempt(33u8, region).unwrap_err();
+        let store_err_inbound = m.map(AccessType::Store, region, 1).unwrap_err();
         assert_eq!(
             store_err_inbound.to_string(),
             "Access violation writing 1 bytes at address 0x1000000000 (in allocated region)"
         );
-        let store_err_oob = m.load_first_attempt::<u64>(region + 3).unwrap_err();
+        let store_err_oob = m.map(AccessType::Load, region + 3, 8).unwrap_err();
         assert_eq!(
             store_err_oob.to_string(),
             "Access violation reading 8 bytes at address 0x1000000003 (in unallocated region)"

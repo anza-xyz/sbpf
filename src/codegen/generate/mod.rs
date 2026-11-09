@@ -6,7 +6,7 @@ mod jit;
 pub(super) use interpreter::{interpreter, interpreter_step, InterpreterGenerator};
 pub use jit::jit_templates;
 
-use super::arch::TemplateRelocationKind;
+use super::arch::{SupportEntry, TemplateRelocationKind};
 use crate::program::SBPFVersion;
 use dynasmrt::components::{LabelRegistry, PatchLoc, RelocRegistry};
 use dynasmrt::relocations::{Relocation, RelocationKind};
@@ -174,6 +174,16 @@ pub(super) trait Generator {
         field_offset: u8,
         ref_offset: u8,
         kind: u8,
+    );
+    /// Record a relocation for bytes immediately preceding the current offset, against the entry
+    /// `support` of the latest copy of the supporting code.
+    fn support_reloc(
+        &mut self,
+        support: SupportEntry,
+        target_offset: isize,
+        field_offset: u8,
+        ref_offset: u8,
+        encoding: u8,
     );
     /// Record a template relocation for bytes immediately preceding the current offset.
     ///

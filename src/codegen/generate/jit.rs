@@ -2,7 +2,7 @@
 
 use super::{Generator, LabelRelocs, PatchFields, TemplateOpcode};
 use crate::codegen::arch::{
-    self, TemplateRelocation, TemplateRelocationKind, MAX_JIT_TEMPLATE_SIZE,
+    self, SupportEntry, TemplateRelocation, TemplateRelocationKind, MAX_JIT_TEMPLATE_SIZE,
 };
 use crate::codegen::templates::{AuxTemplate, JitTemplates, TemplateBuilder};
 use crate::program::SBPFVersion;
@@ -76,6 +76,18 @@ impl Generator for JITGenerator<'_> {
         encoding: u8,
     ) {
         let kind = TemplateRelocationKind::of_global(name);
+        self.template_reloc(kind, target_offset, field_offset, ref_offset, encoding);
+    }
+
+    fn support_reloc(
+        &mut self,
+        support: SupportEntry,
+        target_offset: isize,
+        field_offset: u8,
+        ref_offset: u8,
+        encoding: u8,
+    ) {
+        let kind = TemplateRelocationKind::Support(support);
         self.template_reloc(kind, target_offset, field_offset, ref_offset, encoding);
     }
 
@@ -157,6 +169,10 @@ fn generate_jit_templates(version: SBPFVersion) -> JitTemplates<MAX_JIT_TEMPLATE
         arch::aux_template(&mut generator, template);
         generator.finalize();
     }
+    let mut generator = JITGenerator::new(version, templates.island_builder(), None);
+    let island_entries = arch::island(&mut generator);
+    generator.finalize();
+    templates.island_entries = island_entries;
     templates
 }
 
