@@ -26,6 +26,17 @@ impl AccessSize {
         }
     }
 
+    /// The size of the access done by the SBPFv2 load or store with the opcode `op`.
+    pub(in crate::codegen) fn of_v2_opcode(op: u8) -> Self {
+        match op & (ebpf::BPF_1B | ebpf::BPF_2B | ebpf::BPF_4B | ebpf::BPF_8B) {
+            ebpf::BPF_1B => Self::B,
+            ebpf::BPF_2B => Self::H,
+            ebpf::BPF_4B => Self::W,
+            ebpf::BPF_8B => Self::DW,
+            _ => unreachable!(),
+        }
+    }
+
     /// Offset of the function for this access size in [`MemoryFunctions::load`].
     fn load_offset(self) -> i8 {
         let offset = std::mem::offset_of!(MemoryFunctions<DummyContextObject>, load)
