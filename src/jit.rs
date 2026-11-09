@@ -151,8 +151,7 @@ const ANCHOR_CALL_UNSUPPORTED_INSTRUCTION: usize = 11;
 const ANCHOR_EXTERNAL_FUNCTION_CALL: usize = 12;
 const ANCHOR_INTERNAL_FUNCTION_CALL_PROLOGUE: usize = 13;
 const ANCHOR_INTERNAL_FUNCTION_CALL_REG: usize = 14;
-const ANCHOR_LOAD_FIRST_ATTEMPT_SUCCESS: usize = 15;
-const ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS: usize = 16;
+const ANCHOR_FIRST_ATTEMPT_SUCCESS: usize = 15;
 const ANCHOR_TRANSLATE_MEMORY_ADDRESS: usize = 23;
 const ANCHOR_COUNT: usize = 35; // Update me when adding or removing anchors
 
@@ -1018,13 +1017,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     }
 
     /// Calls an external Rust function
-    pub fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_reg: Option<X86Register>) {
-        let mut saved_registers = CALLER_SAVED_REGISTERS.to_vec();
-        if let Some(reg) = result_reg {
-            if let Some(dst) = saved_registers.iter().position(|x| *x == reg) {
-                saved_registers.remove(dst);
-            }
-        }
+    ///
+    /// For calls that return values in registers, the returned value is moved into `result_regs`.
+    pub fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_regs: &[X86Register]) {
+        debug_assert!(result_regs.len() <= 2);
+        let saved_registers = CALLER_SAVED_REGISTERS;
 
         // Save registers on stack
         for reg in saved_registers.iter() {
@@ -1116,14 +1113,16 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             }
         }
 
-        // Save returned value in result register
-        if let Some(reg) = result_reg {
-            self.emit_ins(X86Instruction::mov(OperandSize::S64, RAX, reg));
-        }
-
         // Restore registers from stack
         self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP,
             if stack_arguments % 2 != 0 { stack_arguments + 1 } else { stack_arguments } * 8, None));
+
+        // Overwrite saved registers with return values.
+        for (src, dst) in [RAX, RDX].iter().zip(result_regs) {
+            let position = saved_registers.iter().position(|x| x == dst).unwrap();
+            let offset = (saved_registers.len() - 1 - position) as i32 * 8;
+            self.emit_ins(X86Instruction::store(OperandSize::S64, *src, RSP, X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)));
+        }
 
         for reg in saved_registers.iter().rev() {
             self.emit_ins(X86Instruction::pop(*reg));
@@ -1409,7 +1408,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.emit_rust_call(Value::Constant64(Vec::<crate::static_analysis::RegisterTraceEntry>::push as *const u8 as i64, false), &[
                 Argument { index: 1, value: Value::Register(REGISTER_MAP[0]) }, // registers
                 Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::RegisterTrace), false) },
-            ], None);
+            ], &[]);
             // Pop stack and return
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 8 * 3, None)); // RSP += 8 * 3;
             self.emit_ins(X86Instruction::pop(REGISTER_MAP[0]));
@@ -1434,7 +1433,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.emit_rust_call(Value::Constant64(stopwatch_result as *const u8 as i64, false), &[
                 Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::StopwatchDenominator), false) },
                 Argument { index: 0, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::StopwatchNumerator), false) },
-            ], None);
+            ], &[]);
         }
         // Restore stack pointer in case we did not exit gracefully
         self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, RSP, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::HostStackPointer))));
@@ -1512,7 +1511,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             Argument { index: 2, value: Value::Register(ARGUMENT_REGISTERS[2]) },
             Argument { index: 1, value: Value::Register(ARGUMENT_REGISTERS[1]) },
             Argument { index: 0, value: Value::Register(REGISTER_PTR_TO_VM) },
-        ], None);
+        ], &[]);
         self.emit_instruction_meter_from_vm(Value::Register(REGISTER_SCRATCH));
         // Test if result indicates that an error occured
         self.emit_check_result_is_ok();
@@ -1597,12 +1596,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
         self.emit_ins(X86Instruction::pop(REGISTER_MAP[0]));
         self.emit_ins(X86Instruction::jump_reg(RSP, Some(X86IndirectAccess::OffsetIndexShift(-24, RSP, 0)))); // Tail call to host_target_address
 
-        self.set_anchor(ANCHOR_LOAD_FIRST_ATTEMPT_SUCCESS);
-        // unwrap() the result into REGISTER_SCRATCH
-        self.emit_ins(X86Instruction::load(OperandSize::S64, REGISTER_PTR_TO_VM, REGISTER_SCRATCH, X86IndirectAccess::Offset(self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult) + std::mem::size_of::<u64>() as i32)));
-        // Fall through
-        self.set_anchor(ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS);
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 24, None)); // RSP += 24
+        self.set_anchor(ANCHOR_FIRST_ATTEMPT_SUCCESS);
+        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP, 32, None)); // RSP += 32
         self.emit_ins(X86Instruction::return_near());
 
         // Translates a vm memory address to a host memory address
@@ -1618,7 +1613,8 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             self.emit_ins(X86Instruction::conditional_jump_immediate(0x86, self.relative_to_anchor(ANCHOR_THROW_EXCEEDED_MAX_INSTRUCTIONS, 6)));
             // skip over the two slots pushed by the caller, we'll pop them before returning
             self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 5, RSP, 24, None)); // RSP -= 24
-            // call MemoryMapping::(load|store) storing the result in RuntimeEnvironmentSlot::ProgramResult
+            // call MemoryMapping::(load|store)_first_attempt, which returns whether it succeeded in RAX
+            // (and the loaded value in RDX.) Keep the vm_addr for the second attempt and free up RAX.
             if *anchor_base == 0 { // AccessType::Load
                 let load = match len {
                     1 => MemoryMapping::load_first_attempt::<u8> as *const u8 as i64,
@@ -1627,13 +1623,16 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     8 => MemoryMapping::load_first_attempt::<u64> as *const u8 as i64,
                     _ => unreachable!()
                 };
+                self.emit_ins(X86Instruction::push(REGISTER_SCRATCH, None));
+                self.emit_ins(X86Instruction::push(REGISTER_MAP[0], None));
                 self.emit_rust_call(Value::Constant64(load, false), &[
-                    Argument { index: 2, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
-                    Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
-                    Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
-                ], None);
-                self.emit_check_result_is_ok();
-                self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_LOAD_FIRST_ATTEMPT_SUCCESS, 6)));
+                    Argument { index: 1, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
+                    Argument { index: 0, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
+                ], &[REGISTER_MAP[0], REGISTER_SCRATCH]);
+                self.emit_ins(X86Instruction::test(OperandSize::S8, REGISTER_MAP[0], REGISTER_MAP[0], None));
+                self.emit_ins(X86Instruction::pop(REGISTER_MAP[0])); // Leaves the flags alone
+                self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_FIRST_ATTEMPT_SUCCESS, 6)));
+                self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH));
                 self.emit_instruction_meter_to_vm(Value::RegisterIndirect(RSP, 16, false));
                 let load = match len {
                     1 => MemoryMapping::load_second_attempt::<u8, C> as *const u8 as i64,
@@ -1646,7 +1645,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     Argument { index: 2, value: Value::Register(REGISTER_PTR_TO_VM) },
                     Argument { index: 1, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
                     Argument { index: 0, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
-                ], None);
+                ], &[]);
                 self.emit_instruction_meter_from_vm(Value::RegisterIndirect(RSP, 16, false));
             } else { // AccessType::Store
                 if *anchor_base == 8 {
@@ -1660,14 +1659,17 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     8 => MemoryMapping::store_first_attempt::<u64> as *const u8 as i64,
                     _ => unreachable!()
                 };
+                self.emit_ins(X86Instruction::push(REGISTER_SCRATCH, None));
+                self.emit_ins(X86Instruction::push(REGISTER_MAP[0], None));
                 self.emit_rust_call(Value::Constant64(store, false), &[
-                    Argument { index: 3, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
-                    Argument { index: 2, value: Value::RegisterIndirect(RSP, 80, false) },
-                    Argument { index: 1, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
-                    Argument { index: 0, value: Value::RegisterPlusConstant32(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::ProgramResult), false) },
-                ], None);
-                self.emit_check_result_is_ok();
-                self.emit_ins(X86Instruction::conditional_jump_immediate(0x84, self.relative_to_anchor(ANCHOR_STORE_FIRST_ATTEMPT_SUCCESS, 6)));
+                    Argument { index: 2, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
+                    Argument { index: 1, value: Value::RegisterIndirect(RSP, 96, false) },
+                    Argument { index: 0, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
+                ], &[REGISTER_MAP[0]]);
+                self.emit_ins(X86Instruction::test(OperandSize::S8, REGISTER_MAP[0], REGISTER_MAP[0], None));
+                self.emit_ins(X86Instruction::pop(REGISTER_MAP[0])); // Leaves the flags alone
+                self.emit_ins(X86Instruction::conditional_jump_immediate(0x85, self.relative_to_anchor(ANCHOR_FIRST_ATTEMPT_SUCCESS, 6)));
+                self.emit_ins(X86Instruction::pop(REGISTER_SCRATCH));
                 self.emit_instruction_meter_to_vm(Value::RegisterIndirect(RSP, 16, false));
                 let store = match len {
                     1 => MemoryMapping::store_second_attempt::<u8, C> as *const u8 as i64,
@@ -1681,7 +1683,7 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                     Argument { index: 2, value: Value::Register(REGISTER_SCRATCH) }, // Specify first as the src register could be overwritten by other arguments
                     Argument { index: 1, value: Value::RegisterIndirect(RSP, 80, false) },
                     Argument { index: 0, value: Value::RegisterIndirect(REGISTER_PTR_TO_VM, self.slot_in_vm(RuntimeEnvironmentSlot::MemoryMapping), false) },
-                ], None);
+                ], &[]);
                 self.emit_instruction_meter_from_vm(Value::RegisterIndirect(RSP, 16, false));
             }
 
