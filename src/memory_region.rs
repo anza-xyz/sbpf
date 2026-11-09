@@ -8,7 +8,7 @@ use crate::{
     vm::{Config, ContextObject, EncryptedHostAddressToEbpfVm},
 };
 use std::fmt::Formatter;
-use std::{array, cell::UnsafeCell, fmt, mem, ops::Range, ptr};
+use std::{cell::UnsafeCell, fmt, mem, ops::Range, ptr};
 
 /* Explanation of the Gapped Memory
 
@@ -570,9 +570,29 @@ impl UnalignedMemoryMapping {
             // must be contained in region
             index = unsafe { *self.region_index_lookup.get_unchecked(index - 1) };
             let region = unsafe { self.regions.get_unchecked(index) };
-            cache.insert(region.vm_addr_range(), index);
+            cache.insert_region(region, index);
             Some((index, region))
         }
+    }
+
+    #[inline(always)]
+    fn map_fast(&self, access_type: AccessType, vm_addr: u64, len: u64) -> Option<HostBuffer> {
+        // SAFETY: The reference does not outlive this block.
+        let cache = unsafe { &*self.cache.get() };
+        let region = if let Some(slot) = cache.find_slot(vm_addr) {
+            unsafe {
+                // SAFETY: `find_slot` returns `slot` in `0..Self::SIZE`.
+                if let Some(host) = cache.host_buffer(slot, access_type, vm_addr, len) {
+                    return Some(host);
+                }
+                // SAFETY: Cached index, validated before it was cached, see `find_region`.
+                self.regions
+                    .get_unchecked(*cache.indices.get_unchecked(slot))
+            }
+        } else {
+            self.find_region(vm_addr)?.1
+        };
+        map_region(region, access_type, vm_addr, len)
     }
 
     /// Replaces the `MemoryRegion` at the given index
@@ -589,6 +609,20 @@ impl UnalignedMemoryMapping {
         self.regions[index] = region;
         self.cache.get_mut().flush();
         Ok(())
+    }
+}
+
+#[inline(always)]
+fn map_region(
+    region: &MemoryRegion,
+    access_type: AccessType,
+    vm_addr: u64,
+    len: u64,
+) -> Option<HostBuffer> {
+    if region.host_buffer().is_mutable() || access_type != AccessType::Store {
+        region.vm_to_host_buffer(vm_addr, len)
+    } else {
+        None
     }
 }
 
@@ -840,13 +874,11 @@ impl MemoryMapping {
     #[inline(always)]
     fn map_fast(&self, access_type: AccessType, vm_addr: u64, len: u64) -> Option<HostBuffer> {
         debug_assert!(self.initialized);
-        match self.find_region(vm_addr).map(|(_index, region)| region) {
-            Some(region)
-                if region.host_buffer().is_mutable() || access_type != AccessType::Store =>
-            {
-                region.vm_to_host_buffer(vm_addr, len)
+        match &self.ty {
+            MemoryMappingType::Unaligned(inner) => inner.map_fast(access_type, vm_addr, len),
+            MemoryMappingType::Aligned(inner) => {
+                map_region(inner.find_region(vm_addr)?.1, access_type, vm_addr, len)
             }
-            _ => None,
         }
     }
 
@@ -1122,12 +1154,15 @@ pub fn map_with_access_violation_handler<C: ContextObject>(
 /// Fast, small linear cache used to speed up unaligned memory mapping.
 #[derive(Debug)]
 struct MappingCache {
-    // The cached entries.
-    entries: [(Range<u64>, usize); MappingCache::SIZE],
-    // Index of the last accessed memory region.
-    //
-    // New entries are written backwards, so that find() can always scan
-    // forward which is faster.
+    starts: [u64; MappingCache::SIZE],
+    lens: [u64; MappingCache::SIZE],
+    indices: [usize; MappingCache::SIZE],
+    // The host address of vm address 0 of the region so that a hit can go to the host memory
+    // without loading the region first. Null otherwise.
+    hosts: [*mut u8; MappingCache::SIZE],
+    // Whether the region is writable.
+    writable: [bool; MappingCache::SIZE],
+    // The entry that was inserted last.
     head: usize,
 }
 
@@ -1137,38 +1172,111 @@ impl MappingCache {
 
     fn new() -> MappingCache {
         MappingCache {
-            entries: array::from_fn(|_| (0..0, 0)),
+            starts: [0; Self::SIZE],
+            lens: [0; Self::SIZE],
+            indices: [0; Self::SIZE],
+            hosts: [ptr::null_mut(); Self::SIZE],
+            writable: [false; Self::SIZE],
             head: 0,
         }
     }
 
     #[inline]
     fn find(&self, vm_addr: u64) -> Option<usize> {
-        for i in 0..Self::SIZE {
-            let index = self.head.wrapping_add(i) % Self::SIZE;
-            // Safety:
-            // index is guaranteed to be between 0..Self::SIZE
-            let (vm_range, region_index) = unsafe { self.entries.get_unchecked(index) };
-            if vm_range.contains(&vm_addr) {
-                return Some(*region_index);
-            }
-        }
+        let slot = self.find_slot(vm_addr)?;
+        // SAFETY: `find_slot` returns indices between `0..Self::SIZE`
+        Some(unsafe { *self.indices.get_unchecked(slot) })
+    }
 
-        None
+    /// # Safety
+    ///
+    /// `slot` must be `0..Self::SIZE`.
+    #[inline]
+    unsafe fn host_buffer(
+        &self,
+        slot: usize,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+    ) -> Option<HostBuffer> {
+        // SAFETY: `slot` is between `0..Self::SIZE`.
+        let (host, writable, start, range_len) = unsafe {
+            (
+                *self.hosts.get_unchecked(slot),
+                *self.writable.get_unchecked(slot),
+                *self.starts.get_unchecked(slot),
+                *self.lens.get_unchecked(slot),
+            )
+        };
+        if host.is_null() || (access_type == AccessType::Store && !writable) {
+            return None;
+        }
+        let remaining = range_len.wrapping_sub(vm_addr.wrapping_sub(start));
+        if remaining < len {
+            return None;
+        }
+        let host = host.wrapping_byte_add(vm_addr as usize);
+        let len = len as usize;
+        Some(if writable {
+            HostBuffer::Mutable(ptr::slice_from_raw_parts_mut(host, len))
+        } else {
+            HostBuffer::Immutable(ptr::slice_from_raw_parts(host, len))
+        })
+    }
+
+    /// The slot of the entry whose range contains `vm_addr`.
+    #[inline]
+    fn find_slot(&self, vm_addr: u64) -> Option<usize> {
+        // The code structure here is written such that this function codegens into a pipelineable,
+        // branchless structure. For `Self::SIZE` of `4` this is in almost all non-synthetic cases
+        // much better than naive branchy implementation (which does better in our microbenches.)
+        let mut hits = 0u32;
+        for i in 0..Self::SIZE {
+            // One unsigned comparison to check both bounds; an address below start wraps around
+            // exceeding any reasonable length.
+            let hit = vm_addr.wrapping_sub(self.starts[i]) < self.lens[i];
+            hits |= u32::from(hit) << i;
+        }
+        if hits == 0 {
+            return None;
+        }
+        Some(hits.trailing_zeros() as usize)
     }
 
     #[inline]
-    fn insert(&mut self, vm_range: Range<u64>, region_index: usize) {
+    fn insert_region(&mut self, region: &MemoryRegion, region_index: usize) {
+        let (host, writable) = if region.vm_gap_shift == 63 {
+            let buffer = region.host_buffer();
+            let host = buffer.ptr().cast::<u8>().cast_mut();
+            (
+                host.wrapping_byte_sub(region.vm_addr as usize),
+                buffer.is_mutable(),
+            )
+        } else {
+            (ptr::null_mut(), false)
+        };
+        self.insert_with_host(region.vm_addr_range(), region_index, host, writable);
+    }
+
+    #[inline]
+    fn insert_with_host(
+        &mut self,
+        vm_range: Range<u64>,
+        region_index: usize,
+        host: *mut u8,
+        writable: bool,
+    ) {
         self.head = self.head.wrapping_sub(1) % Self::SIZE;
-        // Safety:
-        // self.head is guaranteed to be between 0..Self::SIZE
-        unsafe { *self.entries.get_unchecked_mut(self.head) = (vm_range, region_index) };
+        self.starts[self.head] = vm_range.start;
+        self.lens[self.head] = vm_range.end.saturating_sub(vm_range.start);
+        self.indices[self.head] = region_index;
+        self.hosts[self.head] = host;
+        self.writable[self.head] = writable;
     }
 
     #[inline]
     fn flush(&mut self) {
-        self.entries = array::from_fn(|_| (0..0, 0));
-        self.head = 0;
+        *self = Self::new();
     }
 }
 
@@ -1189,7 +1297,7 @@ mod test {
 
         let mut ranges = vec![10u64..20, 20..30, 30..40, 40..50];
         for (region, range) in ranges.iter().cloned().enumerate() {
-            cache.insert(range, region);
+            cache.insert_with_host(range, region, ptr::null_mut(), false);
         }
         for (region, range) in ranges.iter().enumerate() {
             if region > 0 {
@@ -1207,7 +1315,7 @@ mod test {
             }
         }
 
-        cache.insert(50..60, 4);
+        cache.insert_with_host(50..60, 4, ptr::null_mut(), false);
         ranges.push(50..60);
         for (region, range) in ranges.iter().enumerate() {
             if region == 0 {
@@ -1234,7 +1342,7 @@ mod test {
     fn test_mapping_cache_flush() {
         let mut cache = MappingCache::new();
         assert_eq!(cache.find(0), None);
-        cache.insert(0..10, 0);
+        cache.insert_with_host(0..10, 0, ptr::null_mut(), false);
         assert_eq!(cache.find(0), Some(0));
         cache.flush();
         assert_eq!(cache.find(0), None);
