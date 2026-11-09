@@ -359,7 +359,7 @@ impl SupportingCode {
         x64asm!(out
             ; mov rax, [BYTE frame_operand(0) + rbp]
             ;; validate_meter(out)
-            ; sub rax, [BYTE frame!(text_section_host_to_vm) + rbp]
+            ; sub rax, rbp => Frame[-1].text_section_host_to_vm
             ;; Self::internal_call(out, Callee::AbsoluteAddress)
         );
 
@@ -386,7 +386,7 @@ impl SupportingCode {
 
             ; =>common
             ;; validate_meter(out)
-            ; sub rax, [BYTE frame!(text_section_host_to_vm) + rbp]
+            ; sub rax, rbp => Frame[-1].text_section_host_to_vm
             ;; Self::internal_call(out, Callee::AbsoluteAddress)
 
             ; .align 8
@@ -419,7 +419,7 @@ impl SupportingCode {
             ;; const { assert!(RMETER == RDX) }
             ; sub RMETER, RTEMP
             ; shr RMETER, 3
-            ; mov rcx, [BYTE frame!(function_registry) + rbp]
+            ; mov rcx, rbp => Frame[-1].function_registry
             ;; debug_assert_sysv64_call_stack_alignment(out)
             ; mov rax, [BYTE frame!(call_dispatcher) + rbp]
             ; call rax

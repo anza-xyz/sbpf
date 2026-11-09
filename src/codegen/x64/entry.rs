@@ -5,6 +5,7 @@ use crate::codegen::generate::{self, Reg, TemplateOpcode};
 use crate::codegen::{finish_execution, initial_meter};
 use crate::ebpf;
 use crate::elf::Executable;
+use crate::memory_region::MemoryMapping;
 use crate::program::JitProgram;
 use crate::vm::{ContextObject, EbpfVm};
 use dynasmrt::{DynasmApi, DynasmLabelApi};
@@ -68,6 +69,7 @@ pub(in crate::codegen) fn enter<C: ContextObject>(
     };
     let mut frame = Frame {
         vm: std::ptr::from_mut(vm).cast(),
+        memory: vm.memory_mapping.as_ptr(),
         exit: std::ptr::null(),
         next_insn: bpf
             .as_ptr()
@@ -179,6 +181,10 @@ pub(super) struct Frame {
     pub(super) text_section_host_to_vm: u64,
     /// The [`EbpfVm`].
     pub(super) vm: *mut u8,
+    /// [`EbpfVm::memory_mapping`], which is set once when the VM is created, for the memory
+    /// supports to pass to the host functions directly, rather than having those load it from the
+    /// [`EbpfVm`] first.
+    pub(super) memory: *mut MemoryMapping,
     /// See [`supporting_code::MemoryFunctions`].
     pub(super) memory_functions: *const u8,
     /// See [`supporting_code::call_dispatcher`].
