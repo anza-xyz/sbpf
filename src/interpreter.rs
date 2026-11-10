@@ -22,13 +22,10 @@ use crate::{
 
 /// Virtual memory operation helper.
 macro_rules! translate_memory_access {
-    (_impl, $self:ident, $C:ty, $first_op:ident, $second_op:ident, $vm_addr:ident, $T:ty, $($rest:expr),*) => {
-        match $self.vm.memory().$first_op::<$T>(
-            $($rest,)*
-            $vm_addr,
-        ) {
-            ProgramResult::Ok(v) => v,
-            ProgramResult::Err(_err) => {
+    (_impl, $self:ident, $C:ty, $fast:expr, $second_op:ident, $vm_addr:ident, $T:ty, $($rest:expr),*) => {
+        match $fast {
+            Some(v) => v,
+            None => {
                 let encrypted_vm = $self.vm.encrypted_host_address();
                 $self.vm.memory().$second_op::<$T, $C>(
                     $($rest,)*
@@ -48,12 +45,12 @@ macro_rules! translate_memory_access {
 
     // MemoryMapping::load()
     ($self:ident, $C:ty, load, $vm_addr:ident, $T:ty) => {
-        translate_memory_access!(_impl, $self, $C, load_first_attempt, load_second_attempt, $vm_addr, $T,)
+        translate_memory_access!(_impl, $self, $C, $self.vm.memory().load_first_attempt::<$T>($vm_addr), load_second_attempt, $vm_addr, $T,)
     };
 
     // MemoryMapping::store()
     ($self:ident, $C:ty, store, $value:expr, $vm_addr:ident, $T:ty) => {
-        translate_memory_access!(_impl, $self, $C, store_first_attempt, store_second_attempt, $vm_addr, $T, ($value) as $T);
+        translate_memory_access!(_impl, $self, $C, $self.vm.memory().store_first_attempt::<$T>(($value) as $T, $vm_addr).then_some(0), store_second_attempt, $vm_addr, $T, ($value) as $T);
     };
 }
 
