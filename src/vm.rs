@@ -202,6 +202,14 @@ pub trait ContextObject {
     /// Consume instructions from meter
     fn consume(&mut self, amount: u64);
     /// Get the number of remaining instructions allowed
+    ///
+    /// The returned value must never exceed [`MAX_INSTRUCTION_METER`], at the start of a call
+    /// or at any point during one. The VM packs the remaining budget and the program counter
+    /// into one register and advances them with wrapping arithmetic, so a larger value would
+    /// wrap and hand the program more instructions than it was given.
+    ///
+    /// [`EbpfVm::execute_program`] rejects a budget above the cap on entry, and a debug build
+    /// asserts the bound again after each syscall.
     fn get_remaining(&self) -> u64;
     /// Return a mutable pointer to the active MemoryMapping
     fn active_mapping_ptr(&mut self) -> ptr::NonNull<MemoryMapping>;
