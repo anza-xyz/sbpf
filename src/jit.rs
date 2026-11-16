@@ -1021,10 +1021,23 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
     /// For calls that return values in registers, the returned value is moved into `result_regs`.
     pub fn emit_rust_call(&mut self, target: Value, arguments: &[Argument], result_regs: &[X86Register]) {
         debug_assert!(result_regs.len() <= 2);
-        let saved_registers = CALLER_SAVED_REGISTERS;
+        let uses_stack_pointer = |value: &Value| match value {
+            Value::Register(reg)
+            | Value::RegisterIndirect(reg, _, _)
+            | Value::RegisterPlusConstant32(reg, _, _)
+            | Value::RegisterPlusConstant64(reg, _, _) => *reg == RSP,
+            Value::Constant64(_, _) => false,
+        };
+        // Stack-relative operands depend on the original spill layout.
+        let register_results = result_regs == [RAX, R11]
+            && !uses_stack_pointer(&target)
+            && !arguments.iter().any(|argument| uses_stack_pointer(&argument.value));
+        // Omitting the two result registers preserves call alignment.
+        let saved_registers = CALLER_SAVED_REGISTERS.iter()
+            .filter(|&&reg| !register_results || !matches!(reg, RAX | R11));
 
         // Save registers on stack
-        for reg in saved_registers.iter() {
+        for reg in saved_registers.clone() {
             self.emit_ins(X86Instruction::push(*reg, None));
         }
 
@@ -1119,14 +1132,20 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
                 if stack_arguments % 2 != 0 { stack_arguments + 1 } else { stack_arguments } * 8, None));
         }
 
-        // Overwrite saved registers with return values.
-        for (src, dst) in [RAX, RDX].iter().zip(result_regs) {
-            let position = saved_registers.iter().position(|x| x == dst).unwrap();
-            let offset = (saved_registers.len() - 1 - position) as i32 * 8;
-            self.emit_ins(X86Instruction::store(OperandSize::S64, *src, RSP, X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)));
+        if register_results {
+            // Keep RAX and move the loaded value before restoring guest RDX.
+            self.emit_ins(X86Instruction::mov(OperandSize::S64, RDX, R11));
+        } else {
+            // Overwrite saved registers with return values.
+            let saved_register_count = saved_registers.clone().count();
+            for (src, dst) in [RAX, RDX].iter().zip(result_regs) {
+                let position = saved_registers.clone().position(|x| x == dst).unwrap();
+                let offset = (saved_register_count - 1 - position) as i32 * 8;
+                self.emit_ins(X86Instruction::store(OperandSize::S64, *src, RSP, X86IndirectAccess::OffsetIndexShift(offset, RSP, 0)));
+            }
         }
 
-        for reg in saved_registers.iter().rev() {
+        for reg in saved_registers.rev() {
             self.emit_ins(X86Instruction::pop(*reg));
         }
     }
