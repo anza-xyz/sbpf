@@ -1113,9 +1113,11 @@ impl<'a, C: ContextObject> JitCompiler<'a, C> {
             }
         }
 
-        // Restore registers from stack
-        self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP,
-            if stack_arguments % 2 != 0 { stack_arguments + 1 } else { stack_arguments } * 8, None));
+        // Remove stack arguments and alignment padding.
+        if stack_arguments > 0 {
+            self.emit_ins(X86Instruction::alu_immediate(OperandSize::S64, 0x81, 0, RSP,
+                if stack_arguments % 2 != 0 { stack_arguments + 1 } else { stack_arguments } * 8, None));
+        }
 
         // Overwrite saved registers with return values.
         for (src, dst) in [RAX, RDX].iter().zip(result_regs) {
