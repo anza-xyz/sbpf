@@ -103,10 +103,15 @@ pub enum ExecutionMode {
     Interpreted,
     /// Execute the program in JIT mode.
     ///
-    /// The program must be JIT compiled.
+    /// The program must be JIT compiled, and runs with whichever JIT compiled it last: see
+    /// [`Executable::jit_compile`] and [`Executable::parrot_compile`].
     Jit,
     /// Allow JIT execution, if compiled. Otherwise fallback to interpreted.
     PreferJit,
+    /// Execute the program with the parrot interpreter.
+    ///
+    /// Falls back to `Interpreted` if parrot does not support the architecture or the SBPF version.
+    ParrotInterpreted,
 }
 
 /// VM configuration settings
@@ -127,7 +132,6 @@ pub struct Config {
     /// Make [`RequisiteVerifier`](crate::verifier::RequisiteVerifier) reject static syscalls
     /// (SBPFv3 and later) that are missing from the function registry
     pub reject_unregistered_static_syscalls: bool,
-    #[cfg(feature = "jit")]
     /// Ratio of native host instructions per random no-op in JIT (0 = OFF)
     pub noop_instruction_rate: u32,
     #[cfg(feature = "jit")]
@@ -160,7 +164,6 @@ impl Default for Config {
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,
             reject_unregistered_static_syscalls: false,
-            #[cfg(feature = "jit")]
             noop_instruction_rate: 256,
             #[cfg(feature = "jit")]
             sanitize_user_provided_values: true,
@@ -443,51 +446,56 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
         self.due_insn_count = 0;
         self.program_result = ProgramResult::Ok(0);
 
-        'execute: {
+        'execute: loop {
             match *mode {
-                ExecutionMode::Interpreted => {}
-
-                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
-                ExecutionMode::PreferJit => {
-                    if let Some(compiled_program) = executable.get_compiled_program() {
-                        *mode = ExecutionMode::Jit;
-                        break 'execute compiled_program.invoke(
-                            executable.get_config(),
-                            self,
-                            self.registers,
-                        );
-                    }
+                ExecutionMode::Interpreted => {
+                    let interpreter =
+                        Interpreter::new(self, executable, self.registers, call_frames);
+                    break 'execute run_interpreter(interpreter);
                 }
-                #[cfg(not(all(
-                    feature = "jit",
-                    not(target_os = "windows"),
-                    target_arch = "x86_64"
-                )))]
-                ExecutionMode::PreferJit => {}
 
-                #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+                ExecutionMode::PreferJit => {
+                    if executable.get_compiled_program().is_some() {
+                        *mode = ExecutionMode::Jit;
+                    } else {
+                        *mode = ExecutionMode::Interpreted;
+                    }
+                    continue 'execute;
+                }
+
                 ExecutionMode::Jit => {
                     let Some(compiled_program) = executable.get_compiled_program() else {
                         return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
                     };
-                    *mode = ExecutionMode::Jit;
-                    break 'execute compiled_program.invoke(
-                        executable.get_config(),
-                        self,
-                        self.registers,
-                    );
+                    #[cfg(target_arch = "x86_64")]
+                    if compiled_program.parrot {
+                        break 'execute compiled_program.parrot_invoke(executable, self);
+                    }
+                    cfg_select! {
+                        all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64") => {
+                            let registers = self.registers;
+                            compiled_program.invoke(executable.get_config(), self, registers);
+                            break 'execute;
+                        }
+                        _ => {
+                            let _ = compiled_program;
+                            return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
+                        }
+                    }
                 }
-                #[cfg(not(all(
-                    feature = "jit",
-                    not(target_os = "windows"),
-                    target_arch = "x86_64"
-                )))]
-                ExecutionMode::Jit => return (0, ProgramResult::Err(EbpfError::JitNotCompiled)),
-            }
 
-            *mode = ExecutionMode::Interpreted;
-            let interpreter = Interpreter::new(self, executable, self.registers, call_frames);
-            break 'execute run_interpreter(interpreter);
+                ExecutionMode::ParrotInterpreted => {
+                    #[cfg(target_arch = "x86_64")]
+                    if !matches!(
+                        executable.get_sbpf_version(),
+                        SBPFVersion::V1 | SBPFVersion::V2
+                    ) {
+                        crate::codegen::interpret(executable, self);
+                        break 'execute;
+                    }
+                    *mode = ExecutionMode::Interpreted;
+                }
+            }
         }
 
         let due_insn_count = self.due_insn_count;
