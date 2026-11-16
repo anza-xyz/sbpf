@@ -384,6 +384,16 @@ impl MemoryRegion {
         let begin_offset = vm_addr.saturating_sub(self.vm_addr);
         if self.vm_gap_shift == 63 {
             // fast path for non-gapped regions
+            // On 64-bit hosts, the byte bound also proves that adding one cannot overflow.
+            // Keep the existing u64 arithmetic and usize casts on narrower hosts.
+            if cfg!(target_pointer_width = "64") && len == 1 {
+                return if begin_offset < self.host.len() as u64 {
+                    self.host
+                        .get(begin_offset as usize..begin_offset.saturating_add(1) as usize)
+                } else {
+                    None
+                };
+            }
             if let Some(end_offset) = begin_offset.checked_add(len) {
                 return self.host.get(begin_offset as usize..end_offset as usize);
             }
@@ -398,6 +408,14 @@ impl MemoryRegion {
         let gap_mask = (-1i64).checked_shl(self.vm_gap_shift as u32).unwrap_or(0) as u64;
         let gapped_offset =
             (begin_offset & gap_mask).checked_shr(1).unwrap_or(0) | (begin_offset & !gap_mask);
+        if cfg!(target_pointer_width = "64") && len == 1 {
+            return if !is_in_gap && gapped_offset < self.host.len() as u64 {
+                self.host
+                    .get(gapped_offset as usize..gapped_offset.saturating_add(1) as usize)
+            } else {
+                None
+            };
+        }
         if let Some(end_offset) = gapped_offset.checked_add(len) {
             if !is_in_gap {
                 return self.host.get(gapped_offset as usize..end_offset as usize);
@@ -1256,6 +1274,46 @@ mod test {
     }
 
     #[test]
+    fn test_region_byte_bounds() {
+        let mem = [0u8; 8];
+        // Check byte bounds in both contiguous and gapped regions. The first and last
+        // bytes are readable, and an empty range at the end is valid. Out-of-bounds
+        // and overflowing ranges must be rejected.
+        for (region, last_byte, end) in [
+            (MemoryRegion::new(&raw const mem[..], 0), 7, 8),
+            (MemoryRegion::new_gapped(&raw const mem[..], 0, 2), 13, 16),
+        ] {
+            assert_eq!(
+                region.vm_to_host_buffer(0, 1),
+                Some(HostBuffer::Immutable(&raw const mem[..1]))
+            );
+            assert_eq!(
+                region.vm_to_host_buffer(last_byte, 1),
+                Some(HostBuffer::Immutable(&raw const mem[7..]))
+            );
+            assert_eq!(region.vm_to_host_buffer(end, 1), None);
+            assert!(region.vm_to_host_buffer(end, 0).unwrap().is_empty());
+            assert_eq!(region.vm_to_host_buffer(last_byte, 2), None);
+            assert_eq!(region.vm_to_host_buffer(u64::MAX, 1), None);
+            assert_eq!(region.vm_to_host_buffer(u64::MAX - 1, 1), None);
+            assert_eq!(region.vm_to_host_buffer(1, u64::MAX), None);
+        }
+
+        // An empty region permits a zero-length access at its start, but no byte read.
+        let empty = MemoryRegion::new_empty(0);
+        assert_eq!(empty.vm_to_host_buffer(0, 1), None);
+        assert!(empty.vm_to_host_buffer(0, 0).unwrap().is_empty());
+
+        // The region-relative offset, rather than the VM address, must fit.
+        let region = MemoryRegion::new(&raw const mem[..], u64::MAX - 7);
+        assert_eq!(
+            region.vm_to_host_buffer(u64::MAX, 1),
+            Some(HostBuffer::Immutable(&raw const mem[7..]))
+        );
+        assert_eq!(region.vm_to_host_buffer(u64::MAX - 8, 1), None);
+    }
+
+    #[test]
     fn test_gapped_map() {
         for aligned_memory_mapping in [false, true] {
             let config = Config {
@@ -1282,8 +1340,12 @@ mod test {
                 assert_error!(m.map(AccessType::Load, address + 2, 2), "AccessViolation");
                 assert_eq!(m.load_first_attempt::<u16>(address).unwrap(), 0xFFFF);
                 assert_eq!(m.load_first_attempt::<u16>(address + 2), None);
+                assert_eq!(m.load_first_attempt::<u8>(address + 1), Some(0xFF));
+                assert_eq!(m.load_first_attempt::<u8>(address + 2), None);
                 assert!(m.store_first_attempt::<u16>(0xFFFF, address));
                 assert!(!m.store_first_attempt::<u16>(0xFFFF, address + 2));
+                assert!(m.store_first_attempt::<u8>(0xFF, address + 1));
+                assert!(!m.store_first_attempt::<u8>(0xFF, address + 2));
             }
         }
     }
