@@ -390,18 +390,17 @@ impl MemoryRegion {
             return None;
         }
 
-        let is_in_gap = (begin_offset
-            .checked_shr(self.vm_gap_shift as u32)
-            .unwrap_or(0)
-            & 1)
-            == 1;
-        let gap_mask = (-1i64).checked_shl(self.vm_gap_shift as u32).unwrap_or(0) as u64;
-        let gapped_offset =
-            (begin_offset & gap_mask).checked_shr(1).unwrap_or(0) | (begin_offset & !gap_mask);
+        // new_internal keeps the shift in 0..=63; the contiguous case is handled above.
+        let shift = self.vm_gap_shift as u32;
+        if begin_offset.wrapping_shr(shift) & 1 != 0 {
+            return None;
+        }
+        let gap_mask = u64::MAX.wrapping_shl(shift);
+        // With the gap bit clear, offset = 2 * frame * gap_size + within_frame.
+        // Subtract frame * gap_size to remove the preceding gaps without underflow.
+        let gapped_offset = begin_offset.wrapping_sub((begin_offset >> 1) & gap_mask);
         if let Some(end_offset) = gapped_offset.checked_add(len) {
-            if !is_in_gap {
-                return self.host.get(gapped_offset as usize..end_offset as usize);
-            }
+            return self.host.get(gapped_offset as usize..end_offset as usize);
         }
         None
     }
@@ -1181,6 +1180,52 @@ mod test {
     use std::{cell::RefCell, rc::Rc};
 
     use super::*;
+
+    #[test]
+    fn test_gapped_translation_at_every_shift() {
+        let mut bytes = [0u8; 64];
+        for shift in 0..63 {
+            let gap_size = 1u64 << shift;
+            for start in [0, 17, u64::MAX - 128] {
+                for readonly in [false, true] {
+                    let mut region = MemoryRegion::new_gapped(&raw mut bytes[..], start, gap_size);
+                    if readonly {
+                        region.make_immutable();
+                    }
+                    // Construct guest addresses from host offsets using frame division.
+                    // Accesses starting in a frame can span its end under the existing API.
+                    for host_offset in 0..=bytes.len() as u64 {
+                        let frame = host_offset / gap_size;
+                        let guest_offset = 2 * frame * gap_size + host_offset % gap_size;
+                        let Some(address) = start.checked_add(guest_offset) else {
+                            continue;
+                        };
+                        for len in [0, 1, 2, 4, 8, 64, 65, u64::MAX] {
+                            let buffer = region.vm_to_host_buffer(address, len);
+                            if len <= bytes.len() as u64 - host_offset {
+                                let buffer = buffer.unwrap();
+                                assert_eq!(
+                                    buffer.ptr().addr(),
+                                    bytes.as_ptr().addr() + host_offset as usize
+                                );
+                                assert_eq!(buffer.len(), len as usize);
+                                assert_eq!(buffer.is_mutable(), !readonly);
+                            } else {
+                                assert!(buffer.is_none());
+                            }
+                            // The corresponding gap must reject even zero-length requests.
+                            if let Some(gap_address) = start.checked_add(guest_offset | gap_size) {
+                                assert!(region.vm_to_host_buffer(gap_address, len).is_none());
+                            }
+                        }
+                    }
+                    if start > 0 {
+                        assert!(region.vm_to_host_buffer(start - 1, 1).is_none());
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn test_mapping_cache() {
