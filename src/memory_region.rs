@@ -538,41 +538,54 @@ impl UnalignedMemoryMapping {
     }
 
     /// Returns the `MemoryRegion` which may contain the given address.
-    #[allow(clippy::arithmetic_side_effects)]
     #[inline(always)]
     pub fn find_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
-        // Safety:
-        // &mut references to the mapping cache are only created internally from methods that do not
-        // invoke each other. UnalignedMemoryMapping is !Sync, so the cache reference below is
-        // guaranteed to be unique.
-        let cache = unsafe { &mut *self.cache.get() };
-        if let Some(index) = cache.find(vm_addr) {
-            // Safety:
-            // Cached index, we validated it before caching it. See the corresponding safety section
-            // in the miss branch.
-            Some((index, unsafe { self.regions.get_unchecked(index) }))
-        } else {
-            let mut index = 1;
-            while index <= self.region_addresses.len() {
-                // Safety:
-                // we start the search at index=1 and in the loop condition check
-                // for index <= len, so bound checks can be avoided
-                index = (index << 1)
-                    + unsafe { *self.region_addresses.get_unchecked(index - 1) <= vm_addr }
-                        as usize;
-            }
-            index >>= index.trailing_zeros() + 1;
-            if index == 0 {
-                return None;
-            }
-            // Safety:
-            // we check for index==0 above, and by construction if we get here index
-            // must be contained in region
-            index = unsafe { *self.region_index_lookup.get_unchecked(index - 1) };
-            let region = unsafe { self.regions.get_unchecked(index) };
-            cache.insert(region.vm_addr_range(), index);
-            Some((index, region))
+        match self.find_cached_region(vm_addr) {
+            Some(found) => Some(found),
+            None => self.search_region(vm_addr),
         }
+    }
+
+    /// Returns the `MemoryRegion` which may contain the given address, if it is cached.
+    #[inline(always)]
+    fn find_cached_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
+        // Safety:
+        // References to the mapping cache are only created here and in `search_region`, and do
+        // not outlive these methods. UnalignedMemoryMapping is !Sync, so the &mut reference in
+        // `search_region` is guaranteed to be unique.
+        let cache = unsafe { &*self.cache.get() };
+        let index = cache.find(vm_addr)?;
+        // Safety:
+        // Cached index, we validated it before caching it. See the corresponding safety section
+        // in `search_region`.
+        Some((index, unsafe { self.regions.get_unchecked(index) }))
+    }
+
+    /// Searches the `MemoryRegion` which may contain the given address and caches it.
+    #[allow(clippy::arithmetic_side_effects)]
+    #[inline(always)]
+    fn search_region(&self, vm_addr: u64) -> Option<(usize, &MemoryRegion)> {
+        let mut index = 1;
+        while index <= self.region_addresses.len() {
+            // Safety:
+            // we start the search at index=1 and in the loop condition check
+            // for index <= len, so bound checks can be avoided
+            index = (index << 1)
+                + unsafe { *self.region_addresses.get_unchecked(index - 1) <= vm_addr } as usize;
+        }
+        index >>= index.trailing_zeros() + 1;
+        if index == 0 {
+            return None;
+        }
+        // Safety:
+        // we check for index==0 above, and by construction if we get here index
+        // must be contained in region
+        index = unsafe { *self.region_index_lookup.get_unchecked(index - 1) };
+        let region = unsafe { self.regions.get_unchecked(index) };
+        // Safety: see `find_cached_region`.
+        let cache = unsafe { &mut *self.cache.get() };
+        cache.insert(region.vm_addr_range(), index);
+        Some((index, region))
     }
 
     /// Replaces the `MemoryRegion` at the given index
@@ -698,8 +711,50 @@ impl AlignedMemoryMapping {
     }
 }
 
+/// First attempt entry points of one mapping type, called by the JIT through the mapping.
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+struct FirstAttemptEntryPoints {
+    load: [fn(&mut MemoryMapping, u64) -> Option<u64>; 4],
+    store: [fn(&mut MemoryMapping, u64, u64) -> bool; 4],
+}
+
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+impl FirstAttemptEntryPoints {
+    const ALIGNED: Self = Self {
+        load: [
+            MemoryMapping::load_first_attempt_aligned::<u8>,
+            MemoryMapping::load_first_attempt_aligned::<u16>,
+            MemoryMapping::load_first_attempt_aligned::<u32>,
+            MemoryMapping::load_first_attempt_aligned::<u64>,
+        ],
+        store: [
+            MemoryMapping::store_first_attempt_aligned::<u8>,
+            MemoryMapping::store_first_attempt_aligned::<u16>,
+            MemoryMapping::store_first_attempt_aligned::<u32>,
+            MemoryMapping::store_first_attempt_aligned::<u64>,
+        ],
+    };
+    const UNALIGNED: Self = Self {
+        load: [
+            MemoryMapping::load_first_attempt_unaligned::<u8>,
+            MemoryMapping::load_first_attempt_unaligned::<u16>,
+            MemoryMapping::load_first_attempt_unaligned::<u32>,
+            MemoryMapping::load_first_attempt_unaligned::<u64>,
+        ],
+        store: [
+            MemoryMapping::store_first_attempt_unaligned::<u8>,
+            MemoryMapping::store_first_attempt_unaligned::<u16>,
+            MemoryMapping::store_first_attempt_unaligned::<u32>,
+            MemoryMapping::store_first_attempt_unaligned::<u64>,
+        ],
+    };
+}
+
 /// Common parts of [UnalignedMemoryMapping] and [AlignedMemoryMapping]
 pub struct MemoryMapping {
+    /// Entry points matching `ty`
+    #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+    first_attempt_entry_points: FirstAttemptEntryPoints,
     /// Access violation handler
     access_violation_handler: AccessViolationHandler,
     max_call_depth: i64,
@@ -785,6 +840,11 @@ impl MemoryMapping {
         };
 
         Self {
+            #[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+            first_attempt_entry_points: match &ty {
+                MemoryMappingType::Aligned(_) => FirstAttemptEntryPoints::ALIGNED,
+                MemoryMappingType::Unaligned(_) => FirstAttemptEntryPoints::UNALIGNED,
+            },
             access_violation_handler: Box::new(access_violation_handler),
             max_call_depth: config.max_call_depth as i64,
             stack_frame_size: config.stack_frame_size as i64,
@@ -1041,6 +1101,147 @@ impl MemoryMapping {
             };
             EbpfError::AccessViolation(access_type, vm_addr, len, region_name)
         }
+    }
+}
+
+/// Entry points of first attempts, which JIT compiled code calls through the mapping.
+#[cfg(all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64"))]
+impl MemoryMapping {
+    /// Offset of the first attempt entry point of loads (`store == false`) or stores of
+    /// `1 << len_shift` bytes, relative to the mapping.
+    #[allow(clippy::arithmetic_side_effects)]
+    pub(crate) const fn first_attempt_entry_point_offset(store: bool, len_shift: usize) -> usize {
+        assert!(len_shift < 4);
+        let entry_points = if store {
+            mem::offset_of!(MemoryMapping, first_attempt_entry_points.store)
+        } else {
+            mem::offset_of!(MemoryMapping, first_attempt_entry_points.load)
+        };
+        entry_points + len_shift * mem::size_of::<usize>()
+    }
+
+    /// [`Self::load_first_attempt`] for an [AlignedMemoryMapping].
+    fn load_first_attempt_aligned<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> Option<u64> {
+        let len = mem::size_of::<T>() as u64;
+        self.first_attempt_aligned(AccessType::Load, vm_addr, len, |buf| {
+            unsafe { ptr::read_unaligned::<T>(buf.ptr().cast()) }.into()
+        })
+    }
+
+    /// [`Self::load_first_attempt`] for an [UnalignedMemoryMapping].
+    fn load_first_attempt_unaligned<T: Pod + Into<u64>>(&mut self, vm_addr: u64) -> Option<u64> {
+        let len = mem::size_of::<T>() as u64;
+        self.first_attempt_unaligned(AccessType::Load, vm_addr, len, |buf| {
+            unsafe { ptr::read_unaligned::<T>(buf.ptr().cast()) }.into()
+        })
+    }
+
+    /// [`Self::store_first_attempt`] of `value as T` for an [AlignedMemoryMapping].
+    fn store_first_attempt_aligned<T: Pod>(&mut self, value: u64, vm_addr: u64) -> bool {
+        let len = mem::size_of::<T>() as u64;
+        self.first_attempt_aligned(AccessType::Store, vm_addr, len, move |buf| {
+            Self::store_low_bytes::<T>(buf, value)
+        })
+        .is_some()
+    }
+
+    /// [`Self::store_first_attempt`] of `value as T` for an [UnalignedMemoryMapping].
+    fn store_first_attempt_unaligned<T: Pod>(&mut self, value: u64, vm_addr: u64) -> bool {
+        let len = mem::size_of::<T>() as u64;
+        self.first_attempt_unaligned(AccessType::Store, vm_addr, len, move |buf| {
+            Self::store_low_bytes::<T>(buf, value)
+        })
+        .is_some()
+    }
+
+    #[inline(always)]
+    fn store_low_bytes<T: Pod>(buf: HostBuffer, value: u64) {
+        unsafe {
+            ptr::copy_nonoverlapping(
+                value.to_le_bytes().as_ptr(),
+                buf.ptr_mut().cast::<u8>(),
+                mem::size_of::<T>(),
+            )
+        }
+    }
+
+    /// The entry points are selected from the mapping type on construction, so this is not
+    /// reached. It keeps a mismatch correct instead of relying on that.
+    #[cold]
+    #[inline(never)]
+    fn first_attempt_mismatch<R>(
+        &self,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+        access: impl FnOnce(HostBuffer) -> R,
+    ) -> Option<R> {
+        self.map_fast(access_type, vm_addr, len).map(access)
+    }
+
+    #[inline(always)]
+    fn first_attempt_aligned<R>(
+        &self,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+        access: impl FnOnce(HostBuffer) -> R,
+    ) -> Option<R> {
+        debug_assert!(self.initialized);
+        let MemoryMappingType::Aligned(mapping) = &self.ty else {
+            return self.first_attempt_mismatch(access_type, vm_addr, len, access);
+        };
+        let (_index, region) = mapping.find_region(vm_addr)?;
+        Self::access_region(region, access_type, vm_addr, len, access)
+    }
+
+    /// Cache misses are kept out of line.
+    #[inline(always)]
+    fn first_attempt_unaligned<R>(
+        &self,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+        access: impl FnOnce(HostBuffer) -> R,
+    ) -> Option<R> {
+        debug_assert!(self.initialized);
+        let MemoryMappingType::Unaligned(mapping) = &self.ty else {
+            return self.first_attempt_mismatch(access_type, vm_addr, len, access);
+        };
+        match mapping.find_cached_region(vm_addr) {
+            Some((_index, region)) => {
+                Self::access_region(region, access_type, vm_addr, len, access)
+            }
+            None => Self::first_attempt_unaligned_miss(mapping, access_type, vm_addr, len, access),
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn first_attempt_unaligned_miss<R>(
+        mapping: &UnalignedMemoryMapping,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+        access: impl FnOnce(HostBuffer) -> R,
+    ) -> Option<R> {
+        let (_index, region) = mapping.search_region(vm_addr)?;
+        Self::access_region(region, access_type, vm_addr, len, access)
+    }
+
+    /// Checks the permission, translates into `region` and performs `access`.
+    #[inline(always)]
+    fn access_region<R>(
+        region: &MemoryRegion,
+        access_type: AccessType,
+        vm_addr: u64,
+        len: u64,
+        access: impl FnOnce(HostBuffer) -> R,
+    ) -> Option<R> {
+        if access_type == AccessType::Store && !region.host.is_mutable() {
+            return None;
+        }
+        region.vm_to_host_buffer(vm_addr, len).map(access)
     }
 }
 
