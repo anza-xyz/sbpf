@@ -229,20 +229,40 @@ impl BpfRelocationType {
     }
 }
 
-/// ELF section
+/// Storage for the read-only section, including text.
 #[derive(Debug, PartialEq)]
-pub enum Section {
+pub enum RoStorage {
     /// Owned section data.
-    ///
-    /// The first field is virtual address of the section.
-    /// The second field is the actual section data.
-    Owned(usize, Vec<u8>),
+    Owned {
+        /// Virtual address of the section.
+        vaddr: usize,
+        /// Section data.
+        data: Vec<u8>,
+    },
     /// Borrowed section data.
-    ///
-    /// The first field is virtual address of the section.
-    /// The second field can be used to index the input ELF buffer to
-    /// retrieve the section data.
-    Borrowed(usize, Range<usize>),
+    Borrowed {
+        /// Virtual address of the section.
+        vaddr: usize,
+        /// The ELF buffer the section data is borrowed from.
+        elf: AlignedMemory<{ HOST_ALIGN }>,
+        /// Range of the section data in `elf`.
+        range: Range<usize>,
+    },
+}
+
+impl RoStorage {
+    fn vaddr(&self) -> usize {
+        match self {
+            Self::Owned { vaddr, .. } | Self::Borrowed { vaddr, .. } => *vaddr,
+        }
+    }
+
+    fn bytes(&self) -> &[u8] {
+        match self {
+            Self::Owned { data, .. } => data.as_slice(),
+            Self::Borrowed { elf, range, .. } => &elf.as_slice()[range.clone()],
+        }
+    }
 }
 
 /// Builds an owned read-only section buffer from the supplied section data.
@@ -286,15 +306,13 @@ fn build_owned_ro_section<'a>(
 /// Elf loader/relocator
 #[derive(Debug)]
 pub struct Executable<C: ContextObject> {
-    /// Loaded and executable elf
-    elf_bytes: AlignedMemory<{ HOST_ALIGN }>,
     /// Required SBPF capabilities
     sbpf_version: SBPFVersion,
     /// Read-only section
-    ro_section: Section,
+    ro_storage: RoStorage,
     /// Text section virtual address
     text_section_vaddr: u64,
-    /// Text section range in `elf_bytes`
+    /// Text section range in the ELF file
     text_section_range: Range<usize>,
     /// Address of the entry point
     entry_pc: usize,
@@ -308,9 +326,8 @@ pub struct Executable<C: ContextObject> {
 
 impl<C: PartialEq + ContextObject> PartialEq for Executable<C> {
     fn eq(&self, other: &Self) -> bool {
-        self.elf_bytes == other.elf_bytes
-            && self.sbpf_version == other.sbpf_version
-            && self.ro_section == other.ro_section
+        self.sbpf_version == other.sbpf_version
+            && self.ro_storage == other.ro_storage
             && self.text_section_vaddr == other.text_section_vaddr
             && self.text_section_range == other.text_section_range
             && self.entry_pc == other.entry_pc
@@ -344,14 +361,14 @@ impl<C: ContextObject> Executable<C> {
     #[allow(clippy::arithmetic_side_effects)]
     pub fn get_text_bytes(&self) -> (u64, &[u8]) {
         let text_len = self.text_section_range.len();
-        let text_bytes = match &self.ro_section {
-            // Use the owned data (not elf_bytes) to ensure the text section
+        let text_bytes = match &self.ro_storage {
+            // Use the owned data to ensure the text section
             // is consistent with the ro_section if the sections overlap.
-            Section::Owned(offset, data) => {
-                let text_offset = self.text_section_vaddr as usize - offset;
+            RoStorage::Owned { vaddr, data } => {
+                let text_offset = self.text_section_vaddr as usize - vaddr;
                 &data[text_offset..text_offset + text_len]
             }
-            Section::Borrowed(_, _) => &self.elf_bytes.as_slice()[self.text_section_range.clone()],
+            RoStorage::Borrowed { elf, .. } => &elf.as_slice()[self.text_section_range.clone()],
         };
 
         (self.text_section_vaddr, text_bytes)
@@ -359,17 +376,12 @@ impl<C: ContextObject> Executable<C> {
 
     /// Get the concatenated read-only sections (including the text section)
     pub fn get_ro_section(&self) -> &[u8] {
-        match &self.ro_section {
-            Section::Owned(_offset, data) => data.as_slice(),
-            Section::Borrowed(_offset, byte_range) => {
-                &self.elf_bytes.as_slice()[byte_range.clone()]
-            }
-        }
+        self.ro_storage.bytes()
     }
 
     /// Get a memory region that can be used to access the merged readonly section
     pub fn get_ro_region(&self) -> MemoryRegion {
-        get_ro_region(&self.ro_section, self.elf_bytes.as_slice())
+        get_ro_region(&self.ro_storage)
     }
 
     /// Get the entry point offset into the text section
@@ -455,16 +467,16 @@ impl<C: ContextObject> Executable<C> {
             0
         };
         Ok(Self {
-            elf_bytes,
             sbpf_version,
-            ro_section: Section::Borrowed(
-                if sbpf_version.enable_lower_rodata_vaddr() {
+            ro_storage: RoStorage::Borrowed {
+                vaddr: if sbpf_version.enable_lower_rodata_vaddr() {
                     ebpf::MM_RODATA_START
                 } else {
                     ebpf::MM_BYTECODE_START
                 } as usize,
-                0..text_bytes.len(),
-            ),
+                elf: elf_bytes,
+                range: 0..text_bytes.len(),
+            },
             text_section_vaddr: ebpf::MM_BYTECODE_START,
             text_section_range: 0..text_bytes.len(),
             entry_pc,
@@ -580,7 +592,6 @@ impl<C: ContextObject> Executable<C> {
                 &program_header_table[1],
             )
         };
-        let ro_section = Section::Borrowed(ebpf::MM_RODATA_START as usize, ro_section_range);
         let text_section_vaddr = bytecode_header.p_vaddr;
         let text_section_range = bytecode_header.file_range().unwrap_or_default();
 
@@ -617,9 +628,12 @@ impl<C: ContextObject> Executable<C> {
         };
 
         Ok(Self {
-            elf_bytes: aligned_memory,
             sbpf_version: SBPFVersion::Reserved, // Is set in Self::load()
-            ro_section,
+            ro_storage: RoStorage::Borrowed {
+                vaddr: ebpf::MM_RODATA_START as usize,
+                elf: aligned_memory,
+                range: ro_section_range,
+            },
             text_section_vaddr,
             text_section_range,
             entry_pc,
@@ -767,17 +781,14 @@ impl<C: ContextObject> Executable<C> {
             return Err(ElfError::InvalidEntrypoint);
         };
 
-        let ro_section = Self::parse_ro_sections(
+        let ro_storage = Self::parse_ro_sections(
             config,
             elf.section_header_table()
                 .iter()
                 .map(|s| (elf.section_name(s.sh_name).ok(), s)),
-            elf_bytes.as_slice(),
+            elf_bytes,
         )?;
-        let ro_section_vaddr = match &ro_section {
-            Section::Owned(offset, _data) => *offset,
-            Section::Borrowed(offset, _byte_range) => *offset,
-        } as u64;
+        let ro_section_vaddr = ro_storage.vaddr() as u64;
         if config.optimize_rodata {
             let ro_section_index = ro_section_vaddr
                 .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
@@ -790,9 +801,8 @@ impl<C: ContextObject> Executable<C> {
         }
 
         Ok(Self {
-            elf_bytes,
             sbpf_version: SBPFVersion::Reserved, // Is set in Self::load()
-            ro_section,
+            ro_storage,
             text_section_vaddr,
             text_section_range: text_section.file_range().unwrap_or_default(),
             entry_pc,
@@ -808,12 +818,10 @@ impl<C: ContextObject> Executable<C> {
     pub fn mem_size(&self) -> usize {
         let mut total = mem::size_of::<Self>();
         total = total
-            // elf bytes
-            .saturating_add(self.elf_bytes.mem_size())
             // ro section
-            .saturating_add(match &self.ro_section {
-                Section::Owned(_, data) => data.capacity(),
-                Section::Borrowed(_, _) => 0,
+            .saturating_add(match &self.ro_storage {
+                RoStorage::Owned { data, .. } => data.capacity(),
+                RoStorage::Borrowed { elf, .. } => elf.mem_size(),
             })
             // bpf functions
             .saturating_add(self.function_registry.mem_size());
@@ -896,8 +904,8 @@ impl<C: ContextObject> Executable<C> {
     pub fn parse_ro_sections<'a, S: IntoIterator<Item = (Option<&'a [u8]>, &'a Elf64Shdr)>>(
         config: &Config,
         sections: S,
-        elf_bytes: &[u8],
-    ) -> Result<Section, ElfError> {
+        elf_bytes: AlignedMemory<{ HOST_ALIGN }>,
+    ) -> Result<RoStorage, ElfError> {
         // the lowest section address
         let mut lowest_addr = usize::MAX;
         // the highest section address
@@ -943,6 +951,7 @@ impl<C: ContextObject> Executable<C> {
             }
 
             let section_data = elf_bytes
+                .as_slice()
                 .get(section_header.file_range().unwrap_or_default())
                 .ok_or(ElfError::ValueOutOfBounds)?;
 
@@ -972,7 +981,7 @@ impl<C: ContextObject> Executable<C> {
             // sections. We can borrow.
 
             let addr_offset = if lowest_addr >= ebpf::MM_REGION_SIZE as usize {
-                // The first field of Section::Borrowed is an offset from
+                // The vaddr of RoStorage::Borrowed is an offset from
                 // ebpf::MM_REGION_SIZE * 1 so if the linker has already put the
                 // sections within ebpf::MM_REGION_SIZE * 1, we need to subtract
                 // it now.
@@ -981,7 +990,11 @@ impl<C: ContextObject> Executable<C> {
                 lowest_addr.saturating_add(ebpf::MM_REGION_SIZE as usize)
             };
 
-            Section::Borrowed(addr_offset, lowest_addr..highest_addr)
+            RoStorage::Borrowed {
+                vaddr: addr_offset,
+                elf: elf_bytes,
+                range: lowest_addr..highest_addr,
+            }
         } else {
             // Read only and other non-ro sections are mixed. Zero the non-ro
             // sections and and copy the ro ones at their intended offsets.
@@ -1011,7 +1024,10 @@ impl<C: ContextObject> Executable<C> {
             } else {
                 lowest_addr.saturating_add(ebpf::MM_REGION_SIZE as usize)
             };
-            Section::Owned(addr_offset, ro_section)
+            RoStorage::Owned {
+                vaddr: addr_offset,
+                data: ro_section,
+            }
         };
 
         Ok(ro_section)
@@ -1322,12 +1338,10 @@ pub fn get_sbpf_version(elf_bytes: &[u8]) -> Result<SBPFVersion, ElfParserError>
     })
 }
 
-/// Creates a [MemoryRegion] for the given [Section]
-pub fn get_ro_region(ro_section: &Section, elf: &[u8]) -> MemoryRegion {
-    let (offset, ro_data) = match ro_section {
-        Section::Owned(offset, data) => (*offset, data.as_slice()),
-        Section::Borrowed(offset, byte_range) => (*offset, &elf[byte_range.clone()]),
-    };
+/// Creates a [MemoryRegion] for the given [RoStorage]
+pub fn get_ro_region(ro_storage: &RoStorage) -> MemoryRegion {
+    let offset = ro_storage.vaddr();
+    let ro_data = ro_storage.bytes();
 
     // If offset > 0, the region will start at ebpf::MM_REGION_SIZE * 1 + the offset of
     // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
