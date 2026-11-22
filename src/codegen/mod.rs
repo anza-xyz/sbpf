@@ -24,6 +24,10 @@ cfg_select! {
         mod aarch64;
         use aarch64 as arch;
     }
+    target_arch = "riscv64" => {
+        mod riscv64;
+        use riscv64 as arch;
+    }
 }
 
 pub use generate::jit_templates;
@@ -103,8 +107,18 @@ fn finish_execution<C: ContextObject>(
     }
 }
 
+/// Whether Parrot can execute this version on the current host.
+pub const fn supports_version(version: SBPFVersion) -> bool {
+    crate::memory_management::CAN_PUBLISH_CODE
+        && matches!(version, SBPFVersion::V0 | SBPFVersion::V3 | SBPFVersion::V4)
+}
+
 /// Interpret `executable`, starting at `vm.registers[11]`.
 pub fn interpret<C: ContextObject>(executable: &Executable<C>, vm: &mut EbpfVm<C>) {
+    if !supports_version(executable.get_sbpf_version()) {
+        vm.program_result = ProgramResult::Err(EbpfError::JitNotCompiled);
+        return;
+    }
     arch::enter(executable, None, vm)
 }
 
@@ -123,7 +137,8 @@ impl<C: ContextObject> Executable<C> {
     ///
     /// The result is stored (and can be retrieved, executed and taken) exactly like the output of
     /// [`Self::jit_compile`]. sBPF versions that parrot does not support are compiled with
-    /// `jit_compile` instead, if it is available.
+    /// `jit_compile` instead, if it is available. If neither backend is available
+    /// on this host, the executable has no compiled program.
     pub fn parrot_compile(&self) -> Result<(), EbpfError> {
         let version = self.get_sbpf_version();
         if matches!(version, SBPFVersion::V1 | SBPFVersion::V2) {
@@ -133,6 +148,9 @@ impl<C: ContextObject> Executable<C> {
                 }
                 _ => Ok(()),
             };
+        }
+        if !supports_version(version) {
+            return Ok(());
         }
         let compiled = std::sync::Arc::new(jit_templates(version).compile(self)?);
         let mut guard = self

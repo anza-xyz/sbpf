@@ -6,7 +6,11 @@
 
 extern crate solana_sbpf;
 
-#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+#[cfg(any(
+    target_arch = "x86_64",
+    target_arch = "aarch64",
+    target_arch = "riscv64"
+))]
 mod parrot {
     use criterion::{criterion_group, Criterion, Throughput};
     use solana_sbpf::{
@@ -194,6 +198,6 @@ mod parrot {
 }
 
 cfg_select! {
-    any(target_arch = "x86_64", target_arch = "aarch64") => { criterion::criterion_main!(parrot::benches); }
+    any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64") => { criterion::criterion_main!(parrot::benches); }
     _ => { fn main() {} }
 }

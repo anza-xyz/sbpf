@@ -129,6 +129,10 @@ fn main() {
     if let ExecutionMode::Jit | ExecutionMode::PreferJit = mode {
         executable.jit_compile().unwrap();
     }
+    #[cfg(target_arch = "riscv64")]
+    if let ExecutionMode::Jit | ExecutionMode::PreferJit = mode {
+        executable.parrot_compile().unwrap();
+    }
     let mut context_object = TestContextObject::new(
         matches
             .value_of("instruction limit")

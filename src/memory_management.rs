@@ -32,6 +32,16 @@ use {
     },
 };
 
+/// On RV64 publishing executable code requires a process-wide instruction-cache
+/// synchronization mechanism. Other RV64 hosts can still run the Rust interpreter.
+pub(crate) const CAN_PUBLISH_CODE: bool = cfg!(any(
+    not(target_arch = "riscv64"),
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd",
+    target_os = "openbsd"
+));
+
 /// A free list for managing memory allocations of a fixed size.
 struct FreeList {
     /// Pool of free blocks awaiting reuse.
@@ -395,7 +405,7 @@ impl<A> Mapping<A> {
             // until it is dropped. Dropping the last part makes all pages read-write before they
             // are reused.
             unsafe { protect_pages(self.ptr.as_ptr(), self.len, B::PERMISSIONS) };
-            if matches!(B::PERMISSIONS, PagePermissions::ReadExecute) {
+            if CAN_PUBLISH_CODE && matches!(B::PERMISSIONS, PagePermissions::ReadExecute) {
                 // SAFETY:
                 //
                 // Contract from `invalidate_icache`: The bytes must be readable.
@@ -684,7 +694,22 @@ unsafe fn protect_pages(raw: *mut u8, size_in_bytes: usize, permissions: PagePer
 /// - The bytes must be readable.
 unsafe fn invalidate_icache(ptr: *const u8, len: usize) {
     cfg_select! {
-        not(target_arch = "aarch64") => {
+        all(target_arch = "riscv64", target_os = "linux") => {
+            unsafe extern "C" {
+                fn __riscv_flush_icache(start: *const u8, end: *const u8, flags: libc::c_ulong) -> libc::c_int;
+            }
+            // A published mapping may be executed by another thread or after migration
+            // to another hart. Zero flags request synchronization for the entire process.
+            // SAFETY: The caller owns a readable mapping of these bytes.
+            let result = unsafe { __riscv_flush_icache(ptr, ptr.wrapping_add(len), 0) };
+            assert_eq!(result, 0, "failed to synchronize the RISC-V instruction cache");
+        }
+        all(target_arch = "riscv64", target_os = "freebsd") => {
+            // FreeBSD's pmap synchronizes the instruction cache on all harts when
+            // granting execute permission. protect_pages has already done that.
+            let _ = (ptr, len);
+        }
+        not(any(target_arch = "aarch64", target_arch = "riscv64")) => {
             // The instruction fetches observe the stores without help.
             let _ = (ptr, len);
         }
@@ -696,7 +721,7 @@ unsafe fn invalidate_icache(ptr: *const u8, len: usize) {
             // mapped, which the bytes being readable implies.
             unsafe { sys_icache_invalidate(ptr.cast_mut().cast(), len) }
         }
-        any(target_os = "linux", target_os = "android") => {
+        any(target_os = "linux", target_os = "android", all(target_arch = "riscv64", target_os = "openbsd")) => {
             unsafe extern "C" {
                 fn __clear_cache(begin: *mut libc::c_char, end: *mut libc::c_char);
             }
@@ -705,6 +730,9 @@ unsafe fn invalidate_icache(ptr: *const u8, len: usize) {
             // which the bytes being readable implies. `ptr + len` is one past the end of the
             // bytes.
             unsafe { __clear_cache(ptr, ptr.wrapping_add(len)) }
+        }
+        target_arch = "riscv64" => {
+            unreachable!("no executable cache synchronization on this target")
         }
         _ => {
             // The architectural minimum size of a cache line.

@@ -467,7 +467,11 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                     let Some(compiled_program) = executable.get_compiled_program() else {
                         return (0, ProgramResult::Err(EbpfError::JitNotCompiled));
                     };
-                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+                    #[cfg(any(
+                        target_arch = "x86_64",
+                        target_arch = "aarch64",
+                        target_arch = "riscv64"
+                    ))]
                     if compiled_program.parrot {
                         break 'execute compiled_program.parrot_invoke(executable, self);
                     }
@@ -485,11 +489,12 @@ impl<'a, C: ContextObject> EbpfVm<'a, C> {
                 }
 
                 ExecutionMode::ParrotInterpreted => {
-                    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
-                    if !matches!(
-                        executable.get_sbpf_version(),
-                        SBPFVersion::V1 | SBPFVersion::V2
-                    ) {
+                    #[cfg(any(
+                        target_arch = "x86_64",
+                        target_arch = "aarch64",
+                        target_arch = "riscv64"
+                    ))]
+                    if crate::codegen::supports_version(executable.get_sbpf_version()) {
                         crate::codegen::interpret(executable, self);
                         break 'execute;
                     }
