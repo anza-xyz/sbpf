@@ -3,7 +3,11 @@
 #![cfg(all(
     feature = "jit",
     not(target_os = "windows"),
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )
 ))]
 
 // Copyright 2020 Solana Maintainers <maintainers@solana.com>
@@ -1716,6 +1720,37 @@ fn test_ja() {
         TestContextObject::new(4),
         ProgramResult::Ok(0x1),
     );
+}
+
+#[test]
+fn test_distant_conditional_branches() {
+    // The intervening JEQ_IMM templates span more than an RV64 JAL's 1 MiB reach.
+    // Take the far path in both directions without executing that padding.
+    let source = "
+        mov64 r0, 0
+        begin:
+        jeq r0, 1, done
+        jeq r0, 0, far
+        done:
+        exit
+        .fill 30000, 0x15
+        far:
+        mov64 r0, 1
+        jne r0, 0, begin
+        exit";
+    for version in [SBPFVersion::V0, SBPFVersion::V3, SBPFVersion::V4] {
+        let config = Config {
+            enabled_sbpf_versions: version..=version,
+            ..Config::default()
+        };
+        test_interpreter_and_jit_asm!(
+            source,
+            config,
+            NO_INPUT,
+            TestContextObject::new(7),
+            ProgramResult::Ok(1),
+        );
+    }
 }
 
 #[test]
@@ -4838,6 +4873,7 @@ fn test_lddw_exceeding_budget() {
             .unwrap();
             executable.verify::<RequisiteVerifier>().unwrap();
             executable.parrot_compile().unwrap();
+            let has_jit = executable.get_compiled_program().is_some();
             for budget in 0..5 {
                 let mut results = Vec::new();
                 for (name, mode) in [
@@ -4860,6 +4896,14 @@ fn test_lddw_exceeding_budget() {
                         vec![CallFrame::default(); Config::default().max_call_depth];
                     let (count, result) =
                         vm.execute_program(&executable, &mut mode, &mut call_frames);
+                    if !has_jit && matches!(mode, ExecutionMode::Jit) {
+                        assert!(!solana_sbpf::codegen::supports_version(sbpf_version));
+                        assert!(matches!(
+                            result,
+                            ProgramResult::Err(EbpfError::JitNotCompiled)
+                        ));
+                        continue;
+                    }
                     results.push((count, format!("{result:?}"), vm.registers[11]));
                     assert_eq!(
                         results[0],
@@ -4920,6 +4964,15 @@ fn test_entrypoint_in_lddw() {
         let mut mode = mode;
         let mut call_frames = vec![CallFrame::default(); Config::default().max_call_depth];
         let (count, result) = vm.execute_program(&executable, &mut mode, &mut call_frames);
+        if matches!(mode, ExecutionMode::Jit)
+            && !solana_sbpf::codegen::supports_version(SBPFVersion::V0)
+        {
+            assert!(matches!(
+                result,
+                ProgramResult::Err(EbpfError::JitNotCompiled)
+            ));
+            continue;
+        }
         results.push((count, format!("{result:?}"), vm.registers[11]));
         assert_eq!(results[0], results[results.len() - 1], "{name}");
     }

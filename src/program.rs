@@ -390,9 +390,17 @@ impl UnsealedJitProgram {
         if used > text_section.len() {
             return Err(EbpfError::ExhaustedTextSegment(used));
         }
+        if !crate::memory_management::CAN_PUBLISH_CODE {
+            return Err(EbpfError::JitNotCompiled);
+        }
         // Debugger traps in the unused tail of the last code page.
         let code_size = round_to_page_size(used, get_system_page_size());
-        text_section[used..code_size].fill(0xcc);
+        let trap_fill = if cfg!(target_arch = "riscv64") {
+            0
+        } else {
+            0xcc
+        };
+        text_section[used..code_size].fill(trap_fill);
         text_section.truncate(used);
         Ok(JitProgram {
             pc_section: pc_section.protect(),
@@ -413,7 +421,11 @@ pub struct JitProgram {
     text_section: Mapping<ReadExecute>,
     /// Whether the code was produced by parrot.
     #[cfg_attr(
-        not(any(target_arch = "x86_64", target_arch = "aarch64")),
+        not(any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64"
+        )),
         expect(dead_code)
     )]
     pub(crate) parrot: bool,
@@ -421,7 +433,11 @@ pub struct JitProgram {
     ///
     /// Keeps the offsets embedded in the machine code unpredictable.
     #[cfg_attr(
-        not(any(target_arch = "x86_64", target_arch = "aarch64")),
+        not(any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64"
+        )),
         expect(dead_code)
     )]
     pub(crate) random_key: u32,

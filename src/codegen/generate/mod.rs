@@ -162,7 +162,10 @@ pub(super) trait Generator {
     fn push_i32(&mut self, value: i32) {
         self.extend(&value.to_le_bytes());
     }
-    #[cfg_attr(not(target_arch = "aarch64"), expect(dead_code))]
+    #[cfg_attr(
+        not(any(target_arch = "aarch64", target_arch = "riscv64")),
+        expect(dead_code)
+    )]
     fn push_u32(&mut self, value: u32) {
         self.extend(&value.to_le_bytes());
     }

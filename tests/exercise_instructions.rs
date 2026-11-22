@@ -3,7 +3,11 @@
 #![cfg(all(
     feature = "jit",
     not(target_os = "windows"),
-    any(target_arch = "x86_64", target_arch = "aarch64")
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64"
+    )
 ))]
 
 // Copyright 2020 Solana Maintainers <maintainers@solana.com>

@@ -412,7 +412,7 @@ macro_rules! test_interpreter_and_jit {
             let $mode = &mut $crate::vm::ExecutionMode::Interpreted;
             $run
         };
-        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64"))]
         for parrot in cfg_select! {
             all(feature = "jit", not(target_os = "windows"), target_arch = "x86_64") => { [false, true] }
             _ => { [true] }
@@ -432,6 +432,13 @@ macro_rules! test_interpreter_and_jit {
             };
             // Parrot falls back to the old JIT for some SBPF versions, which may be unavailable.
             if $executable.get_compiled_program().is_none() {
+                assert!(
+                    parrot && !$crate::codegen::supports_version($executable.get_sbpf_version())
+                        && compilation_result.is_ok(),
+                    "{mode_name} produced no program for {:?}: {:?}",
+                    $executable.get_sbpf_version(),
+                    compilation_result
+                );
                 continue;
             }
             use $crate::memory_region::HostBuffer;
