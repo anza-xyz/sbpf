@@ -16,7 +16,6 @@ use solana_sbpf::{
 
 fuzz_target!(|prog: &[u8]| {
     let config = solana_sbpf::vm::Config {
-        enable_stack_frame_gaps: true,
         enable_symbol_and_section_labels: false,
         sanitize_user_provided_values: false,
         optimize_rodata: false,

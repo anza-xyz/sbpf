@@ -116,8 +116,6 @@ pub struct Config {
     pub max_call_depth: usize,
     /// Size of a stack frame in bytes, must match the size specified in the LLVM BPF backend
     pub stack_frame_size: usize,
-    /// Enables gaps in VM address space between the stack frames
-    pub enable_stack_frame_gaps: bool,
     /// Maximal pc distance after which a new instruction meter validation is emitted by the JIT
     pub instruction_meter_checkpoint_distance: usize,
     /// Enable dynamic string allocation for labels
@@ -155,7 +153,6 @@ impl Default for Config {
         Self {
             max_call_depth: 64,
             stack_frame_size: defaults::get_stack_frame_size(),
-            enable_stack_frame_gaps: true,
             instruction_meter_checkpoint_distance: 1000,
             enable_symbol_and_section_labels: false,
             reject_broken_elfs: false,

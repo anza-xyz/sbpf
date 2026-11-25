@@ -298,15 +298,7 @@ pub fn create_memory_mapping<'a, C: ContextObject>(
     let sbpf_version = executable.get_sbpf_version();
     let regions: Vec<MemoryRegion> = vec![
         executable.get_ro_region(),
-        MemoryRegion::new_gapped(
-            &raw mut *stack.as_slice_mut(),
-            ebpf::MM_STACK_START,
-            if sbpf_version.stack_frame_gaps() && config.enable_stack_frame_gaps {
-                config.stack_frame_size as u64
-            } else {
-                0
-            },
-        ),
+        MemoryRegion::new(&raw mut *stack.as_slice_mut(), ebpf::MM_STACK_START),
         MemoryRegion::new(&raw mut *heap.as_slice_mut(), ebpf::MM_HEAP_START),
     ]
     .into_iter()

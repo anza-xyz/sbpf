@@ -209,10 +209,7 @@ fn test_verifier_resize_stack_ptr_success() {
         exit
         add r10, 64
         exit",
-        Arc::new(BuiltinProgram::new_loader(Config {
-            enable_stack_frame_gaps: false,
-            ..Config::default()
-        })),
+        Arc::new(BuiltinProgram::new_mock()),
     )
     .unwrap();
     executable.verify::<RequisiteVerifier>().unwrap();
