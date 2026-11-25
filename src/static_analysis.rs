@@ -383,7 +383,7 @@ impl<'a> Analysis<'a> {
             let mut instruction_index = 0;
             let mut cfg_node_iter = self.cfg_nodes.iter_mut().peekable();
             let mut cfg_edge_iter = cfg_edges.iter_mut().peekable();
-            while let Some((cfg_node_start, cfg_node)) = cfg_node_iter.next() {
+            while let Some((_cfg_node_start, cfg_node)) = cfg_node_iter.next() {
                 let cfg_node_end = if let Some(next_cfg_node) = cfg_node_iter.peek() {
                     *next_cfg_node.0 - 1
                 } else {
@@ -406,7 +406,7 @@ impl<'a> Analysis<'a> {
                     }
                 }
                 if let Some(next_cfg_node) = cfg_node_iter.peek() {
-                    if !self.functions.contains_key(cfg_node_start) {
+                    if !self.functions.contains_key(next_cfg_node.0) {
                         cfg_node.destinations.push(*next_cfg_node.0);
                     }
                 }

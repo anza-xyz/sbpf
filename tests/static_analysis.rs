@@ -548,3 +548,22 @@ fn internal_calls_are_resolved_without_labels() {
         assert!(asm.contains("call function_2"), "SBPF: {:?}", version);
     }
 }
+
+#[test]
+fn function_start_falls_through_into_next_basic_block() {
+    let exe = executable(
+        &[
+            // entrypoint:
+            insn(ebpf::MOV64_IMM, 1, 0, 0, 3),
+            // lbb_1:
+            insn(ebpf::ADD64_IMM, 1, 0, 0, -1),
+            insn(ebpf::JNE64_IMM, 1, 0, -2, 0),
+            insn(ebpf::EXIT, 0, 0, 0, 0),
+        ],
+        SBPFVersion::V0,
+    );
+    let analysis = Analysis::from_executable(&exe).unwrap();
+
+    assert_eq!(analysis.cfg_nodes[&0].destinations, vec![1]);
+    assert_eq!(analysis.cfg_nodes[&1].sources, vec![0, 1]);
+}
