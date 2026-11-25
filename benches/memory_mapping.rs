@@ -50,52 +50,6 @@ fn bench_prng(c: &mut Criterion) {
     c.bench_function("bench_prng", |b| b.iter(|| prng.gen::<u64>()));
 }
 
-macro_rules! bench_gapped_randomized_access_with_1024_entries {
-    (do_bench, $name:ident, $aligned_memory_mapping:expr) => {
-        fn $name(c: &mut Criterion) {
-            let frame_size: u64 = 2;
-            let frame_count: u64 = 1024;
-            let content = vec![0; (frame_size * frame_count * 2) as usize];
-            let config = Config {
-                aligned_memory_mapping: $aligned_memory_mapping,
-                ..Config::default()
-            };
-            let memory_regions = vec![MemoryRegion::new_gapped(
-                &raw const content[..],
-                0x100000000,
-                frame_size,
-            )];
-            let memory_mapping =
-                unsafe { MemoryMapping::new(memory_regions, &config, SBPFVersion::V3) }.unwrap();
-            let mut prng = new_prng!();
-            c.bench_function(stringify!($name), |b| {
-                b.iter(|| {
-                    assert!(memory_mapping
-                        .map(
-                            AccessType::Load,
-                            0x100000000 + (prng.gen::<u64>() % frame_count * (frame_size * 2)),
-                            1,
-                        )
-                        .is_ok());
-                })
-            });
-        }
-    };
-    () => {
-        bench_gapped_randomized_access_with_1024_entries!(
-            do_bench,
-            bench_gapped_randomized_access_with_1024_entries_aligned,
-            true
-        );
-        bench_gapped_randomized_access_with_1024_entries!(
-            do_bench,
-            bench_gapped_randomized_access_with_1024_entries_unaligned,
-            false
-        );
-    };
-}
-bench_gapped_randomized_access_with_1024_entries!();
-
 macro_rules! bench_randomized_access_with_0001_entry {
     (do_bench, $name:ident, $aligned_memory_mapping:expr) => {
         fn $name(c: &mut Criterion) {
@@ -369,8 +323,6 @@ fn bench_mapping_8_byte_store(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_gapped_randomized_access_with_1024_entries_aligned,
-    bench_gapped_randomized_access_with_1024_entries_unaligned,
     bench_randomized_access_with_0001_entry_aligned,
     bench_randomized_access_with_0001_entry_unaligned,
     bench_randomized_access_with_0004_entries_aligned,

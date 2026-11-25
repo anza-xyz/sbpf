@@ -10,23 +10,6 @@ use crate::{
 use std::fmt::Formatter;
 use std::{array, cell::UnsafeCell, fmt, mem, ops::Range, ptr};
 
-/* Explanation of the Gapped Memory
-
-    The MemoryMapping supports a special mapping mode which is used for the stack MemoryRegion.
-    In this mode the backing address space of the host is sliced in power-of-two aligned frames.
-    The exponent of this alignment is specified in vm_gap_shift. Then the virtual address space
-    of the guest is spread out in a way which leaves gaps, the same size as the frames, in
-    between the frames. This effectively doubles the size of the guests virtual address space.
-    But the actual mapped memory stays the same, as the gaps are not mapped and accessing them
-    results in an AccessViolation.
-
-    Guest: frame 0 | gap 0 | frame 1 | gap 1 | frame 2 | gap 2 | ...
-              |                /                 /
-              |          *----*    *------------*
-              |         /         /
-    Host:  frame 0 | frame 1 | frame 2 | ...
-*/
-
 /// Callback executed before generate_access_violation()
 pub type AccessViolationHandler =
     Box<dyn Fn(&mut dyn ContextObject, &mut MemoryRegion, u64, AccessType, u64, u64)>;
@@ -253,8 +236,6 @@ pub struct MemoryRegion {
     host: HostBuffer,
     /// start virtual address
     vm_addr: u64,
-    /// Size of regular gaps as bit shift (63 means this region is continuous)
-    vm_gap_shift: u8,
     /// User defined payload for the [AccessViolationHandler]
     pub access_violation_handler_payload: Option<u16>,
 }
@@ -263,18 +244,10 @@ impl MemoryRegion {
     /// Create a VM memory region with host `address` pointing to a `len` bytes of data.
     ///
     /// This region will be made available in the guest at `vm_addr`.
-    fn new_internal(host: HostBuffer, vm_addr: u64, vm_gap_size: u64) -> Self {
-        let mut vm_gap_shift = (std::mem::size_of::<u64>() as u8)
-            .saturating_mul(8)
-            .saturating_sub(1);
-        if vm_gap_size > 0 {
-            vm_gap_shift = vm_gap_shift.saturating_sub(vm_gap_size.leading_zeros() as u8);
-            debug_assert_eq!(Some(vm_gap_size), 1_u64.checked_shl(vm_gap_shift as u32));
-        };
+    fn new_internal(host: HostBuffer, vm_addr: u64) -> Self {
         MemoryRegion {
             host,
             vm_addr,
-            vm_gap_shift,
             access_violation_handler_payload: None,
         }
     }
@@ -284,21 +257,14 @@ impl MemoryRegion {
     /// This does not require to provide any backing host memory.
     pub fn new_empty(vm_addr: u64) -> Self {
         const EMPTY: &[u8] = &[];
-        Self::new_internal((&raw const *EMPTY).host(), vm_addr, 0)
+        Self::new_internal((&raw const *EMPTY).host(), vm_addr)
     }
 
     /// Creates a new `MemoryRegion` backed by the provided host memory.
     ///
     /// The backing memory must remain allocated for the duration of the returned `MemoryRegion`.
     pub fn new<HO: HostMemoryObject>(host: HO, vm_addr: u64) -> Self {
-        Self::new_internal(host.host(), vm_addr, 0)
-    }
-
-    /// Creates a new gapped `MemoryRegion` backed by the provided host memory.
-    ///
-    /// The backing memory must remain allocated for the duration of the returned `MemoryRegion`.
-    pub fn new_gapped<HO: HostMemoryObject>(host: HO, vm_addr: u64, vm_gap_size: u64) -> Self {
-        Self::new_internal(host.host(), vm_addr, vm_gap_size)
+        Self::new_internal(host.host(), vm_addr)
     }
 
     /// Redirect this memory region to a different location in host memory.
@@ -334,12 +300,7 @@ impl MemoryRegion {
 
     /// Returns the vm address space covered by this MemoryRegion
     pub fn vm_addr_range(&self) -> Range<u64> {
-        let bytes = self.len() as u64;
-        if self.vm_gap_shift == 63 {
-            self.vm_addr..self.vm_addr.saturating_add(bytes)
-        } else {
-            self.vm_addr..self.vm_addr.saturating_add(bytes.saturating_mul(2))
-        }
+        self.vm_addr..self.vm_addr.saturating_add(self.len() as u64)
     }
 
     /// Return the raw slice to the host memory that this memory region points at.
@@ -359,15 +320,6 @@ impl MemoryRegion {
         self.host.is_empty()
     }
 
-    /// Return the `gap_size` with which the memory region has been constructed.
-    pub fn gap_size(&self) -> u64 {
-        if self.vm_gap_shift == 63 {
-            0
-        } else {
-            1 << self.vm_gap_shift
-        }
-    }
-
     /// Convert a virtual machine address into a host slice.
     ///
     /// The returned slice will have exactly `len` bytes. If the provided `vm_addr` does not
@@ -382,26 +334,8 @@ impl MemoryRegion {
         }
 
         let begin_offset = vm_addr.saturating_sub(self.vm_addr);
-        if self.vm_gap_shift == 63 {
-            // fast path for non-gapped regions
-            if let Some(end_offset) = begin_offset.checked_add(len) {
-                return self.host.get(begin_offset as usize..end_offset as usize);
-            }
-            return None;
-        }
-
-        let is_in_gap = (begin_offset
-            .checked_shr(self.vm_gap_shift as u32)
-            .unwrap_or(0)
-            & 1)
-            == 1;
-        let gap_mask = (-1i64).checked_shl(self.vm_gap_shift as u32).unwrap_or(0) as u64;
-        let gapped_offset =
-            (begin_offset & gap_mask).checked_shr(1).unwrap_or(0) | (begin_offset & !gap_mask);
-        if let Some(end_offset) = gapped_offset.checked_add(len) {
-            if !is_in_gap {
-                return self.host.get(gapped_offset as usize..end_offset as usize);
-            }
+        if let Some(end_offset) = begin_offset.checked_add(len) {
+            return self.host.get(begin_offset as usize..end_offset as usize);
         }
         None
     }
@@ -1252,39 +1186,6 @@ mod test {
                 m.map(AccessType::Load, ebpf::MM_REGION_SIZE, 8),
                 "AccessViolation"
             );
-        }
-    }
-
-    #[test]
-    fn test_gapped_map() {
-        for aligned_memory_mapping in [false, true] {
-            let config = Config {
-                aligned_memory_mapping,
-                ..Config::default()
-            };
-            let mut mem1 = [0xff; 8];
-            let mem2 = [0; 8];
-            let mut m = unsafe {
-                MemoryMapping::new(
-                    vec![
-                        MemoryRegion::new(&raw const mem2[..], ebpf::MM_REGION_SIZE),
-                        MemoryRegion::new_gapped(&raw mut mem1[..], ebpf::MM_REGION_SIZE * 2, 2),
-                    ],
-                    &config,
-                    SBPFVersion::V3,
-                )
-                .unwrap()
-            };
-            for frame in 0..4 {
-                let address = ebpf::MM_STACK_START + frame * 4;
-                assert!(m.find_region(address).is_some());
-                assert!(m.map(AccessType::Load, address, 2).is_ok());
-                assert_error!(m.map(AccessType::Load, address + 2, 2), "AccessViolation");
-                assert_eq!(m.load_first_attempt::<u16>(address).unwrap(), 0xFFFF);
-                assert_eq!(m.load_first_attempt::<u16>(address + 2), None);
-                assert!(m.store_first_attempt::<u16>(0xFFFF, address));
-                assert!(!m.store_first_attempt::<u16>(0xFFFF, address + 2));
-            }
         }
     }
 
