@@ -9,7 +9,7 @@ use solana_sbpf::{
     static_analysis::Analysis,
     test_utils::TestContextObject,
     verifier::RequisiteVerifier,
-    vm::{CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionMode},
+    vm::{CallFrame, Config, DynamicAnalysis, EbpfVm, ExecutionMode, MAX_INSTRUCTION_METER},
 };
 use std::{fs::File, io::Read, path::Path, sync::Arc};
 
@@ -70,7 +70,7 @@ fn main() {
                 .long("lim")
                 .takes_value(true)
                 .value_name("COUNT")
-                .default_value(&i64::MAX.to_string()),
+                .default_value(&MAX_INSTRUCTION_METER.to_string()),
         )
         .arg(
             Arg::new("trace")
