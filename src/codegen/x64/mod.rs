@@ -135,6 +135,16 @@ pub(super) use relocation::{
 pub(super) use supporting_code::interpreter_global;
 use supporting_code::SupportingCode;
 
+/// Declare a function or a function pointer type with the ABI of the host functions that the
+/// generated code calls.
+macro_rules! host_abi {
+    (fn ($($args:tt)*) -> $ret:ty) => { extern "sysv64" fn($($args)*) -> $ret };
+    ($(#[$attr:meta])* $vis:vis fn $($rest:tt)*) => {
+        $(#[$attr])* $vis extern "sysv64" fn $($rest)*
+    };
+}
+pub(super) use host_abi;
+
 /// The interpreter steps are 128 bytes.
 pub(super) const INTERPRETER_STEP_SIZE_LOG2: u8 = 7;
 

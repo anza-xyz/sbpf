@@ -2,9 +2,10 @@
 
 use super::*;
 use crate::codegen::generate::InterpreterGenerator;
+use crate::codegen::host::AccessSize;
 use crate::codegen::templates::AuxTemplate;
 use crate::codegen::SIG_INVALID_INSN;
-use supporting_code::{AccessSize, DivOp, Width};
+use supporting_code::{DivOp, Width};
 
 /// Set the flags for the comparison of the 64 bit operands.
 ///
@@ -83,7 +84,6 @@ fn conditional_branch<G: Generator + ?Sized>(
     // `compare_64` clobbers `RTEMP` for the immediate operand.
     let is_imm = (op & ebpf::BPF_X) != ebpf::BPF_X;
     let is_64 = (op & ebpf::BPF_CLS_MASK) == ebpf::BPF_JMP64;
-    // FIXME: do something about the bool argument here.
     out.bpf_taken_branch(!(is_imm && is_64));
     out.dynamic_label(fallthrough);
 }
