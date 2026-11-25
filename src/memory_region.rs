@@ -327,8 +327,8 @@ impl MemoryRegion {
     #[inline]
     pub(crate) fn vm_to_host_buffer(&self, vm_addr: u64, len: u64) -> Option<HostBuffer> {
         // This can happen if a region starts at an offset from the base region
-        // address, eg with rodata regions if config.optimize_rodata = true, see
-        // Elf::get_ro_region.
+        // address, as `AlignedMemoryMapping::find_region` selects a region by
+        // the upper bits of `vm_addr` alone.
         if vm_addr < self.vm_addr {
             return None;
         }
