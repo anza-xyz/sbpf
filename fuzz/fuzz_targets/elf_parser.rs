@@ -18,7 +18,6 @@ fuzz_target!(|prog: &[u8]| {
     let config = solana_sbpf::vm::Config {
         enable_symbol_and_section_labels: false,
         sanitize_user_provided_values: false,
-        optimize_rodata: false,
         ..solana_sbpf::vm::Config::default()
     };
 

@@ -3498,7 +3498,6 @@ fn test_reloc_64_relative_data_sbpfv0() {
 fn test_load_elf_rodata_sbpfv0() {
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
-        optimize_rodata: false,
         ..Config::default()
     };
     test_interpreter_and_jit_elf!(
@@ -3515,7 +3514,6 @@ fn test_load_elf_rodata_sbpfv0() {
 fn test_load_elf_rodata() {
     let config = Config {
         enabled_sbpf_versions: SBPFVersion::V3..=SBPFVersion::V4,
-        optimize_rodata: false,
         ..Config::default()
     };
     test_interpreter_and_jit_elf!(

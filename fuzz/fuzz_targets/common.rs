@@ -11,7 +11,6 @@ pub struct ConfigTemplate {
     noop_instruction_rate: u32,
     enable_symbol_and_section_labels: bool,
     sanitize_user_provided_values: bool,
-    optimize_rodata: bool,
     pub sbpf_version: SBPFVersion,
     aligned_memory_mapping: bool,
 }
@@ -36,7 +35,6 @@ impl<'a> Arbitrary<'a> for ConfigTemplate {
             noop_instruction_rate: u32::from(u16::arbitrary(u)?),
             enable_symbol_and_section_labels: bools & (1 << 1) != 0,
             sanitize_user_provided_values: bools & (1 << 3) != 0,
-            optimize_rodata: bools & (1 << 9) != 0,
             sbpf_version,
             aligned_memory_mapping: bools & (1 << 10) != 0,
         })
@@ -58,7 +56,6 @@ impl From<ConfigTemplate> for Config {
             noop_instruction_rate,
             enable_symbol_and_section_labels,
             sanitize_user_provided_values,
-            optimize_rodata,
             sbpf_version,
             aligned_memory_mapping,
         } = template;
@@ -68,7 +65,6 @@ impl From<ConfigTemplate> for Config {
             enable_symbol_and_section_labels,
             noop_instruction_rate,
             sanitize_user_provided_values,
-            optimize_rodata,
             aligned_memory_mapping: sbpf_version > SBPFVersion::V3 || aligned_memory_mapping,
             ..Default::default()
         }

@@ -131,8 +131,6 @@ pub struct Config {
     #[cfg(feature = "jit")]
     /// Enable disinfection of immediate values and offsets provided by the user in JIT
     pub sanitize_user_provided_values: bool,
-    /// Avoid copying read only sections when possible
-    pub optimize_rodata: bool,
     /// Use aligned memory mapping
     pub aligned_memory_mapping: bool,
     /// Allowed [SBPFVersion]s
@@ -161,7 +159,6 @@ impl Default for Config {
             noop_instruction_rate: 256,
             #[cfg(feature = "jit")]
             sanitize_user_provided_values: true,
-            optimize_rodata: true,
             aligned_memory_mapping: false,
             enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V4,
             aligned_region_size: ebpf::MM_REGION_SIZE as usize,
