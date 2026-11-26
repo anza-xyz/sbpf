@@ -229,52 +229,25 @@ impl BpfRelocationType {
     }
 }
 
-/// Storage for the read-only section, including text.
 #[derive(Debug, PartialEq)]
-pub enum RoStorage {
-    /// Owned section data.
-    Owned {
-        /// Virtual address of the section.
-        vaddr: usize,
-        /// Section data.
-        data: Vec<u8>,
-    },
-    /// Borrowed section data.
+enum RoStorage {
+    Owned(Vec<u8>),
     Borrowed {
-        /// Virtual address of the section.
-        vaddr: usize,
-        /// The ELF buffer the section data is borrowed from.
+        vaddr: u64,
         elf: AlignedMemory<{ HOST_ALIGN }>,
-        /// Range of the section data in `elf`.
         range: Range<usize>,
     },
 }
 
-impl RoStorage {
-    fn vaddr(&self) -> usize {
-        match self {
-            Self::Owned { vaddr, .. } | Self::Borrowed { vaddr, .. } => *vaddr,
-        }
-    }
-
-    fn bytes(&self) -> &[u8] {
-        match self {
-            Self::Owned { data, .. } => data.as_slice(),
-            Self::Borrowed { elf, range, .. } => &elf.as_slice()[range.clone()],
-        }
-    }
-}
-
 /// Builds an owned read-only section buffer from the supplied section data.
 ///
-/// Section addresses are rebased relative to `lowest_addr`. Gaps and trailing
-/// bytes are zero-filled. Sections are applied in input order, so later
-/// sections overwrite earlier bytes when their ranges overlap.
+/// Section addresses are offsets into the buffer. Gaps and trailing bytes are
+/// zero-filled. Sections are applied in input order, so later sections overwrite
+/// earlier bytes when their ranges overlap.
 ///
 /// All section ranges must fit within `buf_len`.
 fn build_owned_ro_section<'a>(
     buf_len: usize,
-    lowest_addr: usize,
     ro_slices: impl IntoIterator<Item = (usize, &'a [u8])>,
 ) -> Vec<u8> {
     // Avoid `vec![0; buf_len]` because it uses jemalloc `calloc`/zeroed allocation,
@@ -284,8 +257,7 @@ fn build_owned_ro_section<'a>(
     // allowing jemalloc to reuse warm dirty extents.
     let mut ro_section = Vec::<u8>::with_capacity(buf_len);
 
-    for (section_addr, section_data) in ro_slices {
-        let buf_offset_start = section_addr.saturating_sub(lowest_addr);
+    for (buf_offset_start, section_data) in ro_slices {
         let buf_offset_end = buf_offset_start.saturating_add(section_data.len());
         debug_assert!(buf_offset_end <= buf_len);
 
@@ -362,10 +334,8 @@ impl<C: ContextObject> Executable<C> {
     pub fn get_text_bytes(&self) -> (u64, &[u8]) {
         let text_len = self.text_section_range.len();
         let text_bytes = match &self.ro_storage {
-            // Use the owned data to ensure the text section
-            // is consistent with the ro_section if the sections overlap.
-            RoStorage::Owned { vaddr, data } => {
-                let text_offset = self.text_section_vaddr as usize - vaddr;
+            RoStorage::Owned(data) => {
+                let text_offset = (self.text_section_vaddr - ebpf::MM_REGION_SIZE) as usize;
                 &data[text_offset..text_offset + text_len]
             }
             RoStorage::Borrowed { elf, .. } => &elf.as_slice()[self.text_section_range.clone()],
@@ -376,12 +346,19 @@ impl<C: ContextObject> Executable<C> {
 
     /// Get the concatenated read-only sections (including the text section)
     pub fn get_ro_section(&self) -> &[u8] {
-        self.ro_storage.bytes()
+        match &self.ro_storage {
+            RoStorage::Owned(data) => data,
+            RoStorage::Borrowed { elf, range, .. } => &elf.as_slice()[range.clone()],
+        }
     }
 
     /// Get a memory region that can be used to access the merged readonly section
     pub fn get_ro_region(&self) -> MemoryRegion {
-        get_ro_region(&self.ro_storage)
+        let vaddr = match &self.ro_storage {
+            RoStorage::Owned(_) => ebpf::MM_REGION_SIZE,
+            RoStorage::Borrowed { vaddr, .. } => *vaddr,
+        };
+        MemoryRegion::new(&raw const *self.get_ro_section(), vaddr)
     }
 
     /// Get the entry point offset into the text section
@@ -454,7 +431,6 @@ impl<C: ContextObject> Executable<C> {
         sbpf_version: SBPFVersion,
         mut function_registry: FunctionRegistry<usize>,
     ) -> Result<Self, ElfError> {
-        let elf_bytes = AlignedMemory::from_slice(text_bytes);
         let entry_pc = if let Some((_name, pc)) = function_registry.lookup_by_name(b"entrypoint") {
             pc
         } else {
@@ -473,8 +449,8 @@ impl<C: ContextObject> Executable<C> {
                     ebpf::MM_RODATA_START
                 } else {
                     ebpf::MM_BYTECODE_START
-                } as usize,
-                elf: elf_bytes,
+                },
+                elf: AlignedMemory::from_slice(text_bytes),
                 range: 0..text_bytes.len(),
             },
             text_section_vaddr: ebpf::MM_BYTECODE_START,
@@ -630,7 +606,7 @@ impl<C: ContextObject> Executable<C> {
         Ok(Self {
             sbpf_version: SBPFVersion::Reserved, // Is set in Self::load()
             ro_storage: RoStorage::Borrowed {
-                vaddr: ebpf::MM_RODATA_START as usize,
+                vaddr: ebpf::MM_RODATA_START,
                 elf: aligned_memory,
                 range: ro_section_range,
             },
@@ -729,7 +705,7 @@ impl<C: ContextObject> Executable<C> {
         bytes: &[u8],
         loader: Arc<BuiltinProgram<C>>,
     ) -> Result<Self, ElfError> {
-        // We always need one memory copy to take ownership and for relocations
+        // We always need one memory copy for relocations
         let aligned_memory = AlignedMemory::<{ HOST_ALIGN }>::from_slice(bytes);
         let (mut elf_bytes, unrelocated_elf_bytes) =
             if is_memory_aligned(bytes.as_ptr() as usize, HOST_ALIGN) {
@@ -781,28 +757,17 @@ impl<C: ContextObject> Executable<C> {
             return Err(ElfError::InvalidEntrypoint);
         };
 
-        let ro_storage = Self::parse_ro_sections(
+        let ro_section = Self::parse_ro_sections(
             config,
             elf.section_header_table()
                 .iter()
                 .map(|s| (elf.section_name(s.sh_name).ok(), s)),
-            elf_bytes,
+            elf_bytes.as_slice(),
         )?;
-        let ro_section_vaddr = ro_storage.vaddr() as u64;
-        if config.optimize_rodata {
-            let ro_section_index = ro_section_vaddr
-                .checked_shr(ebpf::VIRTUAL_ADDRESS_BITS as u32)
-                .unwrap_or(0);
-            if ro_section_index != 1 {
-                return Err(ElfError::ValueOutOfBounds);
-            }
-        } else {
-            debug_assert_eq!(ro_section_vaddr, ebpf::MM_REGION_SIZE);
-        }
 
         Ok(Self {
             sbpf_version: SBPFVersion::Reserved, // Is set in Self::load()
-            ro_storage,
+            ro_storage: RoStorage::Owned(ro_section),
             text_section_vaddr,
             text_section_range: text_section.file_range().unwrap_or_default(),
             entry_pc,
@@ -820,7 +785,7 @@ impl<C: ContextObject> Executable<C> {
         total = total
             // ro section
             .saturating_add(match &self.ro_storage {
-                RoStorage::Owned { data, .. } => data.capacity(),
+                RoStorage::Owned(data) => data.capacity(),
                 RoStorage::Borrowed { elf, .. } => elf.mem_size(),
             })
             // bpf functions
@@ -901,27 +866,22 @@ impl<C: ContextObject> Executable<C> {
     }
 
     /// Parses and concatenates the readonly data sections
+    ///
+    /// The returned buffer starts at virtual address [`ebpf::MM_REGION_SIZE`].
     pub fn parse_ro_sections<'a, S: IntoIterator<Item = (Option<&'a [u8]>, &'a Elf64Shdr)>>(
         config: &Config,
         sections: S,
-        elf_bytes: AlignedMemory<{ HOST_ALIGN }>,
-    ) -> Result<RoStorage, ElfError> {
+        elf_bytes: &[u8],
+    ) -> Result<Vec<u8>, ElfError> {
         // the lowest section address
         let mut lowest_addr = usize::MAX;
         // the highest section address
         let mut highest_addr = 0;
         // the aggregated section length, not including gaps between sections
         let mut ro_fill_length = 0usize;
-        let mut invalid_offsets = false;
-
-        // keep track of where ro sections are so we can tell whether they're
-        // contiguous
-        let mut first_ro_section = 0;
-        let mut last_ro_section = 0;
-        let mut n_ro_sections = 0usize;
 
         let mut ro_slices = vec![];
-        for (i, (name, section_header)) in sections.into_iter().enumerate() {
+        for (name, section_header) in sections {
             match name {
                 Some(name)
                     if name == b".text"
@@ -931,27 +891,15 @@ impl<C: ContextObject> Executable<C> {
                 _ => continue,
             }
 
-            if n_ro_sections == 0 {
-                first_ro_section = i;
-            }
-            last_ro_section = i;
-            n_ro_sections = n_ro_sections.saturating_add(1);
-
             let section_addr = section_header.sh_addr;
-
-            // sh_offset handling:
-            // section_addr must match sh_offset
-            if !invalid_offsets && section_addr != section_header.sh_offset {
-                invalid_offsets = true;
-            }
-
             let vaddr_end = section_addr.saturating_add(ebpf::MM_REGION_SIZE);
-            if (config.reject_broken_elfs && invalid_offsets) || vaddr_end > ebpf::MM_STACK_START {
+            if (config.reject_broken_elfs && section_addr != section_header.sh_offset)
+                || vaddr_end > ebpf::MM_STACK_START
+            {
                 return Err(ElfError::ValueOutOfBounds);
             }
 
             let section_data = elf_bytes
-                .as_slice()
                 .get(section_header.file_range().unwrap_or_default())
                 .ok_or(ElfError::ValueOutOfBounds)?;
 
@@ -971,66 +919,13 @@ impl<C: ContextObject> Executable<C> {
             return Err(ElfError::ValueOutOfBounds);
         }
 
-        let can_borrow = !invalid_offsets
-            && last_ro_section
-                .saturating_add(1)
-                .saturating_sub(first_ro_section)
-                == n_ro_sections;
-        let ro_section = if config.optimize_rodata && can_borrow {
-            // Read only sections are grouped together with no intermixed non-ro
-            // sections. We can borrow.
-
-            let addr_offset = if lowest_addr >= ebpf::MM_REGION_SIZE as usize {
-                // The vaddr of RoStorage::Borrowed is an offset from
-                // ebpf::MM_REGION_SIZE * 1 so if the linker has already put the
-                // sections within ebpf::MM_REGION_SIZE * 1, we need to subtract
-                // it now.
-                lowest_addr
-            } else {
-                lowest_addr.saturating_add(ebpf::MM_REGION_SIZE as usize)
-            };
-
-            RoStorage::Borrowed {
-                vaddr: addr_offset,
-                elf: elf_bytes,
-                range: lowest_addr..highest_addr,
-            }
-        } else {
-            // Read only and other non-ro sections are mixed. Zero the non-ro
-            // sections and and copy the ro ones at their intended offsets.
-
-            if config.optimize_rodata {
-                // The rodata region starts at MM_REGION_SIZE * 1 + offset,
-                // [MM_REGION_SIZE * 1, MM_REGION_SIZE * 1 + offset) is not
-                // mappable. We only need to allocate highest_addr - lowest_addr
-                // bytes.
-                highest_addr = highest_addr.saturating_sub(lowest_addr);
-            } else {
-                // For backwards compatibility, the whole [MM_REGION_SIZE * 1,
-                // MM_REGION_SIZE * 1 + highest_addr) range is mappable. We need
-                // to allocate the whole address range.
-                lowest_addr = 0;
-            };
-
-            let buf_len = highest_addr;
-            if buf_len > elf_bytes.len() {
-                return Err(ElfError::ValueOutOfBounds);
-            }
-
-            let ro_section = build_owned_ro_section(buf_len, lowest_addr, ro_slices);
-
-            let addr_offset = if lowest_addr >= ebpf::MM_REGION_SIZE as usize {
-                lowest_addr
-            } else {
-                lowest_addr.saturating_add(ebpf::MM_REGION_SIZE as usize)
-            };
-            RoStorage::Owned {
-                vaddr: addr_offset,
-                data: ro_section,
-            }
-        };
-
-        Ok(ro_section)
+        // For backwards compatibility, the whole [MM_REGION_SIZE * 1,
+        // MM_REGION_SIZE * 1 + highest_addr) range is mappable. We need
+        // to allocate the whole address range.
+        if highest_addr > elf_bytes.len() {
+            return Err(ElfError::ValueOutOfBounds);
+        }
+        Ok(build_owned_ro_section(highest_addr, ro_slices))
     }
 
     /// Relocates the ELF in-place
@@ -1338,17 +1233,6 @@ pub fn get_sbpf_version(elf_bytes: &[u8]) -> Result<SBPFVersion, ElfParserError>
     })
 }
 
-/// Creates a [MemoryRegion] for the given [RoStorage]
-pub fn get_ro_region(ro_storage: &RoStorage) -> MemoryRegion {
-    let offset = ro_storage.vaddr();
-    let ro_data = ro_storage.bytes();
-
-    // If offset > 0, the region will start at ebpf::MM_REGION_SIZE * 1 + the offset of
-    // the first read only byte. [ebpf::MM_REGION_SIZE * 1, ebpf::MM_REGION_SIZE * 1 + offset)
-    // will be unmappable, see MemoryRegion::vm_to_host.
-    MemoryRegion::new(&raw const *ro_data, offset as u64)
-}
-
 #[cfg(test)]
 mod tests {
     use super::build_owned_ro_section;
@@ -1356,7 +1240,6 @@ mod tests {
     struct TestCase {
         name: &'static str,
         buf_len: usize,
-        lowest_addr: usize,
         ro_slices: &'static [(usize, &'static [u8])],
         expected: &'static [u8],
     }
@@ -1367,49 +1250,42 @@ mod tests {
             TestCase {
                 name: "empty",
                 buf_len: 4,
-                lowest_addr: 0,
                 ro_slices: &[],
                 expected: &[0; 4],
             },
             TestCase {
                 name: "ordered contiguous",
                 buf_len: 6,
-                lowest_addr: 100,
-                ro_slices: &[(100, &[1, 2]), (102, &[3, 4]), (104, &[5, 6])],
+                ro_slices: &[(0, &[1, 2]), (2, &[3, 4]), (4, &[5, 6])],
                 expected: &[1, 2, 3, 4, 5, 6],
             },
             TestCase {
                 name: "ordered with gaps",
                 buf_len: 10,
-                lowest_addr: 0,
                 ro_slices: &[(2, &[1, 2]), (6, &[3, 4])],
                 expected: &[0, 0, 1, 2, 0, 0, 3, 4, 0, 0],
             },
             TestCase {
                 name: "contained overlap",
                 buf_len: 6,
-                lowest_addr: 0,
                 ro_slices: &[(0, &[1, 2, 3, 4, 5]), (1, &[9, 8])],
                 expected: &[1, 9, 8, 4, 5, 0],
             },
             TestCase {
                 name: "extending overlap",
                 buf_len: 6,
-                lowest_addr: 0,
                 ro_slices: &[(0, &[1, 2, 3]), (2, &[9, 8, 7])],
                 expected: &[1, 2, 9, 8, 7, 0],
             },
             TestCase {
                 name: "reversed disjoint",
                 buf_len: 6,
-                lowest_addr: 0,
                 ro_slices: &[(4, &[5, 6]), (2, &[3, 4]), (0, &[1, 2])],
                 expected: &[1, 2, 3, 4, 5, 6],
             },
             TestCase {
                 name: "overlaps preserve input order",
                 buf_len: 6,
-                lowest_addr: 0,
                 ro_slices: &[(2, &[3, 3, 3, 3]), (0, &[1, 1, 1, 1]), (3, &[9, 9, 9])],
                 expected: &[1, 1, 1, 9, 9, 9],
             },
@@ -1418,12 +1294,11 @@ mod tests {
         for TestCase {
             name,
             buf_len,
-            lowest_addr,
             ro_slices,
             expected,
         } in test_cases
         {
-            let actual = build_owned_ro_section(buf_len, lowest_addr, ro_slices.iter().copied());
+            let actual = build_owned_ro_section(buf_len, ro_slices.iter().copied());
             assert_eq!(actual.as_slice(), expected, "{name}",);
         }
     }

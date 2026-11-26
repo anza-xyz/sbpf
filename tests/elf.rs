@@ -2,15 +2,14 @@
 
 use byteorder::{ByteOrder, LittleEndian};
 use solana_sbpf::{
-    aligned_memory::AlignedMemory,
     assert_error, ebpf,
-    elf::{get_ro_region, ElfError, Executable, RoStorage},
+    elf::{ElfError, Executable},
     elf_parser::{
         consts::{ELFCLASS32, ELFCLASS64, ELFDATA2LSB, ELFDATA2MSB, ELFOSABI_NONE, EM_BPF, ET_REL},
         types::{Elf64Ehdr, Elf64Phdr, Elf64Shdr},
         Elf64, ElfParserError, DEBUG_SYMBOL_NAME_LENGTH_MAXIMUM, SECTION_NAME_LENGTH_MAXIMUM,
     },
-    memory_region::{AccessType, MemoryMapping},
+    memory_region::{AccessType, MemoryMapping, MemoryRegion},
     program::{BuiltinFunctionDefinition, BuiltinProgram, SBPFVersion},
     test_syscalls,
     test_utils::TestContextObject,
@@ -318,7 +317,7 @@ fn new_section(sh_addr: u64, sh_size: u64) -> Elf64Shdr {
 #[test]
 fn test_owned_ro_sections_not_contiguous() {
     let config = Config::default();
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
+    let elf_bytes: [u8; 512] = std::array::from_fn(|i| i as u8);
 
     // there's a non-rodata section between two rodata sections
     let s1 = new_section(10, 10);
@@ -330,14 +329,16 @@ fn test_owned_ro_sections_not_contiguous() {
         (Some(b".dynamic"), &s2),
         (Some(b".rodata"), &s3),
     ];
-    assert!(matches!(
-        ElfExecutable::parse_ro_sections(
-            &config,
-            sections,
-            elf_bytes,
-        ),
-        Ok(RoStorage::Owned { vaddr, data }) if vaddr == ebpf::MM_REGION_SIZE as usize + 10 && data.len() == 30
-    ));
+    assert_eq!(
+        ElfExecutable::parse_ro_sections(&config, sections, &elf_bytes),
+        Ok([
+            &[0; 10][..],
+            &elf_bytes[10..20],
+            &[0; 10],
+            &elf_bytes[30..40]
+        ]
+        .concat())
+    );
 }
 
 #[test]
@@ -346,24 +347,18 @@ fn test_owned_ro_sections_with_sh_offset() {
         reject_broken_elfs: false,
         ..Config::default()
     };
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
+    let elf_bytes: [u8; 512] = std::array::from_fn(|i| i as u8);
 
-    // s2 is at a custom sh_offset. We need to merge into an owned buffer so
-    // s2 can be moved to the right address offset.
     let s1 = new_section(10, 10);
     let mut s2 = new_section(20, 10);
     s2.sh_offset = 30;
 
     let sections: [(Option<&[u8]>, &Elf64Shdr); 2] =
         [(Some(b".text"), &s1), (Some(b".rodata"), &s2)];
-    assert!(matches!(
-        ElfExecutable::parse_ro_sections(
-            &config,
-            sections,
-            elf_bytes,
-        ),
-        Ok(RoStorage::Owned { vaddr, data }) if vaddr == ebpf::MM_REGION_SIZE as usize + 10 && data.len() == 20
-    ));
+    assert_eq!(
+        ElfExecutable::parse_ro_sections(&config, sections, &elf_bytes),
+        Ok([&[0; 10][..], &elf_bytes[10..20], &elf_bytes[30..40]].concat())
+    );
 }
 
 #[test]
@@ -373,19 +368,19 @@ fn test_sh_offset_not_same_as_vaddr() {
         enabled_sbpf_versions: SBPFVersion::V0..=SBPFVersion::V0,
         ..Config::default()
     };
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
+    let elf_bytes = [0u8; 512];
 
     let mut s1 = new_section(10, 10);
 
     {
         let sections: [(Option<&[u8]>, &Elf64Shdr); 1] = [(Some(b".text"), &s1)];
-        assert!(ElfExecutable::parse_ro_sections(&config, sections, elf_bytes.clone()).is_ok());
+        assert!(ElfExecutable::parse_ro_sections(&config, sections, &elf_bytes).is_ok());
     }
 
     s1.sh_offset = 0;
     let sections: [(Option<&[u8]>, &Elf64Shdr); 1] = [(Some(b".text"), &s1)];
     assert_eq!(
-        ElfExecutable::parse_ro_sections(&config, sections, elf_bytes),
+        ElfExecutable::parse_ro_sections(&config, sections, &elf_bytes),
         Err(ElfError::ValueOutOfBounds)
     );
 }
@@ -393,7 +388,7 @@ fn test_sh_offset_not_same_as_vaddr() {
 #[test]
 fn test_owned_ro_region_no_initial_gap() {
     let config = Config::default();
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
+    let elf_bytes = [0u8; 512];
 
     // need an owned buffer so we can zero the address space taken by s2
     let s1 = new_section(0, 10);
@@ -405,14 +400,10 @@ fn test_owned_ro_region_no_initial_gap() {
         (Some(b".dynamic"), &s2),
         (Some(b".rodata"), &s3),
     ];
-    let ro_section = ElfExecutable::parse_ro_sections(&config, sections, elf_bytes).unwrap();
-    let ro_region = get_ro_region(&ro_section);
+    let ro_section = ElfExecutable::parse_ro_sections(&config, sections, &elf_bytes).unwrap();
+    let ro_region = MemoryRegion::new(&raw const ro_section[..], ebpf::MM_REGION_SIZE);
     let memory_mapping =
         unsafe { MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0) }.unwrap();
-    let owned_section = match &ro_section {
-        RoStorage::Owned { data, .. } => data.as_slice(),
-        _ => panic!(),
-    };
 
     // [0..s3.sh_addr + s3.sh_size] is the valid ro memory area
     assert_eq!(
@@ -425,7 +416,7 @@ fn test_owned_ro_region_no_initial_gap() {
             .unwrap()
             .ptr()
             .addr(),
-        owned_section.as_ptr().addr(),
+        ro_section.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -440,11 +431,8 @@ fn test_owned_ro_region_no_initial_gap() {
 
 #[test]
 fn test_owned_ro_region_initial_gap_mappable() {
-    let config = Config {
-        optimize_rodata: false,
-        ..Config::default()
-    };
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
+    let config = Config::default();
+    let elf_bytes = [0u8; 512];
 
     // the first section starts at a non-zero offset
     let s1 = new_section(10, 10);
@@ -456,19 +444,13 @@ fn test_owned_ro_region_initial_gap_mappable() {
         (Some(b".dynamic"), &s2),
         (Some(b".rodata"), &s3),
     ];
-    // V2 requires optimize_rodata=true
-    let ro_section = ElfExecutable::parse_ro_sections(&config, sections, elf_bytes).unwrap();
-    let ro_region = get_ro_region(&ro_section);
+    let ro_section = ElfExecutable::parse_ro_sections(&config, sections, &elf_bytes).unwrap();
+    let ro_region = MemoryRegion::new(&raw const ro_section[..], ebpf::MM_REGION_SIZE);
     let memory_mapping =
         unsafe { MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap() };
-    let owned_section = match &ro_section {
-        RoStorage::Owned { data, .. } => data.as_slice(),
-        _ => panic!(),
-    };
 
     // [s1.sh_addr..s3.sh_addr + s3.sh_size] is where the readonly data is.
-    // But for backwards compatibility (config.optimize_rodata=false)
-    // [0..s1.sh_addr] is mappable too (and zeroed).
+    // But for backwards compatibility [0..s1.sh_addr] is mappable too (and zeroed).
     assert_eq!(
         memory_mapping
             .map(
@@ -479,7 +461,7 @@ fn test_owned_ro_region_initial_gap_mappable() {
             .unwrap()
             .ptr()
             .addr(),
-        owned_section.as_ptr().addr(),
+        ro_section.as_ptr().addr(),
     );
 
     // one byte past the ro section is not mappable
@@ -487,228 +469,6 @@ fn test_owned_ro_region_initial_gap_mappable() {
         .map(
             AccessType::Load,
             ebpf::MM_REGION_SIZE + s3.sh_addr + s3.sh_size,
-            1,
-        )
-        .unwrap_err();
-}
-
-#[test]
-fn test_owned_ro_region_initial_gap_map_error() {
-    let config = Config::default();
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
-
-    // the first section starts at a non-zero offset
-    let s1 = new_section(10, 10);
-    let s2 = new_section(20, 10);
-    let s3 = new_section(30, 10);
-
-    let sections: [(Option<&[u8]>, &Elf64Shdr); 3] = [
-        (Some(b".text"), &s1),
-        (Some(b".dynamic"), &s2),
-        (Some(b".rodata"), &s3),
-    ];
-    let ro_section = ElfExecutable::parse_ro_sections(&config, sections, elf_bytes).unwrap();
-    let owned_section = match &ro_section {
-        RoStorage::Owned { data, .. } => data.as_slice(),
-        _ => panic!(),
-    };
-    let ro_region = get_ro_region(&ro_section);
-    let memory_mapping =
-        unsafe { MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap() };
-
-    // s1 starts at sh_addr=10 so [MM_REGION_SIZE..MM_REGION_SIZE + 10] is not mappable
-
-    // the low bound of the initial gap is not mappable
-    memory_mapping
-        .map(AccessType::Load, ebpf::MM_REGION_SIZE, 1)
-        .unwrap_err();
-
-    // the hi bound of the initial gap is not mappable
-    memory_mapping
-        .map(AccessType::Load, ebpf::MM_REGION_SIZE + s1.sh_addr - 1, 1)
-        .unwrap_err();
-
-    // [s1.sh_addr..s3.sh_addr + s3.sh_size] is the valid ro memory area
-    assert_eq!(
-        memory_mapping
-            .map(
-                AccessType::Load,
-                ebpf::MM_REGION_SIZE + s1.sh_addr,
-                s3.sh_addr + s3.sh_size - s1.sh_addr
-            )
-            .unwrap()
-            .ptr()
-            .addr(),
-        owned_section.as_ptr().addr(),
-    );
-
-    // one byte past the ro section is not mappable
-    memory_mapping
-        .map(
-            AccessType::Load,
-            ebpf::MM_REGION_SIZE + s3.sh_addr + s3.sh_size,
-            1,
-        )
-        .unwrap_err();
-}
-
-#[test]
-fn test_mem_size_with_owned_ro_section() {
-    let elf_bytes =
-        std::fs::read("tests/elfs/large_rodata_sbpfv0.so").expect("failed to read elf file");
-    let loader = Arc::new(BuiltinProgram::new_loader(Config {
-        optimize_rodata: false,
-        ..Config::default()
-    }));
-    let executable = ElfExecutable::load(&elf_bytes, loader).expect("validation failed");
-
-    // Owning the ro section replaces the ELF, so mem_size() cannot cover both
-    assert!(executable.mem_size() < elf_bytes.len() + executable.get_ro_section().len());
-}
-
-#[test]
-fn test_borrowed_ro_sections_disabled() {
-    let config = Config {
-        optimize_rodata: false,
-        ..Config::default()
-    };
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
-
-    // s1 and s2 are contiguous, the rodata section can be borrowed from the
-    // original elf input but config.borrow_rodata=false
-    let s1 = new_section(0, 10);
-    let s2 = new_section(10, 10);
-
-    let sections: [(Option<&[u8]>, &Elf64Shdr); 2] =
-        [(Some(b".text"), &s1), (Some(b".rodata"), &s2)];
-    assert!(matches!(
-        ElfExecutable::parse_ro_sections(
-            &config,
-            sections,
-            elf_bytes,
-        ),
-        Ok(RoStorage::Owned { vaddr, data }) if vaddr == ebpf::MM_REGION_SIZE as usize && data.len() == 20
-    ));
-}
-
-#[test]
-fn test_borrowed_ro_sections() {
-    let config = Config::default();
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
-    let s1 = new_section(0, 10);
-    let s2 = new_section(20, 10);
-    let s3 = new_section(40, 10);
-    let s4 = new_section(50, 10);
-    let sections: [(Option<&[u8]>, &Elf64Shdr); 4] = [
-        (Some(b".dynsym"), &s1),
-        (Some(b".text"), &s2),
-        (Some(b".rodata"), &s3),
-        (Some(b".dynamic"), &s4),
-    ];
-    assert_eq!(
-        ElfExecutable::parse_ro_sections(&config, sections, elf_bytes.clone()),
-        Ok(RoStorage::Borrowed {
-            vaddr: ebpf::MM_REGION_SIZE as usize + 20,
-            elf: elf_bytes,
-            range: 20..50,
-        })
-    );
-}
-
-#[test]
-fn test_borrowed_ro_region_no_initial_gap() {
-    let config = Config::default();
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
-    let s1 = new_section(0, 10);
-    let s2 = new_section(10, 10);
-    let s3 = new_section(20, 10);
-    let sections: [(Option<&[u8]>, &Elf64Shdr); 3] = [
-        (Some(b".text"), &s1),
-        (Some(b".rodata"), &s2),
-        (Some(b".dynamic"), &s3),
-    ];
-    let ro_section = ElfExecutable::parse_ro_sections(&config, sections, elf_bytes).unwrap();
-    let ro_region = get_ro_region(&ro_section);
-    let memory_mapping =
-        unsafe { MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap() };
-    let elf_bytes = match &ro_section {
-        RoStorage::Borrowed { elf, .. } => elf.as_slice(),
-        _ => panic!(),
-    };
-
-    // s1 starts at sh_offset=0 so [0..s2.sh_offset + s2.sh_size]
-    // is the valid ro memory area
-    assert_eq!(
-        memory_mapping
-            .map(
-                AccessType::Load,
-                ebpf::MM_REGION_SIZE + s1.sh_offset,
-                s2.sh_offset + s2.sh_size
-            )
-            .unwrap()
-            .ptr()
-            .addr(),
-        elf_bytes.as_ptr().addr(),
-    );
-
-    // one byte past the ro section is not mappable
-    memory_mapping
-        .map(AccessType::Load, ebpf::MM_REGION_SIZE + s3.sh_offset, 1)
-        .unwrap_err();
-}
-
-#[test]
-fn test_borrowed_ro_region_initial_gap() {
-    let config = Config::default();
-    let elf_bytes = AlignedMemory::from_slice(&[0u8; 512]);
-    let s1 = new_section(0, 10);
-    let s2 = new_section(10, 10);
-    let s3 = new_section(20, 10);
-    let sections: [(Option<&[u8]>, &Elf64Shdr); 3] = [
-        (Some(b".dynamic"), &s1),
-        (Some(b".text"), &s2),
-        (Some(b".rodata"), &s3),
-    ];
-    let ro_section = ElfExecutable::parse_ro_sections(&config, sections, elf_bytes).unwrap();
-    let ro_region = get_ro_region(&ro_section);
-    let memory_mapping =
-        unsafe { MemoryMapping::new(vec![ro_region], &config, SBPFVersion::V0).unwrap() };
-    let elf_bytes = match &ro_section {
-        RoStorage::Borrowed { elf, .. } => elf.as_slice(),
-        _ => panic!(),
-    };
-
-    // s2 starts at sh_addr=10 so [0..10] is not mappable
-
-    // the low bound of the initial gap is not mappable
-    memory_mapping
-        .map(AccessType::Load, ebpf::MM_REGION_SIZE + s1.sh_offset, 1)
-        .unwrap_err();
-
-    // the hi bound of the initial gap is not mappable
-    memory_mapping
-        .map(AccessType::Load, ebpf::MM_REGION_SIZE + s2.sh_offset - 1, 1)
-        .unwrap_err();
-
-    // [s2.sh_offset..s3.sh_offset + s3.sh_size] is the valid ro memory area
-    assert_eq!(
-        memory_mapping
-            .map(
-                AccessType::Load,
-                ebpf::MM_REGION_SIZE + s2.sh_offset,
-                s3.sh_offset + s3.sh_size - s2.sh_offset
-            )
-            .unwrap()
-            .ptr()
-            .addr(),
-        elf_bytes[s2.sh_offset as usize..].as_ptr().addr(),
-    );
-
-    // one byte past the ro section is not mappable
-    memory_mapping
-        .map(
-            AccessType::Load,
-            ebpf::MM_REGION_SIZE + s3.sh_offset + s3.sh_size,
             1,
         )
         .unwrap_err();
